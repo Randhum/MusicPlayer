@@ -11,7 +11,10 @@ class AudioPlayer:
     """GStreamer-based audio player."""
     
     def __init__(self):
-        Gst.init(None)
+        # GStreamer should be initialized in main() before creating the app
+        # Only initialize if not already done
+        if not Gst.is_initialized():
+            Gst.init(None)
         self.pipeline: Optional[Gst.Pipeline] = None
         self.current_track: Optional[TrackMetadata] = None
         self.volume: float = 1.0
