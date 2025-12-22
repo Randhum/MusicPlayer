@@ -29,7 +29,7 @@ class AudioDecoder:
                 continue
         return None
     
-    def decode_file(self, file_path: str, sample_rate: int = 44100, channels: int = 2) -> Optional[bytes]:
+    def decode_file(self, file_path: str, sample_rate: int = 44100, channels: int = 2, bit_depth: int = 24) -> Optional[bytes]:
         """
         Decode an audio file to PCM format using ffmpeg.
         
@@ -37,21 +37,30 @@ class AudioDecoder:
             file_path: Path to the audio file
             sample_rate: Target sample rate (default 44100 Hz)
             channels: Number of channels (1=mono, 2=stereo, default 2)
+            bit_depth: Bit depth (16 or 24, default 24 for professional quality)
         
         Returns:
-            PCM audio data as bytes (16-bit signed little-endian), or None on error
+            PCM audio data as bytes (signed little-endian), or None on error
         """
         try:
+            # Select PCM format based on bit depth
+            if bit_depth == 24:
+                pcm_format = 's24le'  # 24-bit signed little-endian PCM
+            elif bit_depth == 32:
+                pcm_format = 's32le'  # 32-bit signed little-endian PCM
+            else:
+                pcm_format = 's16le'  # 16-bit signed little-endian PCM (default fallback)
+            
             # Build ffmpeg command
             # -i: input file
-            # -f s16le: 16-bit signed little-endian PCM format
+            # -f: PCM format (s16le, s24le, or s32le)
             # -ar: sample rate
             # -ac: number of channels
             # -: output to stdout
             cmd = [
                 self.ffmpeg_path,
                 '-i', file_path,
-                '-f', 's16le',  # 16-bit signed little-endian PCM
+                '-f', pcm_format,
                 '-ar', str(sample_rate),
                 '-ac', str(channels),
                 '-'  # Output to stdout
@@ -183,9 +192,13 @@ class AudioDecoder:
             print(f"Error getting audio info via ffmpeg: {e}")
             return None
     
-    def decode_to_pcm(self, file_path: str) -> Optional[Tuple[bytes, int, int]]:
+    def decode_to_pcm(self, file_path: str, bit_depth: int = 24) -> Optional[Tuple[bytes, int, int]]:
         """
         Decode file to PCM with automatic format detection.
+        
+        Args:
+            file_path: Path to the audio file
+            bit_depth: Bit depth (16 or 24, default 24 for professional quality)
         
         Returns:
             Tuple of (pcm_data, sample_rate, channels) or None on error
@@ -200,8 +213,8 @@ class AudioDecoder:
             else:
                 sample_rate, channels, _ = info
             
-            # Decode to standard format (44100 Hz, stereo)
-            pcm_data = self.decode_file(file_path, sample_rate=44100, channels=2)
+            # Decode to professional format (44100 Hz, stereo, 24-bit)
+            pcm_data = self.decode_file(file_path, sample_rate=44100, channels=2, bit_depth=bit_depth)
             
             if pcm_data:
                 return (pcm_data, 44100, 2)

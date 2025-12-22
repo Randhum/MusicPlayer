@@ -4,8 +4,14 @@ A lightweight, modular music player built with GTK4 and Python that manages your
 
 ## Features
 
+- **Professional Audio Quality**: High-fidelity audio playback with:
+  - 24-bit PCM audio processing
+  - 44.1 kHz sample rate (CD quality)
+  - Stereo (2-channel) output
+  - FLAC bitstream decoding support
+  - Automatic format conversion and resampling for consistent quality
 - **Modular Dockable Panels**: Each panel (Library, Playlist, Now Playing, Bluetooth) can be detached as a separate window and rearranged
-- **GStreamer + ALSA Playback**: Reliable audio playback using GStreamer with direct ALSA output
+- **GStreamer + ALSA Playback**: Reliable audio playback using GStreamer with direct ALSA output and professional audio processing pipeline
 - **Folder-Based Library Browser**: Browse your music library using the original folder structure from your Music directory
 - **Touch-Friendly Interface**: Large buttons, increased row heights, and generous spacing optimized for touch screens
 - **Enhanced Playlist Management**: 
@@ -16,6 +22,7 @@ A lightweight, modular music player built with GTK4 and Python that manages your
 - **Search**: Search and filter your music collection
 - **Metadata Display**: Beautiful GTK4 interface with album art and track information
 - **Layout Persistence**: Panel layout is saved and restored between sessions
+- **Smart Track Loading**: Waits for tracks to fully load before playback to prevent audio glitches
 
 ## Requirements
 
@@ -46,7 +53,13 @@ emerge -av media-libs/alsa-lib
 # Bluetooth support
 emerge -av net-wireless/bluez
 
+# GStreamer BlueZ plugin (recommended for Bluetooth audio)
+# This provides native GStreamer integration with BlueZ for A2DP audio streaming
+# The application will automatically use this plugin if available
+emerge -av media-plugins/gst-plugins-bluez
+
 # Audio system (choose one or both)
+# Note: GStreamer BlueZ plugin works independently, but these provide additional routing options
 emerge -av media-video/pipewire     # recommended
 # or
 emerge -av media-sound/pulseaudio
@@ -91,11 +104,19 @@ python main.py
 
 The player automatically scans `~/Music` and `~/Musik` directories for audio files. Supported formats include:
 - MP3
-- FLAC (with full metadata support)
+- FLAC (with full metadata support and 24-bit bitstream decoding)
 - OGG
 - M4A/AAC
 - WAV
 - Any format supported by GStreamer
+
+**Audio Quality:**
+All audio is processed and output at professional quality:
+- **24-bit PCM** (S24LE format) for maximum dynamic range
+- **44.1 kHz sample rate** (CD quality standard)
+- **Stereo (2-channel)** output
+- Automatic format conversion and resampling ensures consistent quality regardless of source format
+- FLAC files are decoded from their native bitstream format and processed at full quality
 
 **Library Indexing:**
 - The library index is automatically saved to `~/.config/musicplayer/library_index.json`
@@ -147,8 +168,17 @@ To use your computer as a Bluetooth speaker:
 
 **Requirements for Bluetooth audio:**
 - BlueZ daemon running (`systemctl start bluetooth`)
-- PipeWire or PulseAudio running for audio routing
+- GStreamer BlueZ plugin (recommended): `media-plugins/gst-plugins-bluez`
+  - Provides native GStreamer integration with BlueZ D-Bus for A2DP audio
+  - Automatically handles audio routing when devices connect
+- Alternative: PipeWire or PulseAudio for audio routing (if GStreamer BlueZ plugin not available)
 - Bluetooth adapter that supports A2DP sink profile
+
+**Bluetooth Implementation:**
+- Uses BlueZ D-Bus API for device management (pairing, connection, discovery)
+- Prefers GStreamer BlueZ plugin for audio streaming when available
+- Falls back to PipeWire/PulseAudio routing if GStreamer plugin not installed
+- All Bluetooth operations use the official BlueZ library via D-Bus
 
 ## Project Structure
 
