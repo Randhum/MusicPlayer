@@ -38,6 +38,23 @@ class AudioPlayer:
         if not self.playbin:
             raise RuntimeError("Failed to create GStreamer playbin. Install gst-plugins-base")
         
+        # Check for FLAC decoder support
+        # Try different possible FLAC decoder names
+        flac_available = False
+        for decoder_name in ["flacdec", "flac", "flacparse"]:
+            decoder = Gst.ElementFactory.make(decoder_name, decoder_name)
+            if decoder:
+                flac_available = True
+                break
+        
+        if not flac_available:
+            print("Warning: FLAC decoder not found.")
+            print("To enable FLAC playback, install:")
+            print("  emerge -av media-libs/gst-plugins-good")
+            print("  (Make sure the 'flac' USE flag is enabled)")
+        else:
+            print("FLAC decoder available")
+        
         # Create ALSA sink for direct ALSA output
         alsasink = Gst.ElementFactory.make("alsasink", "alsasink")
         if alsasink:
@@ -64,9 +81,23 @@ class AudioPlayer:
         """Handle messages from the pipeline."""
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print(f"GStreamer error: {err.message}")
+            error_msg = err.message
+            print(f"GStreamer error: {error_msg}")
             if debug:
                 print(f"Debug info: {debug}")
+            
+            # Check for missing codec/plugin errors
+            if "flac" in error_msg.lower() or ("no decoder" in error_msg.lower() and self.current_track and self.current_track.file_path.endswith('.flac')):
+                print("\nERROR: FLAC decoder not available!")
+                print("Install FLAC support with:")
+                print("  emerge -av media-libs/gst-plugins-good")
+                print("  (Make sure the 'flac' USE flag is enabled)")
+                print("  You can check USE flags with: emerge -pv media-libs/gst-plugins-good")
+            elif "could not link" in error_msg.lower() or "no element" in error_msg.lower():
+                print("\nERROR: Missing GStreamer plugin!")
+                print("You may need to install additional GStreamer plugins.")
+                print("Try: emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad")
+            
             self._stop()
         elif message.type == Gst.MessageType.EOS:
             # End of stream
@@ -117,6 +148,25 @@ class AudioPlayer:
         """Load a track for playback."""
         if not track or not track.file_path:
             return False
+        
+        # Check file extension to provide helpful error messages
+        file_ext = os.path.splitext(track.file_path)[1].lower()
+        if file_ext == '.flac':
+            # Verify FLAC decoder is available (playbin will handle it, but check anyway)
+            flac_available = False
+            for decoder_name in ["flacdec", "flac", "flacparse"]:
+                decoder = Gst.ElementFactory.make(decoder_name, decoder_name)
+                if decoder:
+                    flac_available = True
+                    break
+            
+            if not flac_available:
+                print("WARNING: FLAC decoder may not be available.")
+                print("If playback fails, install FLAC support:")
+                print("  emerge -av media-libs/gst-plugins-good")
+                print("  (Ensure 'flac' USE flag is enabled)")
+                # Don't return False here - let playbin try anyway
+                # It might work with other decoders or plugins
         
         self._stop()
         self.current_track = track

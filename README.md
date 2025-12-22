@@ -35,6 +35,11 @@ emerge -av \
   media-plugins/gst-plugins-faac \
   media-plugins/gst-plugins-bluez
 
+# For FLAC support, ensure the 'flac' USE flag is enabled for gst-plugins-good:
+# Check current flags: emerge -pv media-libs/gst-plugins-good
+# Enable if needed: echo "media-libs/gst-plugins-good flac" >> /etc/portage/package.use
+# Then reinstall: emerge -av media-libs/gst-plugins-good
+
 # Audio stack
 emerge -av media-libs/alsa-lib
 
