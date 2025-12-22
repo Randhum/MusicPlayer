@@ -20,11 +20,12 @@ class PlayerControls(Gtk.Box):
     }
     
     def __init__(self):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        self.set_margin_top(10)
-        self.set_margin_bottom(10)
-        self.set_margin_start(10)
-        self.set_margin_end(10)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15)
+        # Touch-friendly margins
+        self.set_margin_top(15)
+        self.set_margin_bottom(15)
+        self.set_margin_start(15)
+        self.set_margin_end(15)
         
         # Progress bar and time labels
         progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -38,6 +39,8 @@ class PlayerControls(Gtk.Box):
         )
         self.progress_scale.set_draw_value(False)
         self.progress_scale.set_hexpand(True)
+        # Touch-friendly height
+        self.progress_scale.set_size_request(-1, 30)
         
         # Use GTK4 gesture controllers for button events
         gesture_press = Gtk.GestureClick()
@@ -62,24 +65,32 @@ class PlayerControls(Gtk.Box):
         controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         controls_box.set_halign(Gtk.Align.CENTER)
         
+        # Touch-friendly button sizes
+        button_size = 48  # Larger buttons for touch
+        
         self.prev_button = Gtk.Button.new_from_icon_name("media-skip-backward-symbolic")
+        self.prev_button.set_size_request(button_size, button_size)
         self.prev_button.connect('clicked', lambda btn: self.emit('prev-clicked'))
         controls_box.append(self.prev_button)
         
         self.play_button = Gtk.Button.new_from_icon_name("media-playback-start-symbolic")
+        self.play_button.set_size_request(button_size, button_size)
         self.play_button.connect('clicked', lambda btn: self.emit('play-clicked'))
         controls_box.append(self.play_button)
         
         self.pause_button = Gtk.Button.new_from_icon_name("media-playback-pause-symbolic")
+        self.pause_button.set_size_request(button_size, button_size)
         self.pause_button.connect('clicked', lambda btn: self.emit('pause-clicked'))
         self.pause_button.set_visible(False)
         controls_box.append(self.pause_button)
         
         self.stop_button = Gtk.Button.new_from_icon_name("media-playback-stop-symbolic")
+        self.stop_button.set_size_request(button_size, button_size)
         self.stop_button.connect('clicked', lambda btn: self.emit('stop-clicked'))
         controls_box.append(self.stop_button)
         
         self.next_button = Gtk.Button.new_from_icon_name("media-skip-forward-symbolic")
+        self.next_button.set_size_request(button_size, button_size)
         self.next_button.connect('clicked', lambda btn: self.emit('next-clicked'))
         controls_box.append(self.next_button)
         
@@ -95,7 +106,7 @@ class PlayerControls(Gtk.Box):
         )
         self.volume_scale.set_value(1.0)
         self.volume_scale.set_draw_value(False)
-        self.volume_scale.set_size_request(100, -1)
+        self.volume_scale.set_size_request(120, 30)  # Larger for touch
         self.volume_scale.connect('value-changed', self._on_volume_changed)
         volume_box.append(self.volume_scale)
         

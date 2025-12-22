@@ -39,6 +39,8 @@ class PlaylistView(Gtk.Box):
         self.tree_view = Gtk.TreeView(model=self.store)
         self.tree_view.set_headers_visible(True)
         self.tree_view.connect('row-activated', self._on_row_activated)
+        # Add CSS class for touch-friendly styling
+        self.tree_view.add_css_class("playlist-tree")
         
         # Add right-click gesture for context menu
         gesture = Gtk.GestureClick()
@@ -51,17 +53,19 @@ class PlaylistView(Gtk.Box):
         self.selected_index = -1
         self.set_vexpand(True)  # Expand to fill available vertical space
         
-        # Columns
+        # Columns with touch-friendly padding
         col_index = Gtk.TreeViewColumn("#")
         renderer_index = Gtk.CellRendererText()
+        renderer_index.set_padding(8, 12)  # Add padding for touch-friendliness
         col_index.pack_start(renderer_index, True)
         col_index.add_attribute(renderer_index, "text", 0)
-        col_index.set_min_width(300)
+        col_index.set_min_width(50)
         col_index.set_resizable(False)
         self.tree_view.append_column(col_index)
         
         col_title = Gtk.TreeViewColumn("Title")
         renderer_title = Gtk.CellRendererText()
+        renderer_title.set_padding(8, 12)  # Add padding for touch-friendliness
         col_title.pack_start(renderer_title, True)
         col_title.add_attribute(renderer_title, "text", 1)
         col_title.set_expand(True)
@@ -70,6 +74,7 @@ class PlaylistView(Gtk.Box):
         
         col_artist = Gtk.TreeViewColumn("Artist")
         renderer_artist = Gtk.CellRendererText()
+        renderer_artist.set_padding(8, 12)  # Add padding for touch-friendliness
         col_artist.pack_start(renderer_artist, True)
         col_artist.add_attribute(renderer_artist, "text", 2)
         col_artist.set_expand(True)
@@ -78,6 +83,7 @@ class PlaylistView(Gtk.Box):
         
         col_duration = Gtk.TreeViewColumn("Duration")
         renderer_duration = Gtk.CellRendererText()
+        renderer_duration.set_padding(8, 12)  # Add padding for touch-friendliness
         col_duration.pack_start(renderer_duration, True)
         col_duration.add_attribute(renderer_duration, "text", 3)
         col_duration.set_min_width(80)
@@ -160,22 +166,24 @@ class PlaylistView(Gtk.Box):
         self.context_menu = Gtk.Popover()
         self.context_menu.set_parent(self.tree_view)
         
-        # Create menu box
-        menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        menu_box.set_margin_start(5)
-        menu_box.set_margin_end(5)
-        menu_box.set_margin_top(5)
-        menu_box.set_margin_bottom(5)
+        # Create menu box with touch-friendly spacing
+        menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        menu_box.set_margin_start(10)
+        menu_box.set_margin_end(10)
+        menu_box.set_margin_top(10)
+        menu_box.set_margin_bottom(10)
         
         if self.selected_index >= 0:
             # Track-specific menu items
             play_item = Gtk.Button(label="Play")
             play_item.add_css_class("flat")
+            play_item.set_size_request(150, 40)  # Larger for touch
             play_item.connect('clicked', lambda w: self._on_menu_play())
             menu_box.append(play_item)
             
             remove_item = Gtk.Button(label="Remove")
             remove_item.add_css_class("flat")
+            remove_item.set_size_request(150, 40)  # Larger for touch
             remove_item.connect('clicked', lambda w: self._on_menu_remove())
             menu_box.append(remove_item)
             
@@ -183,12 +191,14 @@ class PlaylistView(Gtk.Box):
             
             move_up_item = Gtk.Button(label="Move Up")
             move_up_item.add_css_class("flat")
+            move_up_item.set_size_request(150, 40)  # Larger for touch
             move_up_item.connect('clicked', lambda w: self._on_menu_move_up())
             move_up_item.set_sensitive(self.selected_index > 0)
             menu_box.append(move_up_item)
             
             move_down_item = Gtk.Button(label="Move Down")
             move_down_item.add_css_class("flat")
+            move_down_item.set_size_request(150, 40)  # Larger for touch
             move_down_item.connect('clicked', lambda w: self._on_menu_move_down())
             move_down_item.set_sensitive(self.selected_index < len(self.tracks) - 1)
             menu_box.append(move_down_item)
@@ -198,12 +208,14 @@ class PlaylistView(Gtk.Box):
         # General menu items
         clear_item = Gtk.Button(label="Clear Playlist")
         clear_item.add_css_class("flat")
+        clear_item.set_size_request(150, 40)  # Larger for touch
         clear_item.connect('clicked', lambda w: self._on_menu_clear())
         clear_item.set_sensitive(len(self.tracks) > 0)
         menu_box.append(clear_item)
         
         save_item = Gtk.Button(label="Save Playlist...")
         save_item.add_css_class("flat")
+        save_item.set_size_request(150, 40)  # Larger for touch
         save_item.connect('clicked', lambda w: self._on_menu_save())
         save_item.set_sensitive(len(self.tracks) > 0)
         menu_box.append(save_item)
