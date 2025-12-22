@@ -266,13 +266,23 @@ class LibraryBrowser(Gtk.Box):
     
     def _show_context_menu(self, item_type: str, data, x: float, y: float):
         """Show context menu for the selected item."""
-        # Remove old menu if exists
+        # Properly close and remove old menu if exists
         if self.context_menu:
-            self.context_menu.unparent()
+            try:
+                self.context_menu.popdown()
+            except:
+                pass
+            try:
+                if self.context_menu.get_parent():
+                    self.context_menu.unparent()
+            except:
+                pass
+            self.context_menu = None
         
         # Create popover
         self.context_menu = Gtk.Popover()
-        self.context_menu.set_parent(self.tree_view)
+        # Set child first, then parent
+        self.context_menu.set_has_arrow(True)
         
         # Create menu box
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
@@ -314,7 +324,14 @@ class LibraryBrowser(Gtk.Box):
                 add_item.connect('clicked', lambda w: self._on_menu_add_album(tracks))
                 menu_box.append(add_item)
         
+        # Set child before parent
         self.context_menu.set_child(menu_box)
+        
+        # Set parent after child is set
+        self.context_menu.set_parent(self.tree_view)
+        
+        # Connect to closed signal for cleanup
+        self.context_menu.connect('closed', self._on_popover_closed)
         
         # Position and show menu
         rect = Gdk.Rectangle()
@@ -325,23 +342,47 @@ class LibraryBrowser(Gtk.Box):
         self.context_menu.set_pointing_to(rect)
         self.context_menu.popup()
     
+    def _on_popover_closed(self, popover):
+        """Handle popover closed signal for cleanup."""
+        # Clean up after a short delay to avoid issues
+        GLib.timeout_add(100, self._cleanup_popover)
+    
+    def _cleanup_popover(self):
+        """Clean up the popover properly."""
+        if self.context_menu:
+            try:
+                # Check if widget is still valid and has a parent
+                parent = self.context_menu.get_parent()
+                if parent is not None:
+                    self.context_menu.unparent()
+            except (AttributeError, RuntimeError):
+                # Widget might have been destroyed already
+                pass
+            finally:
+                self.context_menu = None
+        return False  # Don't repeat
+    
     def _on_menu_play_track(self, track: TrackMetadata):
         """Handle 'Play Now' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         self.emit('track-selected', track)
     
     def _on_menu_add_track(self, track: TrackMetadata):
         """Handle 'Add to Playlist' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         self.emit('add-track', track)
     
     def _on_menu_play_album(self, tracks):
         """Handle 'Play Album' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         self.emit('album-selected', tracks)
     
     def _on_menu_add_album(self, tracks):
         """Handle 'Add Album to Playlist' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         self.emit('add-album', tracks)
 
