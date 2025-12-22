@@ -1,4 +1,4 @@
-"""GStreamer-based audio player with ALSA output."""
+"""GStreamer-based audio player with ALSA output and professional audio quality."""
 
 import os
 import gi
@@ -9,7 +9,19 @@ from core.metadata import TrackMetadata
 
 
 class AudioPlayer:
-    """GStreamer-based audio player using ALSA for output."""
+    """GStreamer-based audio player using ALSA for output with high-quality audio processing.
+    
+    Supports professional audio quality:
+    - 24-bit PCM (S24LE format)
+    - 44.1 kHz sample rate
+    - Stereo (2 channels)
+    - FLAC bitstream decoding
+    """
+    
+    # Professional audio quality settings
+    SAMPLE_RATE = 44100  # 44.1 kHz - CD quality
+    CHANNELS = 2  # Stereo
+    BIT_DEPTH = 24  # 24-bit audio
     
     def __init__(self):
         # Initialize GStreamer if not already done
@@ -22,24 +34,25 @@ class AudioPlayer:
         self.position: float = 0.0
         self.duration: float = 0.0
         self.is_playing: bool = False
+        self.is_loading: bool = False  # Track loading state
         
         # Callbacks
         self.on_state_changed: Optional[Callable] = None
         self.on_position_changed: Optional[Callable] = None
         self.on_track_finished: Optional[Callable] = None
+        self.on_track_loaded: Optional[Callable] = None  # Called when track is ready
         
         self._setup_pipeline()
         self._setup_bus()
     
     def _setup_pipeline(self):
-        """Set up the GStreamer pipeline using playbin with ALSA sink."""
+        """Set up the GStreamer pipeline using playbin with high-quality audio processing."""
         # Use playbin which handles decoding automatically
         self.playbin = Gst.ElementFactory.make("playbin", "playbin")
         if not self.playbin:
             raise RuntimeError("Failed to create GStreamer playbin. Install gst-plugins-base")
         
         # Check for FLAC decoder support
-        # Try different possible FLAC decoder names
         flac_available = False
         for decoder_name in ["flacdec", "flac", "flacparse"]:
             decoder = Gst.ElementFactory.make(decoder_name, decoder_name)
@@ -55,18 +68,68 @@ class AudioPlayer:
         else:
             print("FLAC decoder available")
         
-        # Create ALSA sink for direct ALSA output
+        # Create high-quality audio processing pipeline
+        # audioconvert: converts between audio formats
+        # audioresample: resamples to target sample rate
+        # capsfilter: ensures 24-bit, 44.1 kHz, stereo output
+        # alsasink: direct ALSA output
+        
+        audioconvert = Gst.ElementFactory.make("audioconvert", "audioconvert")
+        audioresample = Gst.ElementFactory.make("audioresample", "audioresample")
+        capsfilter = Gst.ElementFactory.make("capsfilter", "capsfilter")
         alsasink = Gst.ElementFactory.make("alsasink", "alsasink")
-        if alsasink:
-            # Use default ALSA device
-            alsasink.set_property("device", "default")
-            self.playbin.set_property("audio-sink", alsasink)
+        
+        if not all([audioconvert, audioresample, capsfilter]):
+            print("Warning: Some audio processing elements not available, using basic sink")
+            if alsasink:
+                alsasink.set_property("device", "default")
+                self.playbin.set_property("audio-sink", alsasink)
+            else:
+                autoaudiosink = Gst.ElementFactory.make("autoaudiosink", "autoaudiosink")
+                if autoaudiosink:
+                    self.playbin.set_property("audio-sink", autoaudiosink)
         else:
-            print("Warning: alsasink not available, using autoaudiosink")
-            # Fallback to autoaudiosink
-            autoaudiosink = Gst.ElementFactory.make("autoaudiosink", "autoaudiosink")
-            if autoaudiosink:
-                self.playbin.set_property("audio-sink", autoaudiosink)
+            # Create audio processing bin
+            audio_bin = Gst.Bin.new("audio-bin")
+            
+            # Configure caps for professional audio quality
+            # S24LE = 24-bit signed little-endian PCM
+            caps = Gst.Caps.from_string(
+                f"audio/x-raw,format=S24LE,rate={self.SAMPLE_RATE},channels={self.CHANNELS},layout=interleaved"
+            )
+            capsfilter.set_property("caps", caps)
+            
+            # Configure ALSA sink
+            if alsasink:
+                alsasink.set_property("device", "default")
+                # Enable sync for smooth playback
+                alsasink.set_property("sync", True)
+            else:
+                print("Warning: alsasink not available, using autoaudiosink")
+                alsasink = Gst.ElementFactory.make("autoaudiosink", "autoaudiosink")
+                if not alsasink:
+                    raise RuntimeError("No audio sink available")
+            
+            # Add elements to bin
+            audio_bin.add(audioconvert)
+            audio_bin.add(audioresample)
+            audio_bin.add(capsfilter)
+            audio_bin.add(alsasink)
+            
+            # Link elements: audioconvert ! audioresample ! capsfilter ! alsasink
+            audioconvert.link(audioresample)
+            audioresample.link(capsfilter)
+            capsfilter.link(alsasink)
+            
+            # Create ghost pads for the bin
+            pad = audioconvert.get_static_pad("sink")
+            ghost_pad = Gst.GhostPad.new("sink", pad)
+            audio_bin.add_pad(ghost_pad)
+            
+            # Set the audio bin as the audio sink for playbin
+            self.playbin.set_property("audio-sink", audio_bin)
+            
+            print(f"Audio pipeline configured for {self.BIT_DEPTH}-bit, {self.SAMPLE_RATE} Hz, {self.CHANNELS}-channel stereo")
         
         # Set initial volume
         self.playbin.set_property("volume", self.volume)
@@ -98,6 +161,7 @@ class AudioPlayer:
                 print("You may need to install additional GStreamer plugins.")
                 print("Try: emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad")
             
+            self.is_loading = False
             self._stop()
         elif message.type == Gst.MessageType.EOS:
             # End of stream
@@ -109,17 +173,32 @@ class AudioPlayer:
         elif message.type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.playbin:
                 old_state, new_state, pending_state = message.parse_state_changed()
+                
+                # Track is ready when it reaches PAUSED state (loaded but not playing)
+                if new_state == Gst.State.PAUSED and self.is_loading:
+                    self.is_loading = False
+                    if self.on_track_loaded:
+                        self.on_track_loaded()
+                
                 if new_state == Gst.State.PLAYING:
                     self.is_playing = True
+                    self.is_loading = False
                     # Update duration when playback starts
                     GLib.timeout_add(100, self._update_duration)
                 elif new_state == Gst.State.PAUSED:
                     self.is_playing = False
                 elif new_state == Gst.State.NULL:
                     self.is_playing = False
+                    self.is_loading = False
                 
                 if self.on_state_changed:
                     self.on_state_changed(self.is_playing)
+        elif message.type == Gst.MessageType.ASYNC_DONE:
+            # Pipeline is ready
+            if self.is_loading:
+                self.is_loading = False
+                if self.on_track_loaded:
+                    self.on_track_loaded()
         elif message.type == Gst.MessageType.DURATION_CHANGED:
             self._update_duration()
         
@@ -145,8 +224,12 @@ class AudioPlayer:
         return False  # Stop timeout
     
     def load_track(self, track: TrackMetadata):
-        """Load a track for playback."""
+        """Load a track for playback. Returns True if loading started successfully."""
         if not track or not track.file_path:
+            return False
+        
+        if not os.path.exists(track.file_path):
+            print(f"Error: File not found: {track.file_path}")
             return False
         
         # Check file extension to provide helpful error messages
@@ -165,10 +248,12 @@ class AudioPlayer:
                 print("If playback fails, install FLAC support:")
                 print("  emerge -av media-libs/gst-plugins-good")
                 print("  (Ensure 'flac' USE flag is enabled)")
-                # Don't return False here - let playbin try anyway
-                # It might work with other decoders or plugins
         
+        # Stop current playback
         self._stop()
+        
+        # Set loading state
+        self.is_loading = True
         self.current_track = track
         
         # Convert file path to URI for playbin
@@ -179,22 +264,81 @@ class AudioPlayer:
         if track.duration:
             self.duration = track.duration
         
+        # Set pipeline to READY state to start loading
+        # This will trigger async loading of the track
+        ret = self.playbin.set_state(Gst.State.READY)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            print("Error: Failed to load track")
+            self.is_loading = False
+            return False
+        
+        # Then set to PAUSED to fully load the track
+        ret = self.playbin.set_state(Gst.State.PAUSED)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            print("Error: Failed to prepare track")
+            self.is_loading = False
+            return False
+        
         return True
     
     def play(self):
-        """Start or resume playback."""
+        """Start or resume playback. Waits for track to be ready if still loading."""
         if not self.playbin:
             return False
         
         if not self.current_track:
             return False
         
-        self.playbin.set_state(Gst.State.PLAYING)
+        # If track is still loading, wait for it to be ready
+        if self.is_loading:
+            # Wait for pipeline to reach PAUSED state (track loaded)
+            ret = self.playbin.get_state(Gst.CLOCK_TIME_NONE)
+            if ret[0] == Gst.StateChangeReturn.ASYNC:
+                # Still loading, wait a bit more
+                GLib.timeout_add(100, self._wait_and_play)
+                return True
+            elif ret[0] == Gst.StateChangeReturn.FAILURE:
+                print("Error: Track failed to load")
+                self.is_loading = False
+                return False
+        
+        # Track is ready, start playback
+        ret = self.playbin.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            print("Error: Failed to start playback")
+            return False
         
         # Start position updates
         GLib.timeout_add(500, self._update_position)
         
         return True
+    
+    def _wait_and_play(self):
+        """Wait for track to load and then play."""
+        if not self.playbin or not self.current_track:
+            return False
+        
+        if self.is_loading:
+            ret = self.playbin.get_state(Gst.CLOCK_TIME_NONE)
+            if ret[0] == Gst.StateChangeReturn.ASYNC:
+                # Still loading, wait more
+                GLib.timeout_add(100, self._wait_and_play)
+                return True
+            elif ret[0] == Gst.StateChangeReturn.FAILURE:
+                print("Error: Track failed to load")
+                self.is_loading = False
+                return False
+        
+        # Track is ready, start playback
+        self.is_loading = False
+        ret = self.playbin.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            print("Error: Failed to start playback")
+            return False
+        
+        # Start position updates
+        GLib.timeout_add(500, self._update_position)
+        return False  # Don't repeat
     
     def pause(self):
         """Pause playback."""
