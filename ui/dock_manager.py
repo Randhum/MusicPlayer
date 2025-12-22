@@ -7,9 +7,6 @@ from gi.repository import Gtk, GLib, Gio
 from typing import Dict, Optional, Callable
 import json
 import os
-import time
-
-from ui.components.fractal_screensaver import FractalBackground
 
 
 class DockablePanel(Gtk.Box):
@@ -26,14 +23,6 @@ class DockablePanel(Gtk.Box):
         self.parent_container = None
         self.parent_position = None  # 'start' or 'end' for Paned
         self.on_reattach: Optional[Callable] = None
-        self.screensaver_enabled = False
-        self.fractal_background: Optional[FractalBackground] = None
-        
-        # Screensaver timeout settings
-        self.screensaver_timeout = 30  # seconds of inactivity before activation
-        self.last_activity_time = 0.0
-        self.timeout_id = None
-        self.original_content = content  # Store original content for restoration
         
         # Create header bar with title and detach button
         self.header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
@@ -50,14 +39,6 @@ class DockablePanel(Gtk.Box):
         title_label.set_halign(Gtk.Align.START)
         self.header.append(title_label)
         
-        # Screensaver toggle button
-        self.screensaver_button = Gtk.Button()
-        self.screensaver_button.set_icon_name("applications-graphics-symbolic")
-        self.screensaver_button.set_tooltip_text("Toggle fractal screensaver")
-        self.screensaver_button.add_css_class("flat")
-        self.screensaver_button.connect("clicked", self._on_screensaver_clicked)
-        self.header.append(self.screensaver_button)
-        
         # Detach button
         self.detach_button = Gtk.Button()
         self.detach_button.set_icon_name("window-new-symbolic")
@@ -69,166 +50,12 @@ class DockablePanel(Gtk.Box):
         self.append(self.header)
         self.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         
-        # Content container (will be replaced with fractal background if enabled)
+        # Content container
         self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.content_box.set_vexpand(True)
         self.content_box.set_hexpand(True)
         self.content_box.append(content)
         self.append(self.content_box)
-        
-        # Setup activity tracking for auto-screensaver
-        self._setup_activity_tracking()
-        
-        # Start timeout timer
-        self._reset_timeout()
-    
-    def _on_screensaver_clicked(self, button):
-        """Handle screensaver toggle button click."""
-        self.toggle_screensaver()
-    
-    def toggle_screensaver(self):
-        """Toggle fractal screensaver on/off."""
-        if self.screensaver_enabled:
-            self._disable_screensaver()
-        else:
-            self._enable_screensaver()
-    
-    def _setup_activity_tracking(self):
-        """Setup mouse and keyboard event tracking for activity detection."""
-        # Create event controllers for activity tracking
-        motion_controller = Gtk.EventControllerMotion()
-        motion_controller.connect("enter", self._on_activity)
-        motion_controller.connect("motion", self._on_activity)
-        self.add_controller(motion_controller)
-        
-        key_controller = Gtk.EventControllerKey()
-        key_controller.connect("key-pressed", self._on_activity)
-        self.add_controller(key_controller)
-        
-        # Also track clicks
-        click_controller = Gtk.GestureClick()
-        click_controller.connect("pressed", lambda g, n, x, y: self._on_activity())
-        self.add_controller(click_controller)
-    
-    def _on_activity(self, *args):
-        """Handle user activity - reset timeout and disable screensaver if active."""
-        self._reset_timeout()
-        
-        # If screensaver is active, disable it on activity
-        if self.screensaver_enabled:
-            self._disable_screensaver()
-    
-    def _reset_timeout(self):
-        """Reset the screensaver timeout timer."""
-        self.last_activity_time = time.time()
-        
-        # Cancel existing timeout
-        if self.timeout_id is not None:
-            GLib.source_remove(self.timeout_id)
-        
-        # Set new timeout
-        self.timeout_id = GLib.timeout_add_seconds(
-            self.screensaver_timeout,
-            self._on_timeout
-        )
-    
-    def _on_timeout(self):
-        """Called when timeout expires - activate screensaver."""
-        if not self.screensaver_enabled:
-            self._enable_screensaver()
-        return False  # Don't repeat
-    
-    def _enable_screensaver(self):
-        """Enable fractal screensaver background."""
-        if self.screensaver_enabled:
-            return
-        
-        # Get content from content_box
-        content = None
-        child = self.content_box.get_first_child()
-        while child:
-            if child != self.fractal_background:  # Don't remove fractal background if it exists
-                content = child
-                self.content_box.remove(child)
-                break
-            child = child.get_next_sibling()
-        
-        if not content:
-            # Fallback: use original content
-            content = self.original_content
-        
-        # Store content reference for restoration
-        if not hasattr(self, '_stored_content') or self._stored_content is None:
-            self._stored_content = content
-        
-        # Create fractal background with content
-        self.fractal_background = FractalBackground(
-            content=content,
-            rules=None,  # Random rules
-            iterations=7,  # Reasonable detail level
-            color_scheme="binary"
-        )
-        
-        # Replace content_box content
-        self.content_box.append(self.fractal_background)
-        
-        self.screensaver_enabled = True
-        self.screensaver_button.set_icon_name("applications-graphics-symbolic")
-        self.screensaver_button.set_tooltip_text("Disable fractal screensaver")
-    
-    def _disable_screensaver(self):
-        """Disable fractal screensaver background and restore original content."""
-        if not self.screensaver_enabled:
-            return
-        
-        # Clean up fractal background
-        if self.fractal_background:
-            # Get the original content from the fractal background
-            content = self.fractal_background.content_widget
-            
-            # Clean up animation
-            self.fractal_background.cleanup()
-            
-            # Remove fractal background from content_box
-            self.content_box.remove(self.fractal_background)
-            self.fractal_background = None
-            
-            # Remove inverted text CSS classes from content
-            if content:
-                self._remove_inverted_text_classes(content)
-            
-            # Restore original content
-            if content:
-                self.content_box.append(content)
-            elif hasattr(self, '_stored_content') and self._stored_content:
-                self.content_box.append(self._stored_content)
-            elif self.original_content:
-                self.content_box.append(self.original_content)
-        
-        self.screensaver_enabled = False
-        self.screensaver_button.set_icon_name("applications-graphics-symbolic")
-        self.screensaver_button.set_tooltip_text("Enable fractal screensaver")
-        
-        # Reset timeout for next activation
-        self._reset_timeout()
-    
-    def _remove_inverted_text_classes(self, widget: Gtk.Widget):
-        """Recursively remove inverted text CSS classes from widgets."""
-        if isinstance(widget, Gtk.Label):
-            widget.remove_css_class("fractal-inverted-text")
-        elif isinstance(widget, Gtk.Button):
-            widget.remove_css_class("fractal-inverted-text")
-        elif isinstance(widget, Gtk.Entry):
-            widget.remove_css_class("fractal-inverted-text")
-        elif isinstance(widget, Gtk.TreeView):
-            widget.remove_css_class("fractal-inverted-text")
-        
-        # Recursively process children
-        if hasattr(widget, 'get_first_child'):
-            child = widget.get_first_child()
-            while child:
-                self._remove_inverted_text_classes(child)
-                child = child.get_next_sibling()
     
     def _on_detach_clicked(self, button):
         """Handle detach button click."""
@@ -299,22 +126,8 @@ class DockablePanel(Gtk.Box):
     
     def _on_window_close(self, window):
         """Handle detached window close."""
-        # Clean up screensaver if active
-        if self.screensaver_enabled:
-            self._disable_screensaver()
         self._reattach()
         return True  # Prevent default close behavior
-    
-    def cleanup(self):
-        """Clean up resources when panel is destroyed."""
-        # Cancel timeout
-        if self.timeout_id is not None:
-            GLib.source_remove(self.timeout_id)
-            self.timeout_id = None
-        
-        # Clean up screensaver
-        if self.screensaver_enabled and self.fractal_background:
-            self.fractal_background.cleanup()
 
 
 class DockManager:
