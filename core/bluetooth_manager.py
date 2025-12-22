@@ -3,6 +3,10 @@
 from typing import List, Dict, Optional, Callable
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
+from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
+import gi
+gi.require_version('Gtk', '4.0')
+from gi.repository import Gtk
 
 
 class BluetoothDevice:
@@ -31,7 +35,13 @@ class BluetoothManager:
     DEVICE_INTERFACE = 'org.bluez.Device1'
     PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties'
     
-    def __init__(self):
+    def __init__(self, parent_window=None):
+        """
+        Initialize Bluetooth Manager.
+        
+        Args:
+            parent_window: GTK window for pairing dialogs (optional)
+        """
         DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         self.adapter_path: Optional[str] = None
@@ -45,7 +55,13 @@ class BluetoothManager:
         self.on_device_added: Optional[Callable] = None
         self.on_device_removed: Optional[Callable] = None
         
+        # Setup agent for pairing confirmations
+        self.agent: Optional[BluetoothAgent] = None
+        self.agent_ui: Optional[BluetoothAgentUI] = None
+        self.parent_window = parent_window
+        
         self._setup_adapter()
+        self._setup_agent()
         self._setup_signals()
         self._refresh_devices()
     
@@ -69,6 +85,80 @@ class BluetoothManager:
                 self.adapter_proxy = dbus.Interface(adapter_obj, self.ADAPTER_INTERFACE)
         except Exception as e:
             print(f"Error setting up Bluetooth adapter: {e}")
+    
+    def _setup_agent(self):
+        """Set up the Bluetooth Agent for handling pairing confirmations."""
+        try:
+            if not self.adapter_path:
+                print("Warning: No adapter found, cannot set up pairing agent")
+                return
+            
+            # Create UI handler for pairing dialogs
+            self.agent_ui = BluetoothAgentUI(self.parent_window)
+            
+            # Create and register the agent
+            self.agent = BluetoothAgent(self.bus, self.adapter_path)
+            
+            # Set up agent callbacks to use UI
+            self.agent.on_passkey_display = self.agent_ui.show_passkey_display
+            self.agent.on_passkey_confirm = self.agent_ui.show_passkey_confirmation
+            self.agent.on_passkey_request = self._handle_passkey_request
+            self.agent.on_authorization_request = self.agent_ui.show_authorization_request
+            self.agent.on_pin_request = self.agent_ui.show_pin_request
+            
+            print("Bluetooth pairing agent set up successfully")
+        except Exception as e:
+            print(f"Error setting up Bluetooth agent: {e}")
+            print("Pairing confirmations may not work properly")
+    
+    def _handle_passkey_request(self, device_name: str) -> Optional[int]:
+        """
+        Handle passkey request - show dialog to enter passkey.
+        
+        Args:
+            device_name: Name of the device requesting passkey
+            
+        Returns:
+            Passkey as integer, or None if cancelled
+        """
+        if not self.agent_ui:
+            return None
+        
+        # For passkey requests, we typically need to display what the other device shows
+        # But if we need to enter one, show a dialog
+        dialog = Gtk.Dialog(
+            title=f"Pairing with {device_name}",
+            transient_for=self.parent_window,
+            modal=True
+        )
+        dialog.add_buttons(
+            "_Cancel", Gtk.ResponseType.CANCEL,
+            "_OK", Gtk.ResponseType.OK
+        )
+        
+        content = dialog.get_content_area()
+        label = Gtk.Label(label=f"Enter the 6-digit passkey shown on {device_name}:")
+        content.append(label)
+        
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("000000")
+        entry.set_max_length(6)
+        entry.set_activates_default(True)
+        content.append(entry)
+        
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        entry.grab_focus()
+        
+        response = dialog.run()
+        passkey_str = entry.get_text() if response == Gtk.ResponseType.OK else None
+        dialog.destroy()
+        
+        if passkey_str:
+            try:
+                return int(passkey_str)
+            except ValueError:
+                return None
+        return None
     
     def _setup_signals(self):
         """Set up D-Bus signals for device changes."""
@@ -137,6 +227,26 @@ class BluetoothManager:
                 if self.on_device_removed:
                     self.on_device_removed(device)
     
+    def _convert_dbus_value(self, value):
+        """Convert a dbus value to a native Python type."""
+        if isinstance(value, dbus.Boolean):
+            return bool(value)
+        elif isinstance(value, dbus.String):
+            return str(value)
+        elif isinstance(value, (dbus.UInt16, dbus.UInt32, dbus.UInt64, dbus.Int16, dbus.Int32, dbus.Int64)):
+            return int(value)
+        elif isinstance(value, dbus.Double):
+            return float(value)
+        elif isinstance(value, (list, tuple)):
+            return [self._convert_dbus_value(v) for v in value]
+        elif isinstance(value, dict):
+            return {k: self._convert_dbus_value(v) for k, v in value.items()}
+        else:
+            try:
+                return str(value)
+            except:
+                return value
+    
     def _refresh_devices(self):
         """Refresh the list of Bluetooth devices."""
         try:
@@ -152,15 +262,10 @@ class BluetoothManager:
                 if self.DEVICE_INTERFACE in interfaces:
                     properties = interfaces[self.DEVICE_INTERFACE]
                     device_path = str(path)
-                    # Convert dbus types to Python types
+                    # Convert dbus types to Python types using helper function
                     props_dict = {}
                     for key, value in properties.items():
-                        if isinstance(value, dbus.Boolean):
-                            props_dict[key] = bool(value)
-                        elif isinstance(value, (dbus.String, dbus.UTF8String)):
-                            props_dict[key] = str(value)
-                        else:
-                            props_dict[key] = value
+                        props_dict[key] = self._convert_dbus_value(value)
                     device = BluetoothDevice(device_path, props_dict)
                     self.devices[device_path] = device
                     

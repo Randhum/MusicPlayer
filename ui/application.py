@@ -29,7 +29,13 @@ class MusicPlayerApplication:
         self.library = MusicLibrary()
         self.player = AudioPlayer()
         self.playlist_manager = PlaylistManager()
-        self.bt_manager = BluetoothManager()
+        
+        # Create main window first (needed for BT agent dialogs)
+        self._create_main_window()
+        
+        # Initialize Bluetooth manager with main window for pairing dialogs
+        main_window = self.windows.get('main')
+        self.bt_manager = BluetoothManager(parent_window=main_window)
         self.bt_sink = BluetoothSink(self.bt_manager)
         
         # Setup player callbacks (if player supports them)
@@ -43,9 +49,6 @@ class MusicPlayerApplication:
         # Setup playlist manager
         self.playlist_manager.current_playlist = []
         self.playlist_manager.current_index = -1
-        
-        # Create main window
-        self._create_main_window()
         
         # Start library scan
         self.library.scan_library(callback=self._on_library_scan_complete)
