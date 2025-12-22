@@ -216,6 +216,36 @@ class MainWindow(Gtk.ApplicationWindow):
             scale trough {
                 min-height: 8px;
             }
+            
+            /* Fractal screensaver inverted text */
+            .fractal-inverted-text {
+                color: white;
+                background-color: transparent;
+            }
+            
+            .fractal-inverted-text label {
+                color: white;
+            }
+            
+            .fractal-inverted-text button {
+                color: white;
+            }
+            
+            .fractal-inverted-text entry {
+                color: white;
+                background-color: rgba(0, 0, 0, 0.3);
+            }
+            
+            /* Tree views with inverted text */
+            .fractal-inverted-text treeview {
+                color: white;
+                background-color: transparent;
+            }
+            
+            .fractal-inverted-text treeview:selected {
+                background-color: rgba(255, 255, 255, 0.2);
+                color: white;
+            }
         """)
         
         display = self.get_display()
