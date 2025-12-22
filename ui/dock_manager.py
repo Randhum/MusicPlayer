@@ -8,6 +8,8 @@ from typing import Dict, Optional, Callable
 import json
 import os
 
+from ui.components.fractal_screensaver import FractalBackground
+
 
 class DockablePanel(Gtk.Box):
     """A panel that can be docked or detached as a separate window."""
@@ -23,6 +25,8 @@ class DockablePanel(Gtk.Box):
         self.parent_container = None
         self.parent_position = None  # 'start' or 'end' for Paned
         self.on_reattach: Optional[Callable] = None
+        self.screensaver_enabled = False
+        self.fractal_background: Optional[FractalBackground] = None
         
         # Create header bar with title and detach button
         self.header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
@@ -39,6 +43,14 @@ class DockablePanel(Gtk.Box):
         title_label.set_halign(Gtk.Align.START)
         self.header.append(title_label)
         
+        # Screensaver toggle button
+        self.screensaver_button = Gtk.Button()
+        self.screensaver_button.set_icon_name("applications-graphics-symbolic")
+        self.screensaver_button.set_tooltip_text("Toggle fractal screensaver")
+        self.screensaver_button.add_css_class("flat")
+        self.screensaver_button.connect("clicked", self._on_screensaver_clicked)
+        self.header.append(self.screensaver_button)
+        
         # Detach button
         self.detach_button = Gtk.Button()
         self.detach_button.set_icon_name("window-new-symbolic")
@@ -50,12 +62,81 @@ class DockablePanel(Gtk.Box):
         self.append(self.header)
         self.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         
-        # Content container
+        # Content container (will be replaced with fractal background if enabled)
         self.content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.content_box.set_vexpand(True)
         self.content_box.set_hexpand(True)
         self.content_box.append(content)
         self.append(self.content_box)
+    
+    def _on_screensaver_clicked(self, button):
+        """Handle screensaver toggle button click."""
+        self.toggle_screensaver()
+    
+    def toggle_screensaver(self):
+        """Toggle fractal screensaver on/off."""
+        if self.screensaver_enabled:
+            self._disable_screensaver()
+        else:
+            self._enable_screensaver()
+    
+    def _enable_screensaver(self):
+        """Enable fractal screensaver background."""
+        if self.screensaver_enabled:
+            return
+        
+        # Get content from content_box
+        content = None
+        child = self.content_box.get_first_child()
+        while child:
+            if child != self.fractal_background:  # Don't remove fractal background if it exists
+                content = child
+                self.content_box.remove(child)
+                break
+            child = child.get_next_sibling()
+        
+        if not content:
+            # Fallback: use original content
+            content = self.content
+        
+        # Create fractal background with content
+        self.fractal_background = FractalBackground(
+            content=content,
+            rules=None,  # Random rules
+            iterations=7,  # Reasonable detail level
+            color_scheme="binary"
+        )
+        
+        # Replace content_box content
+        self.content_box.append(self.fractal_background)
+        
+        self.screensaver_enabled = True
+        self.screensaver_button.set_icon_name("applications-graphics-symbolic")
+        self.screensaver_button.set_tooltip_text("Disable fractal screensaver")
+    
+    def _disable_screensaver(self):
+        """Disable fractal screensaver background."""
+        if not self.screensaver_enabled:
+            return
+        
+        # Remove fractal background
+        if self.fractal_background:
+            # Get the original content from the fractal background
+            content = self.fractal_background.content_widget
+            self.content_box.remove(self.fractal_background)
+            self.fractal_background = None
+            
+            # Restore original content
+            if content:
+                self.content_box.append(content)
+            else:
+                # Fallback: use stored content
+                if self.content:
+                    self.content_box.append(self.content)
+        
+        self.screensaver_enabled = False
+        self.screensaver_button.set_icon_name("applications-graphics-symbolic")
+        self.screensaver_button.set_tooltip_text("Enable fractal screensaver")
     
     def _on_detach_clicked(self, button):
         """Handle detach button click."""

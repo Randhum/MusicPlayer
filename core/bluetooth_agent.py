@@ -272,18 +272,36 @@ class BluetoothAgentUI:
             device_name: Name of the device
             passkey: 6-digit passkey to display
         """
-        dialog = Gtk.MessageDialog(
+        dialog = Gtk.Dialog(
+            title=f"Pairing with {device_name}",
             transient_for=self.parent_window,
-            modal=True,
-            message_type=Gtk.MessageType.INFO,
-            buttons=Gtk.ButtonsType.OK,
-            text=f"Pairing with {device_name}"
+            modal=True
         )
-        dialog.format_secondary_text(
-            f"Enter this passkey on {device_name}:\n\n"
-            f"<span size='xx-large' weight='bold'>{passkey:06d}</span>"
-        )
-        dialog.set_use_markup(True)
+        dialog.add_buttons("_OK", Gtk.ResponseType.OK)
+        
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        content.set_margin_top(20)
+        content.set_margin_bottom(20)
+        
+        # Title label
+        title_label = Gtk.Label(label=f"Pairing with {device_name}")
+        title_label.add_css_class("title-2")
+        content.append(title_label)
+        
+        # Instruction label
+        instruction_label = Gtk.Label(label=f"Enter this passkey on {device_name}:")
+        instruction_label.set_wrap(True)
+        content.append(instruction_label)
+        
+        # Passkey label with large font
+        passkey_label = Gtk.Label()
+        passkey_label.set_markup(f"<span size='xx-large' weight='bold'>{passkey:06d}</span>")
+        passkey_label.add_css_class("title-1")
+        content.append(passkey_label)
+        
         dialog.run()
         dialog.destroy()
     
@@ -298,18 +316,39 @@ class BluetoothAgentUI:
         Returns:
             True if confirmed, False otherwise
         """
-        dialog = Gtk.MessageDialog(
+        dialog = Gtk.Dialog(
+            title=f"Pairing with {device_name}",
             transient_for=self.parent_window,
-            modal=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Pairing with {device_name}"
+            modal=True
         )
-        dialog.format_secondary_text(
-            f"Does this passkey match what's shown on {device_name}?\n\n"
-            f"<span size='xx-large' weight='bold'>{passkey:06d}</span>"
+        dialog.add_buttons(
+            "_No", Gtk.ResponseType.NO,
+            "_Yes", Gtk.ResponseType.YES
         )
-        dialog.set_use_markup(True)
+        dialog.set_default_response(Gtk.ResponseType.YES)
+        
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        content.set_margin_top(20)
+        content.set_margin_bottom(20)
+        
+        # Title label
+        title_label = Gtk.Label(label=f"Pairing with {device_name}")
+        title_label.add_css_class("title-2")
+        content.append(title_label)
+        
+        # Question label
+        question_label = Gtk.Label(label=f"Does this passkey match what's shown on {device_name}?")
+        question_label.set_wrap(True)
+        content.append(question_label)
+        
+        # Passkey label with large font
+        passkey_label = Gtk.Label()
+        passkey_label.set_markup(f"<span size='xx-large' weight='bold'>{passkey:06d}</span>")
+        passkey_label.add_css_class("title-1")
+        content.append(passkey_label)
         
         response = dialog.run()
         dialog.destroy()
@@ -365,14 +404,28 @@ class BluetoothAgentUI:
         Returns:
             True if authorized, False otherwise
         """
-        dialog = Gtk.MessageDialog(
+        dialog = Gtk.Dialog(
+            title="Bluetooth Authorization",
             transient_for=self.parent_window,
-            modal=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text="Bluetooth Authorization"
+            modal=True
         )
-        dialog.format_secondary_text(message)
+        dialog.add_buttons(
+            "_No", Gtk.ResponseType.NO,
+            "_Yes", Gtk.ResponseType.YES
+        )
+        dialog.set_default_response(Gtk.ResponseType.YES)
+        
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        content.set_margin_top(20)
+        content.set_margin_bottom(20)
+        
+        # Message label
+        message_label = Gtk.Label(label=message)
+        message_label.set_wrap(True)
+        content.append(message_label)
         
         response = dialog.run()
         dialog.destroy()

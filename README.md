@@ -23,6 +23,7 @@ A lightweight, modular music player built with GTK4 and Python that manages your
 - **Metadata Display**: Beautiful GTK4 interface with album art and track information
 - **Layout Persistence**: Panel layout is saved and restored between sessions
 - **Smart Track Loading**: Waits for tracks to fully load before playback to prevent audio glitches
+- **Fractal Screensaver**: Optional fractal background panels using the perfect-shuffle algorithm with inverted text for readability
 
 ## Requirements
 
@@ -138,6 +139,19 @@ Panels:
 
 Panels can be resized by dragging the dividers between them. Layout is saved automatically.
 
+### Fractal Screensaver
+
+Each panel can display a fractal background screensaver using the perfect-shuffle algorithm (based on [perfect-shuffle](https://github.com/xcontcom/perfect-shuffle)). 
+
+**Features:**
+- Click the fractal icon (🎨) in any panel header to toggle the screensaver
+- Fractals are generated using deterministic recursive spatial permutations
+- Text automatically inverts (white on dark areas, black on light areas) for optimal readability
+- Each panel can have its own independent fractal pattern
+- Patterns are randomly generated when enabled
+
+The screensaver creates beautiful, self-similar fractal patterns that fill the entire panel background while keeping all UI elements functional and readable.
+
 ### Adding Music to Playlist
 
 From the Library panel:
@@ -200,14 +214,16 @@ MusicPlayer/
 │       ├── playlist_view.py   # Playlist list view with context menu
 │       ├── player_controls.py # Playback controls
 │       ├── metadata_panel.py  # Track metadata and album art
-│       └── bluetooth_panel.py # Bluetooth and Speaker Mode controls
+│       ├── bluetooth_panel.py # Bluetooth and Speaker Mode controls
+│       └── fractal_screensaver.py # Fractal screensaver with inverted text
 ├── core/                      # Core functionality
 │   ├── music_library.py       # Library scanning and indexing
 │   ├── audio_player.py        # GStreamer-based audio player with ALSA
 │   ├── playlist_manager.py    # Playlist handling and persistence
 │   ├── metadata.py            # Audio file metadata extraction
 │   ├── bluetooth_manager.py   # BlueZ D-Bus integration
-│   └── bluetooth_sink.py      # Bluetooth A2DP sink mode
+│   ├── bluetooth_sink.py      # Bluetooth A2DP sink mode
+│   └── fractal_generator.py   # Perfect-shuffle fractal generation
 └── ~/.config/musicplayer/     # User configuration
     └── layout.json            # Saved panel layout
 ```
