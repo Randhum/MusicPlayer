@@ -3,7 +3,8 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
-from gi.repository import Gtk, GObject, Gdk
+gi.require_version('GLib', '2.0')
+from gi.repository import Gtk, GObject, Gdk, GLib
 from typing import Optional, Callable, List
 from core.metadata import TrackMetadata
 
@@ -172,13 +173,23 @@ class PlaylistView(Gtk.Box):
     
     def _show_context_menu(self, x: float, y: float):
         """Show context menu."""
-        # Remove old menu if exists
+        # Properly close and remove old menu if exists
         if self.context_menu:
-            self.context_menu.unparent()
+            try:
+                self.context_menu.popdown()
+            except:
+                pass
+            try:
+                if self.context_menu.get_parent():
+                    self.context_menu.unparent()
+            except:
+                pass
+            self.context_menu = None
         
         # Create popover
         self.context_menu = Gtk.Popover()
-        self.context_menu.set_parent(self.tree_view)
+        # Set child first, then parent
+        self.context_menu.set_has_arrow(True)
         
         # Create menu box with touch-friendly spacing
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
@@ -234,7 +245,14 @@ class PlaylistView(Gtk.Box):
         save_item.set_sensitive(len(self.tracks) > 0)
         menu_box.append(save_item)
         
+        # Set child before parent
         self.context_menu.set_child(menu_box)
+        
+        # Set parent after child is set
+        self.context_menu.set_parent(self.tree_view)
+        
+        # Connect to closed signal for cleanup
+        self.context_menu.connect('closed', self._on_popover_closed)
         
         # Position and show menu
         rect = Gdk.Rectangle()
@@ -245,37 +263,63 @@ class PlaylistView(Gtk.Box):
         self.context_menu.set_pointing_to(rect)
         self.context_menu.popup()
     
+    def _on_popover_closed(self, popover):
+        """Handle popover closed signal for cleanup."""
+        # Clean up after a short delay to avoid issues
+        GLib.timeout_add(100, self._cleanup_popover)
+    
+    def _cleanup_popover(self):
+        """Clean up the popover properly."""
+        if self.context_menu:
+            try:
+                # Check if widget is still valid and has a parent
+                parent = self.context_menu.get_parent()
+                if parent is not None:
+                    self.context_menu.unparent()
+            except (AttributeError, RuntimeError):
+                # Widget might have been destroyed already
+                pass
+            finally:
+                self.context_menu = None
+        return False  # Don't repeat
+    
     def _on_menu_play(self):
         """Handle 'Play' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         if self.selected_index >= 0:
             self.emit('track-activated', self.selected_index)
     
     def _on_menu_remove(self):
         """Handle 'Remove' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         if self.selected_index >= 0:
             self.emit('remove-track', self.selected_index)
     
     def _on_menu_move_up(self):
         """Handle 'Move Up' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         if self.selected_index > 0:
             self.emit('move-track-up', self.selected_index)
     
     def _on_menu_move_down(self):
         """Handle 'Move Down' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         if self.selected_index < len(self.tracks) - 1:
             self.emit('move-track-down', self.selected_index)
     
     def _on_menu_clear(self):
         """Handle 'Clear Playlist' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         self.emit('clear-playlist')
     
     def _on_menu_save(self):
         """Handle 'Save Playlist' from context menu."""
-        self.context_menu.popdown()
+        if self.context_menu:
+            self.context_menu.popdown()
         self.emit('save-playlist')
 
