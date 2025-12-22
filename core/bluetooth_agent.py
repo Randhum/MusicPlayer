@@ -39,9 +39,10 @@ class BluetoothAgent(dbus.service.Object):
         self.pin_code: Optional[str] = None
         
         # Callbacks for UI interaction
-        self.on_passkey_request: Optional[Callable[[str, int], bool]] = None
+        self.on_passkey_request: Optional[Callable[[str], Optional[int]]] = None
         self.on_passkey_display: Optional[Callable[[str, int], None]] = None
-        self.on_pin_request: Optional[Callable[[str], str]] = None
+        self.on_passkey_confirm: Optional[Callable[[str, int], bool]] = None
+        self.on_pin_request: Optional[Callable[[str], Optional[str]]] = None
         self.on_authorization_request: Optional[Callable[[str], bool]] = None
         
         # Register the agent object
@@ -57,13 +58,19 @@ class BluetoothAgent(dbus.service.Object):
                 self.bus.get_object('org.bluez', self.AGENT_MANAGER_PATH),
                 self.AGENT_MANAGER_INTERFACE
             )
-            # Register as default agent with capability "DisplayYesNo"
-            # This allows us to handle passkey display and confirmation
-            agent_manager.RegisterAgent(self.AGENT_PATH, "DisplayYesNo")
+            # Register with capability "KeyboardDisplay" which supports:
+            # - DisplayPasskey: Show passkey to user
+            # - RequestConfirmation: Confirm matching passkeys
+            # - RequestPasskey: Enter passkey from other device
+            # - RequestPinCode: Enter PIN code
+            # This is the most comprehensive capability for modern pairing
+            agent_manager.RegisterAgent(self.AGENT_PATH, "KeyboardDisplay")
             agent_manager.RequestDefaultAgent(self.AGENT_PATH)
-            print("Bluetooth Agent registered successfully")
+            print("Bluetooth Agent registered successfully with KeyboardDisplay capability")
         except Exception as e:
             print(f"Error registering Bluetooth Agent: {e}")
+            import traceback
+            traceback.print_exc()
     
     def release(self):
         """Called when the agent is released."""
@@ -89,12 +96,20 @@ class BluetoothAgent(dbus.service.Object):
         print(f"PIN code requested for device: {device_name} ({device_path})")
         
         if self.on_pin_request:
-            pin = self.on_pin_request(device_name)
-            if pin:
-                self.pin_code = pin
-                return pin
+            try:
+                pin = self.on_pin_request(device_name)
+                if pin:
+                    self.pin_code = pin
+                    print(f"Returning PIN code for {device_name}")
+                    return pin
+                else:
+                    print(f"No PIN code provided for {device_name}")
+            except Exception as e:
+                print(f"Error in PIN request callback: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # Default: return empty string (will fail pairing)
+        # Default: raise exception to cancel pairing
         raise dbus.exceptions.DBusException(
             'org.bluez.Error.Canceled',
             'PIN code request canceled'
@@ -115,13 +130,24 @@ class BluetoothAgent(dbus.service.Object):
         print(f"Passkey requested for device: {device_name} ({device_path})")
         
         if self.on_passkey_request:
-            passkey = self.on_passkey_request(device_name, 0)
-            if passkey and 0 <= passkey <= 999999:
-                self.passkey = passkey
-                return dbus.UInt32(passkey)
+            try:
+                passkey = self.on_passkey_request(device_name)
+                if passkey and 0 <= passkey <= 999999:
+                    self.passkey = passkey
+                    print(f"Returning passkey {passkey:06d} for {device_name}")
+                    return dbus.UInt32(passkey)
+                else:
+                    print(f"Invalid passkey returned: {passkey}")
+            except Exception as e:
+                print(f"Error in passkey request callback: {e}")
+                import traceback
+                traceback.print_exc()
         
-        # Default: return 0 (will fail pairing)
-        return dbus.UInt32(0)
+        # Default: raise exception to cancel pairing
+        raise dbus.exceptions.DBusException(
+            'org.bluez.Error.Canceled',
+            'Passkey request canceled'
+        )
     
     @dbus.service.method(AGENT_INTERFACE, in_signature='ouq', out_signature='')
     def DisplayPasskey(self, device_path, passkey, entered):
@@ -153,16 +179,29 @@ class BluetoothAgent(dbus.service.Object):
         
         # Use passkey confirmation callback if available
         if self.on_passkey_confirm:
-            confirmed = self.on_passkey_confirm(device_name, passkey)
-            if confirmed:
-                return
+            try:
+                confirmed = self.on_passkey_confirm(device_name, passkey)
+                if confirmed:
+                    print(f"Passkey {passkey:06d} confirmed for {device_name}")
+                    return
+                else:
+                    print(f"Passkey {passkey:06d} rejected for {device_name}")
+            except Exception as e:
+                print(f"Error in passkey confirmation callback: {e}")
+                import traceback
+                traceback.print_exc()
         elif self.on_authorization_request:
             # Fallback: use authorization request
-            confirmed = self.on_authorization_request(
-                f"Does the passkey {passkey:06d} match what's shown on {device_name}?"
-            )
-            if confirmed:
-                return
+            try:
+                confirmed = self.on_authorization_request(
+                    f"Does the passkey {passkey:06d} match what's shown on {device_name}?"
+                )
+                if confirmed:
+                    return
+            except Exception as e:
+                print(f"Error in authorization callback: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Default: reject (raise exception)
         raise dbus.exceptions.DBusException(
