@@ -3,7 +3,8 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
-from gi.repository import Gtk, GObject, Gdk
+gi.require_version('GLib', '2.0')
+from gi.repository import Gtk, GObject, Gdk, GLib
 from typing import Optional, Callable
 from pathlib import Path
 from core.metadata import TrackMetadata
@@ -44,6 +45,14 @@ class LibraryBrowser(Gtk.Box):
         self.tree_view.set_headers_visible(False)
         self.tree_view.connect('row-activated', self._on_row_activated)
         
+        # Add gesture for single-click expand/collapse
+        # We'll use a timeout to distinguish single from double clicks
+        click_gesture = Gtk.GestureClick()
+        click_gesture.set_button(1)  # Left mouse button
+        click_gesture.connect('pressed', self._on_click_pressed)
+        click_gesture.connect('released', self._on_click_released)
+        self.tree_view.add_controller(click_gesture)
+        
         # Set row height for touch-friendliness
         self.tree_view.set_row_separator_func(None)
         # Use CSS to set minimum row height
@@ -58,6 +67,10 @@ class LibraryBrowser(Gtk.Box):
         # Context menu
         self.context_menu = None
         self.selected_path = None
+        
+        # Single-click expand/collapse state
+        self._click_timeout_id = None
+        self._click_path = None
         
         # Column
         column = Gtk.TreeViewColumn("Library")
@@ -110,9 +123,17 @@ class LibraryBrowser(Gtk.Box):
                 current['tracks'] = []
             current['tracks'].extend(folder_structure[folder_path])
         
-        # Recursively populate tree view starting from root
-        root_name = root_path.name
-        self._populate_tree(None, folder_tree, root_name)
+        # Populate tree view directly from folder_tree contents (skip root folder name)
+        # Start from top-level items in the music directory
+        for key, value in sorted(folder_tree.items()):
+            if key != 'tracks':
+                self._populate_tree(None, value, key)
+        
+        # Also add root-level tracks if any
+        if 'tracks' in folder_tree:
+            for track in folder_tree['tracks']:
+                track_name = track.title or Path(track.file_path).stem
+                self.store.append(None, [track_name, 'track', track])
     
     def _populate_tree(self, parent_iter, folder_tree, folder_name):
         """Recursively populate tree view from folder structure."""
@@ -126,12 +147,61 @@ class LibraryBrowser(Gtk.Box):
                 self.store.append(folder_iter, [track_name, 'track', track])
         
         # Add subfolders
-        for key, value in folder_tree.items():
+        for key, value in sorted(folder_tree.items()):
             if key != 'tracks':
                 self._populate_tree(folder_iter, value, key)
     
+    def _on_click_pressed(self, gesture, n_press, x, y):
+        """Handle click press - store path for potential expand/collapse."""
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        if path_info:
+            self._click_path = path_info[0]
+        else:
+            self._click_path = None
+    
+    def _on_click_released(self, gesture, n_press, x, y):
+        """Handle click release - expand/collapse on single click after delay."""
+        # Cancel any pending timeout
+        if self._click_timeout_id:
+            GLib.source_remove(self._click_timeout_id)
+            self._click_timeout_id = None
+        
+        # Only handle single clicks (n_press == 1)
+        if n_press == 1 and self._click_path:
+            # Delay to allow double-click to cancel it
+            self._click_timeout_id = GLib.timeout_add(250, self._expand_collapse_folder)
+    
+    def _expand_collapse_folder(self):
+        """Expand or collapse folder after single-click delay."""
+        self._click_timeout_id = None
+        
+        if not self._click_path:
+            return False
+        
+        model = self.tree_view.get_model()
+        tree_iter = model.get_iter(self._click_path)
+        
+        if tree_iter:
+            name, item_type, data = model.get(tree_iter, 0, 1, 2)
+            
+            # Only handle folders for expand/collapse
+            if item_type == 'folder':
+                if self.tree_view.row_expanded(self._click_path):
+                    self.tree_view.collapse_row(self._click_path)
+                else:
+                    self.tree_view.expand_row(self._click_path, False)
+        
+        self._click_path = None
+        return False  # Don't repeat
+    
     def _on_row_activated(self, tree_view, path, column):
         """Handle row activation (double-click)."""
+        # Cancel any pending single-click expand/collapse
+        if self._click_timeout_id:
+            GLib.source_remove(self._click_timeout_id)
+            self._click_timeout_id = None
+            self._click_path = None
+        
         model = tree_view.get_model()
         tree_iter = model.get_iter(path)
         if tree_iter:
