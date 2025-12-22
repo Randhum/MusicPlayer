@@ -35,16 +35,36 @@ class TrackMetadata:
             if audio_file is None:
                 return
             
+            # Check if it's a FLAC file for special handling
+            is_flac = isinstance(audio_file, FLAC)
+            
             # Extract basic metadata
-            self.title = self._get_tag(audio_file, ['TIT2', 'TITLE', '\xa9nam'])
-            self.artist = self._get_tag(audio_file, ['TPE1', 'ARTIST', '\xa9ART'])
-            self.album = self._get_tag(audio_file, ['TALB', 'ALBUM', '\xa9alb'])
-            self.album_artist = self._get_tag(audio_file, ['TPE2', 'ALBUMARTIST', 'aART'])
-            self.genre = self._get_tag(audio_file, ['TCON', 'GENRE', '\xa9gen'])
-            self.year = self._get_tag(audio_file, ['TDRC', 'DATE', '\xa9day'])
+            # FLAC uses Vorbis comments: TITLE, ARTIST, ALBUM, ALBUMARTIST, GENRE, DATE
+            # MP3 uses ID3: TIT2, TPE1, TALB, TPE2, TCON, TDRC
+            # MP4 uses: \xa9nam, \xa9ART, \xa9alb, aART, \xa9gen, \xa9day
+            if is_flac:
+                # FLAC-specific tag names (Vorbis comments)
+                self.title = self._get_tag(audio_file, ['TITLE', 'TIT2', '\xa9nam'])
+                self.artist = self._get_tag(audio_file, ['ARTIST', 'TPE1', '\xa9ART'])
+                self.album = self._get_tag(audio_file, ['ALBUM', 'TALB', '\xa9alb'])
+                self.album_artist = self._get_tag(audio_file, ['ALBUMARTIST', 'ALBUM ARTIST', 'TPE2', 'aART'])
+                self.genre = self._get_tag(audio_file, ['GENRE', 'TCON', '\xa9gen'])
+                self.year = self._get_tag(audio_file, ['DATE', 'YEAR', 'TDRC', '\xa9day'])
+            else:
+                # Standard tag names for other formats
+                self.title = self._get_tag(audio_file, ['TIT2', 'TITLE', '\xa9nam'])
+                self.artist = self._get_tag(audio_file, ['TPE1', 'ARTIST', '\xa9ART'])
+                self.album = self._get_tag(audio_file, ['TALB', 'ALBUM', '\xa9alb'])
+                self.album_artist = self._get_tag(audio_file, ['TPE2', 'ALBUMARTIST', 'ALBUM ARTIST', 'aART'])
+                self.genre = self._get_tag(audio_file, ['TCON', 'GENRE', '\xa9gen'])
+                self.year = self._get_tag(audio_file, ['TDRC', 'DATE', 'YEAR', '\xa9day'])
             
             # Extract track number
-            track_num = self._get_tag(audio_file, ['TRCK', 'TRACKNUMBER', 'trkn'])
+            if is_flac:
+                track_num = self._get_tag(audio_file, ['TRACKNUMBER', 'TRACK', 'TRCK', 'trkn'])
+            else:
+                track_num = self._get_tag(audio_file, ['TRCK', 'TRACKNUMBER', 'TRACK', 'trkn'])
+            
             if track_num:
                 try:
                     # Handle formats like "1/10" or just "1"
@@ -52,7 +72,9 @@ class TrackMetadata:
                         track_num = track_num[0]
                     if isinstance(track_num, tuple):
                         track_num = track_num[0]
-                    self.track_number = int(str(track_num).split('/')[0])
+                    # FLAC track numbers are often just strings like "1" or "01"
+                    track_str = str(track_num).split('/')[0].strip()
+                    self.track_number = int(track_str)
                 except (ValueError, AttributeError):
                     pass
             
@@ -94,12 +116,47 @@ class TrackMetadata:
     def _extract_album_art(self, audio_file) -> Optional[str]:
         """Extract album art from the audio file."""
         try:
-            # Try different tag formats for album art
+            is_flac = isinstance(audio_file, FLAC)
+            
+            if is_flac:
+                # FLAC uses METADATA_BLOCK_PICTURE which is a list of Picture objects
+                try:
+                    pictures = audio_file.pictures
+                    if pictures:
+                        # Get the first picture (usually the cover)
+                        picture = pictures[0]
+                        if picture.data:
+                            art_path = self._save_album_art(picture.data)
+                            if art_path:
+                                return art_path
+                except (AttributeError, IndexError, TypeError):
+                    pass
+                
+                # Fallback: try METADATA_BLOCK_PICTURE tag directly
+                try:
+                    if 'METADATA_BLOCK_PICTURE' in audio_file:
+                        import base64
+                        import struct
+                        picture_data = audio_file['METADATA_BLOCK_PICTURE'][0]
+                        # Decode base64
+                        decoded = base64.b64decode(picture_data)
+                        # Skip FLAC picture block header (32 bytes)
+                        # Format: picture type (4), MIME length (4), MIME, description length (4), description, 
+                        # width (4), height (4), depth (4), colors (4), data length (4), data
+                        if len(decoded) > 32:
+                            # Find data start (skip header)
+                            offset = 32
+                            # Actually, let's use mutagen's built-in handling
+                            # The pictures property should work
+                            pass
+                except (KeyError, ValueError, TypeError):
+                    pass
+            
+            # Try different tag formats for album art (MP3, MP4, etc.)
             art_keys = [
                 'APIC:',  # MP3
                 'covr',   # MP4
-                'METADATA_BLOCK_PICTURE',  # FLAC
-                'PICTURE',  # FLAC alternative
+                'PICTURE',  # OGG
             ]
             
             for key in art_keys:

@@ -26,11 +26,13 @@ Install the following packages using `emerge`:
 # Core GTK / GStreamer (required for playback)
 emerge -av \
   media-libs/gstreamer \
-  media-plugins/gst-plugins-base \
-  media-plugins/gst-plugins-good \
-  media-plugins/gst-plugins-bad \
+  media-libs/gst-plugins-base \
+  media-libs/gst-plugins-good \
+  media-libs/gst-plugins-bad \
   media-plugins/gst-plugins-alsa \
-  media-plugins/gst-plugins-mpg123
+  media-plugins/gst-plugins-mpg123 \
+  media-plugins/gst-plugins-faac \
+  media-plugins/gst-plugins-bluez
 
 # Audio stack
 emerge -av media-libs/alsa-lib
@@ -83,11 +85,17 @@ python main.py
 
 The player automatically scans `~/Music` and `~/Musik` directories for audio files. Supported formats include:
 - MP3
-- FLAC  
+- FLAC (with full metadata support)
 - OGG
 - M4A/AAC
 - WAV
 - Any format supported by GStreamer
+
+**Library Indexing:**
+- The library index is automatically saved to `~/.config/musicplayer/library_index.json`
+- On startup, the index is loaded from disk for instant access
+- Only new or modified files are rescanned, making subsequent scans much faster
+- The index tracks file modification times to detect changes
 
 ### Dockable Panels
 
