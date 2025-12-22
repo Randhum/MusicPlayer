@@ -20,7 +20,8 @@ class LibraryBrowser(Gtk.Box):
     
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        self.set_size_request(30, -1)
+        self.set_size_request(300, -1)
+        self.set_vexpand(True)  # Expand to fill available vertical space
         
         # Header
         header = Gtk.Label(label="Library")
@@ -30,6 +31,7 @@ class LibraryBrowser(Gtk.Box):
         # Scrolled window for tree view
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_vexpand(True)  # Make scrolled window expand vertically
         
         # Tree store: (name, type, data)
         # type: 'artist', 'album', 'track'

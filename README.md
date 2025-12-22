@@ -23,27 +23,31 @@ A lightweight, modular music player built with GTK4 and Python that manages your
 Install the following packages using `emerge`:
 
 ```bash
-# GStreamer and plugins (required for playback)
-emerge -av media-libs/gstreamer
-emerge -av media-plugins/gst-plugins-base
-emerge -av media-plugins/gst-plugins-good
-emerge -av media-plugins/gst-plugins-bad
-emerge -av media-plugins/gst-plugins-alsa  # ALSA output
+# Core GTK / GStreamer (required for playback)
+emerge -av \
+  media-libs/gstreamer \
+  media-plugins/gst-plugins-base \
+  media-plugins/gst-plugins-good \
+  media-plugins/gst-plugins-bad \
+  media-plugins/gst-plugins-alsa \
+  media-plugins/gst-plugins-mpg123
+
+# Audio stack
+emerge -av media-libs/alsa-lib
 
 # Bluetooth support
 emerge -av net-wireless/bluez
 
 # Audio system (choose one or both)
-emerge -av media-sound/pulseaudio  # or
-emerge -av media-video/pipewire
+emerge -av media-video/pipewire     # recommended
+# or
+emerge -av media-sound/pulseaudio
 
-# Python and GTK
-emerge -av dev-python/pygobject
-emerge -av dev-python/mutagen
-emerge -av dev-python/dbus-python
+# Python bindings / libraries
+emerge -av dev-python/pygobject dev-python/mutagen dev-python/dbus-python
 
-# ffmpeg for format support (optional but recommended)
-emerge -av media-video/ffmpeg
+# Optional but recommended: extra format support and tools
+emerge -av media-video/ffmpeg dev-util/gst-devtools
 ```
 
 ### Python Dependencies
