@@ -6,7 +6,8 @@ from dbus.mainloop.glib import DBusGMainLoop
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk
+gi.require_version('GLib', '2.0')
+from gi.repository import Gtk, GLib
 
 
 class BluetoothDevice:
@@ -242,6 +243,11 @@ class BluetoothManager:
                     # Trust device after successful pairing (Bluetooth best practice)
                     if device.paired and not old_paired:
                         self._trust_device(device_path)
+                        # After pairing and trusting, try to connect if not already connected
+                        # This is important for A2DP sink mode - device needs to connect to stream audio
+                        if not device.connected:
+                            # Use GLib.idle_add to avoid blocking the signal handler
+                            GLib.idle_add(self._auto_connect_after_pairing, device_path)
                 
                 # Update Trusted state
                 if 'Trusted' in changed:
@@ -433,26 +439,48 @@ class BluetoothManager:
         - Raises org.bluez.Error.NotReady if adapter not ready
         """
         try:
+            device = self.devices.get(device_path)
+            device_name = device.name if device else "unknown"
+            print(f"Attempting to connect device: {device_name} ({device_path})")
+            print(f"  Paired: {device.paired if device else 'unknown'}")
+            print(f"  Trusted: {device.trusted if device else 'unknown'}")
+            print(f"  Currently connected: {device.connected if device else 'unknown'}")
+            
             device_proxy = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, device_path),
                 self.DEVICE_INTERFACE
             )
             device_proxy.Connect()
+            print(f"Connect() call succeeded for {device_name}")
+            print("Note: Connection may take a few seconds to establish...")
             return True
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            error_msg = str(e)
+            print(f"DBus error connecting device: {error_name}")
+            print(f"  Error message: {error_msg}")
+            
             if 'org.bluez.Error.AlreadyConnected' in error_name:
                 print(f"Device {device_path} is already connected")
                 return True  # Already connected is not an error
             elif 'org.bluez.Error.Failed' in error_name:
                 print(f"Connection failed: {e}")
+                print("  This might mean:")
+                print("  - Device is not in range")
+                print("  - Device rejected the connection")
+                print("  - A2DP profile is not available")
             elif 'org.bluez.Error.NotReady' in error_name:
                 print(f"Bluetooth adapter not ready")
+            elif 'org.bluez.Error.InProgress' in error_name:
+                print(f"Connection already in progress")
+                return True  # In progress is okay
             else:
-                print(f"Error connecting device: {e}")
+                print(f"Unknown error connecting device: {e}")
             return False
         except Exception as e:
-            print(f"Error connecting device: {e}")
+            print(f"Exception connecting device: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def disconnect_device(self, device_path: str) -> bool:
@@ -523,6 +551,42 @@ class BluetoothManager:
             return False
         except Exception as e:
             print(f"Error trusting device: {e}")
+            return False
+    
+    def _auto_connect_after_pairing(self, device_path: str) -> bool:
+        """
+        Automatically connect a device after pairing.
+        
+        This is called via GLib.idle_add to avoid blocking signal handlers.
+        Returns False to remove from idle queue.
+        
+        In sink mode, this ensures devices connect after pairing so they can
+        stream audio via A2DP.
+        """
+        try:
+            device = self.devices.get(device_path)
+            if device and device.paired and not device.connected:
+                print(f"Auto-connecting device {device.name} ({device.address}) after pairing...")
+                # Small delay to ensure trust is set and device is ready
+                GLib.timeout_add(500, lambda: self._do_auto_connect(device_path))
+        except Exception as e:
+            print(f"Error scheduling auto-connect after pairing: {e}")
+        return False  # Remove from idle queue
+    
+    def _do_auto_connect(self, device_path: str) -> bool:
+        """Actually perform the auto-connect (called after delay)."""
+        try:
+            device = self.devices.get(device_path)
+            if device and device.paired and not device.connected:
+                print(f"Connecting device {device.name}...")
+                success = self.connect_device(device_path)
+                if success:
+                    print(f"Successfully connected {device.name}")
+                else:
+                    print(f"Failed to connect {device.name} - it may connect automatically later")
+            return False  # Remove from timeout
+        except Exception as e:
+            print(f"Error in auto-connect: {e}")
             return False
     
     def cleanup(self):

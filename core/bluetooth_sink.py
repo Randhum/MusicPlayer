@@ -410,6 +410,20 @@ class BluetoothSink:
     def _configure_audio_routing(self, device: BluetoothDevice):
         """Configure audio routing for the connected device."""
         try:
+            print(f"Configuring audio routing for {device.name} ({device.address})")
+            
+            # Check if A2DP transport is available
+            transport_available = self._check_a2dp_transport(device)
+            if not transport_available:
+                print(f"Warning: A2DP transport not yet available for {device.name}")
+                print("Audio routing will be configured when A2DP transport becomes active")
+                # Try again after a short delay
+                import gi
+                gi.require_version('GLib', '2.0')
+                from gi.repository import GLib
+                GLib.timeout_add(1000, lambda: self._retry_audio_routing(device))
+                return
+            
             # Prefer GStreamer BlueZ plugin if available
             if self.gst_bluez_available:
                 self._setup_gst_bluez_routing(device)
@@ -428,6 +442,38 @@ class BluetoothSink:
                 
         except Exception as e:
             print(f"Error configuring audio routing: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _check_a2dp_transport(self, device: BluetoothDevice) -> bool:
+        """Check if A2DP transport is available for the device."""
+        try:
+            manager = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+                'org.freedesktop.DBus.ObjectManager'
+            )
+            objects = manager.GetManagedObjects()
+            
+            # Look for MediaTransport interface for this device
+            for path, interfaces in objects.items():
+                if self.MEDIA_TRANSPORT_INTERFACE in interfaces:
+                    # Check if this transport belongs to our device
+                    transport_props = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
+                    device_path = str(transport_props.get('Device', ''))
+                    if device_path == device.path:
+                        state = str(transport_props.get('State', ''))
+                        print(f"A2DP transport found for {device.name}: state={state}")
+                        return state in ['idle', 'pending', 'active']
+            return False
+        except Exception as e:
+            print(f"Error checking A2DP transport: {e}")
+            return False
+    
+    def _retry_audio_routing(self, device: BluetoothDevice) -> bool:
+        """Retry audio routing configuration after delay."""
+        if device.connected:
+            self._configure_audio_routing(device)
+        return False  # Remove from timeout
     
     def _setup_gst_bluez_routing(self, device: BluetoothDevice):
         """Set up audio routing using GStreamer BlueZ plugin."""
