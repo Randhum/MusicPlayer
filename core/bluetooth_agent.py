@@ -7,6 +7,7 @@ from typing import Optional, Callable
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
+from time import sleep
 
 
 class BluetoothAgent(dbus.service.Object):
@@ -276,16 +277,26 @@ class BluetoothAgent(dbus.service.Object):
                 confirmed = self.on_passkey_confirm(device_name, passkey_int)
                 if confirmed:
                     print(f"Passkey {passkey_int:06d} confirmed for {device_name}")
-                    return
+                    return  # Success - return normally
                 else:
-                    print(f"Passkey {passkey_int:06d} rejected for {device_name}")
+                    # User rejected - raise exception immediately
+                    print(f"Passkey {passkey_int:06d} rejected by user for {device_name}")
+                    raise dbus.exceptions.DBusException(
+                        'org.bluez.Error.Rejected',
+                        'Passkey confirmation rejected by user'
+                    )
             except dbus.exceptions.DBusException:
-                # Re-raise D-Bus exceptions
+                # Re-raise D-Bus exceptions (including our rejection)
                 raise
             except Exception as e:
                 print(f"Error in passkey confirmation callback: {e}")
                 import traceback
                 traceback.print_exc()
+                # On error, reject the pairing
+                raise dbus.exceptions.DBusException(
+                    'org.bluez.Error.Rejected',
+                    f'Passkey confirmation failed: {e}'
+                )
         elif self.on_authorization_request:
             # Fallback: use authorization request
             try:
@@ -293,19 +304,32 @@ class BluetoothAgent(dbus.service.Object):
                     f"Does the passkey {passkey_int:06d} match what's shown on {device_name}?"
                 )
                 if confirmed:
-                    return
+                    return  # Success - return normally
+                else:
+                    # User rejected - raise exception immediately
+                    print(f"Passkey {passkey_int:06d} rejected by user for {device_name}")
+                    raise dbus.exceptions.DBusException(
+                        'org.bluez.Error.Rejected',
+                        'Passkey confirmation rejected by user'
+                    )
             except dbus.exceptions.DBusException:
-                # Re-raise D-Bus exceptions
+                # Re-raise D-Bus exceptions (including our rejection)
                 raise
             except Exception as e:
                 print(f"Error in authorization callback: {e}")
                 import traceback
                 traceback.print_exc()
+                # On error, reject the pairing
+                raise dbus.exceptions.DBusException(
+                    'org.bluez.Error.Rejected',
+                    f'Passkey confirmation failed: {e}'
+                )
         
-        # Default: reject (raise exception)
+        # Default: reject (raise exception) - no callback available
+        print(f"Passkey {passkey_int:06d} rejected: no confirmation callback available")
         raise dbus.exceptions.DBusException(
             'org.bluez.Error.Rejected',
-            'Passkey confirmation rejected'
+            'Passkey confirmation rejected: no callback available'
         )
     
     @dbus.service.method(AGENT_INTERFACE, in_signature='o', out_signature='')
@@ -476,23 +500,34 @@ class BluetoothAgentUI:
         content.append(passkey_label)
         
         # GTK4: Use response signal instead of run()
+        # Use a main loop to properly handle the dialog synchronously
         response_received = {'value': None}
+        main_loop = GLib.MainLoop()
         
         def on_response(dialog, response_id):
             response_received['value'] = response_id
             dialog.close()
+            main_loop.quit()
+        
+        def on_close(dialog):
+            # Handle window close (X button) - treat as rejection
+            if response_received['value'] is None:
+                response_received['value'] = Gtk.ResponseType.NO
+                main_loop.quit()
         
         dialog.connect('response', on_response)
+        dialog.connect('close-request', on_close)
         dialog.present()
         
-        # Wait for response using main loop
-        while response_received['value'] is None:
-            GLib.MainContext.default().iteration(True)
+        # Run main loop until response is received
+        main_loop.run()
         
         response = response_received['value']
         dialog.destroy()
         
-        return response == Gtk.ResponseType.YES
+        result = response == Gtk.ResponseType.YES
+        print(f"Dialog response: {response}, confirmed: {result}")
+        return result
     
     def show_pin_request(self, device_name: str) -> Optional[str]:
         """
