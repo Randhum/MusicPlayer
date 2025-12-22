@@ -166,9 +166,46 @@ class MainWindow(Gtk.ApplicationWindow):
                 border-bottom: 1px solid @borders;
             }
             .dock-header button {
-                min-width: 24px;
-                min-height: 24px;
-                padding: 2px;
+                min-width: 32px;
+                min-height: 32px;
+                padding: 4px;
+            }
+            
+            /* Touch-friendly tree views */
+            .library-tree row {
+                min-height: 48px;
+                padding: 8px;
+            }
+            
+            .playlist-tree row {
+                min-height: 48px;
+                padding: 8px;
+            }
+            
+            /* Touch-friendly buttons */
+            button {
+                min-height: 36px;
+                padding: 8px 12px;
+            }
+            
+            /* Touch-friendly entry fields */
+            entry {
+                min-height: 36px;
+                padding: 8px;
+            }
+            
+            /* Touch-friendly scales */
+            scale {
+                min-height: 30px;
+            }
+            
+            scale slider {
+                min-width: 20px;
+                min-height: 20px;
+            }
+            
+            scale trough {
+                min-height: 8px;
             }
         """)
         

@@ -6,9 +6,10 @@ A lightweight, modular music player built with GTK4 and Python that manages your
 
 - **Modular Dockable Panels**: Each panel (Library, Playlist, Now Playing, Bluetooth) can be detached as a separate window and rearranged
 - **GStreamer + ALSA Playback**: Reliable audio playback using GStreamer with direct ALSA output
-- **Browse and Play**: Browse your local music library (`~/Music` and `~/Musik`)
+- **Folder-Based Library Browser**: Browse your music library using the original folder structure from your Music directory
+- **Touch-Friendly Interface**: Large buttons, increased row heights, and generous spacing optimized for touch screens
 - **Enhanced Playlist Management**: 
-  - Double-click tracks/albums to add to playlist and play
+  - Double-click tracks/folders to add to playlist and play
   - Right-click context menus for adding, removing, and reordering tracks
   - Save and load custom playlists
 - **Bluetooth Speaker Mode**: Act as a Bluetooth audio receiver - stream audio from mobile phones to your speaker jack
@@ -104,8 +105,8 @@ The application uses a modular panel system. Each panel has a header with:
 - **Detach Button**: Click to pop out the panel as a separate window
 
 Panels:
-- **Library**: Browse artists, albums, and tracks
-- **Playlist**: View and manage your current queue
+- **Library**: Browse your music using the original folder structure from your Music directory
+- **Playlist**: View and manage your current queue with touch-friendly list items
 - **Now Playing**: Display album art and track metadata
 - **Bluetooth**: Manage Bluetooth connections and Speaker Mode
 
@@ -115,10 +116,10 @@ Panels can be resized by dragging the dividers between them. Layout is saved aut
 
 From the Library panel:
 - **Double-click** a track to replace playlist and play
-- **Double-click** an album to add all tracks and play
+- **Double-click** a folder to add all tracks in that folder (and subfolders) and play
 - **Right-click** for context menu:
-  - "Play Now" - Replace playlist and play
-  - "Add to Playlist" - Append without playing
+  - "Play Now" / "Play Folder" - Replace playlist and play
+  - "Add to Playlist" / "Add Folder to Playlist" - Append without playing
 
 From the Playlist panel:
 - **Double-click** a track to play it

@@ -23,10 +23,13 @@ class MusicLibrary:
     def __init__(self):
         self.tracks: List[TrackMetadata] = []
         self.artists: Dict[str, Dict[str, List[TrackMetadata]]] = defaultdict(lambda: defaultdict(list))
+        # Folder structure: path -> List[TrackMetadata]
+        self.folder_structure: Dict[str, List[TrackMetadata]] = defaultdict(list)
         self._lock = threading.Lock()
         self._scanning = False
         self._index_file = INDEX_FILE
         self._file_cache: Dict[str, Dict] = {}  # file_path -> {mtime, hash, metadata}
+        self._music_root: Optional[Path] = None  # Root music directory
         
         # Ensure config directory exists
         self._index_file.parent.mkdir(parents=True, exist_ok=True)
@@ -60,23 +63,38 @@ class MusicLibrary:
         
         # Scan directories incrementally
         tracks = []
+        folder_structure = defaultdict(list)
+        music_root = None
+        
         for music_dir in music_dirs:
             if music_dir.exists() and music_dir.is_dir():
-                tracks.extend(self._scan_directory(music_dir))
+                if music_root is None:
+                    music_root = music_dir
+                tracks.extend(self._scan_directory(music_dir, folder_structure, music_dir))
         
         with self._lock:
             self.tracks = tracks
+            self.folder_structure = folder_structure
+            self._music_root = music_root
             self._rebuild_index()
             self._save_index()
     
-    def _scan_directory(self, directory: Path) -> List[TrackMetadata]:
+    def _scan_directory(self, directory: Path, folder_structure: Dict[str, List[TrackMetadata]], music_root: Path) -> List[TrackMetadata]:
         """Recursively scan a directory for audio files."""
         tracks = []
         
         try:
             for root, dirs, files in os.walk(directory):
+                root_path = Path(root)
+                # Get relative path from music root for folder structure
+                try:
+                    rel_path = str(root_path.relative_to(music_root))
+                except ValueError:
+                    # If not relative, use absolute path
+                    rel_path = str(root_path)
+                
                 for file in files:
-                    file_path = Path(root) / file
+                    file_path = root_path / file
                     if file_path.suffix.lower() in AUDIO_EXTENSIONS:
                         try:
                             file_str = str(file_path)
@@ -85,6 +103,7 @@ class MusicLibrary:
                             if self._needs_rescan(file_str):
                                 metadata = TrackMetadata(file_str)
                                 tracks.append(metadata)
+                                folder_structure[rel_path].append(metadata)
                                 # Update cache
                                 self._update_cache(file_str, metadata)
                             else:
@@ -92,6 +111,7 @@ class MusicLibrary:
                                 cached_metadata = self._get_cached_metadata(file_str)
                                 if cached_metadata:
                                     tracks.append(cached_metadata)
+                                    folder_structure[rel_path].append(cached_metadata)
                         except Exception as e:
                             print(f"Error processing {file_path}: {e}")
         except Exception as e:
@@ -158,6 +178,10 @@ class MusicLibrary:
             for album in self.artists[artist]:
                 tracks = self.artists[artist][album]
                 tracks.sort(key=lambda t: (t.track_number or 999, t.title or ""))
+        
+        # Sort tracks within folders by filename
+        for folder_path in self.folder_structure:
+            self.folder_structure[folder_path].sort(key=lambda t: t.file_path)
     
     def get_artists(self) -> List[str]:
         """Get list of all artists, sorted."""
@@ -218,6 +242,16 @@ class MusicLibrary:
     def is_scanning(self) -> bool:
         """Check if library is currently being scanned."""
         return self._scanning
+    
+    def get_folder_structure(self) -> Dict[str, List[TrackMetadata]]:
+        """Get the folder structure of the music library."""
+        with self._lock:
+            return dict(self.folder_structure)
+    
+    def get_music_root(self) -> Optional[Path]:
+        """Get the root music directory."""
+        with self._lock:
+            return self._music_root
     
     def _save_index(self):
         """Save the library index to disk."""
