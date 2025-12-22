@@ -43,10 +43,16 @@ class PlaylistView(Gtk.Box):
         self.tree_view.add_css_class("playlist-tree")
         
         # Add right-click gesture for context menu
-        gesture = Gtk.GestureClick()
-        gesture.set_button(3)  # Right mouse button
-        gesture.connect('pressed', self._on_right_click)
-        self.tree_view.add_controller(gesture)
+        right_click_gesture = Gtk.GestureClick()
+        right_click_gesture.set_button(3)  # Right mouse button
+        right_click_gesture.connect('pressed', self._on_right_click)
+        self.tree_view.add_controller(right_click_gesture)
+        
+        # Add long-press gesture for context menu (touch-friendly)
+        long_press_gesture = Gtk.GestureLongPress()
+        long_press_gesture.set_touch_only(True)  # Only for touch, not mouse
+        long_press_gesture.connect('pressed', self._on_long_press)
+        self.tree_view.add_controller(long_press_gesture)
         
         # Context menu
         self.context_menu = None
@@ -144,6 +150,14 @@ class PlaylistView(Gtk.Box):
     
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
+        self._show_context_menu_at_position(x, y)
+    
+    def _on_long_press(self, gesture, x, y):
+        """Handle long-press to show context menu (touch-friendly)."""
+        self._show_context_menu_at_position(x, y)
+    
+    def _show_context_menu_at_position(self, x, y):
+        """Show context menu at the given position."""
         # Get the path at click position
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
         if path_info:

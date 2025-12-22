@@ -28,6 +28,8 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Music Player")
         self.set_default_size(1200, 800)
+        # Ensure window can be maximized
+        self.set_resizable(True)
         
         # Initialize core components
         self.library = MusicLibrary()
