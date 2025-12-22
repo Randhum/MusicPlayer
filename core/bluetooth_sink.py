@@ -55,13 +55,37 @@ class BluetoothSink:
             if not Gst.is_initialized():
                 Gst.init(None)
             
-            # Check for BlueZ plugin elements
-            # Common BlueZ plugin element names: bluetoothaudiosink, bluez, etc.
-            bluez_elements = [
-                'bluetoothaudiosink',
+            # Check for BlueZ plugin by inspecting registry
+            # The plugin package is media-libs/gst-plugins-bluez
+            # It provides elements for BlueZ A2DP integration
+            registry = Gst.Registry.get()
+            
+            # Check for BlueZ-related plugins in the registry
+            plugins_to_check = [
                 'bluez',
-                'bluezaudiosink',
+                'gstbluez',
+                'bluezaudio',
                 'bluezsrc',
+                'bluezsink',
+            ]
+            
+            # Also check for factory names that might contain bluez
+            factories = registry.get_feature_list(Gst.ElementFactory)
+            for factory in factories:
+                factory_name = factory.get_name().lower()
+                if 'bluez' in factory_name:
+                    self.gst_bluez_available = True
+                    print(f"GStreamer BlueZ plugin found: {factory.get_name()}")
+                    return
+            
+            # Try to create common BlueZ element names
+            bluez_elements = [
+                'bluezsrc',
+                'bluezsink',
+                'bluezaudiosrc',
+                'bluezaudiosink',
+                'bluetoothaudiosink',
+                'bluetoothaudiosrc',
             ]
             
             for element_name in bluez_elements:
@@ -71,8 +95,12 @@ class BluetoothSink:
                     print(f"GStreamer BlueZ plugin found: {element_name}")
                     return
             
-            print("GStreamer BlueZ plugin not found.")
-            print("Install with: emerge -av media-plugins/gst-plugins-bluez")
+            # If not found, check if the plugin is installed but not loaded
+            # This is informational - the plugin might work via D-Bus integration
+            print("GStreamer BlueZ plugin elements not found in registry.")
+            print("Note: media-libs/gst-plugins-bluez may use D-Bus integration")
+            print("and may not expose traditional GStreamer elements.")
+            print("Bluetooth audio will work via PipeWire/PulseAudio if available.")
             self.gst_bluez_available = False
         except Exception as e:
             print(f"Error checking GStreamer BlueZ plugin: {e}")

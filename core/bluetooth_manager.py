@@ -89,17 +89,16 @@ class BluetoothManager:
     def _setup_agent(self):
         """Set up the Bluetooth Agent for handling pairing confirmations."""
         try:
-            if not self.adapter_path:
-                print("Warning: No adapter found, cannot set up pairing agent")
-                return
-            
-            # Create UI handler for pairing dialogs
+            # Create UI handler for pairing dialogs first
             self.agent_ui = BluetoothAgentUI(self.parent_window)
             
-            # Create and register the agent
-            self.agent = BluetoothAgent(self.bus, self.adapter_path)
+            # Create and register the agent (adapter_path may be None initially)
+            # The agent will still register, but we'll update it if adapter is found later
+            adapter_path = self.adapter_path or '/org/bluez/hci0'  # Default adapter path
+            self.agent = BluetoothAgent(self.bus, adapter_path)
             
-            # Set up agent callbacks to use UI
+            # Set up agent callbacks to use UI - this must be done immediately
+            # so callbacks are available when pairing requests arrive
             self.agent.on_passkey_display = self.agent_ui.show_passkey_display
             self.agent.on_passkey_confirm = self.agent_ui.show_passkey_confirmation
             self.agent.on_passkey_request = self._handle_passkey_request
@@ -107,8 +106,12 @@ class BluetoothManager:
             self.agent.on_pin_request = self.agent_ui.show_pin_request
             
             print("Bluetooth pairing agent set up successfully")
+            if not self.adapter_path:
+                print("Note: Adapter path not yet available, agent registered with default path")
         except Exception as e:
             print(f"Error setting up Bluetooth agent: {e}")
+            import traceback
+            traceback.print_exc()
             print("Pairing confirmations may not work properly")
     
     def _handle_passkey_request(self, device_name: str) -> Optional[int]:
