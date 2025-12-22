@@ -141,16 +141,18 @@ Panels can be resized by dragging the dividers between them. Layout is saved aut
 
 ### Fractal Screensaver
 
-Each panel can display a fractal background screensaver using the perfect-shuffle algorithm (based on [perfect-shuffle](https://github.com/xcontcom/perfect-shuffle)). 
+Each panel can display an animated fractal background screensaver using the perfect-shuffle algorithm (based on [perfect-shuffle](https://github.com/xcontcom/perfect-shuffle)). 
 
 **Features:**
-- Click the fractal icon (🎨) in any panel header to toggle the screensaver
-- Fractals are generated using deterministic recursive spatial permutations
-- Text automatically inverts (white on dark areas, black on light areas) for optimal readability
-- Each panel can have its own independent fractal pattern
-- Patterns are randomly generated when enabled
+- **Auto-activation**: Screensaver automatically activates after 30 seconds of inactivity
+- **Manual toggle**: Click the fractal icon (🎨) in any panel header to toggle the screensaver
+- **Animated fractals**: Fractals "flow" and evolve over time, creating living patterns
+- **Activity detection**: Any mouse movement, keyboard input, or click automatically disables the screensaver
+- **Text inversion**: Text automatically inverts (white with shadow on dark backgrounds) for optimal readability
+- **Per-panel**: Each panel has its own independent timeout and fractal pattern
+- **Random patterns**: Patterns are randomly generated when enabled, creating unique visual experiences
 
-The screensaver creates beautiful, self-similar fractal patterns that fill the entire panel background while keeping all UI elements functional and readable.
+The screensaver creates beautiful, self-similar fractal patterns that fill the entire panel background. The fractals continuously morph and flow, creating a mesmerizing "living" effect while keeping all UI elements functional and readable. The screensaver automatically activates when you're not interacting with a panel, and immediately deactivates when you move your mouse or type.
 
 ### Adding Music to Playlist
 
@@ -190,14 +192,27 @@ To use your computer as a Bluetooth speaker:
 
 **Bluetooth Implementation:**
 - Uses BlueZ D-Bus API for device management (pairing, connection, discovery)
+- **Standards-Compliant Implementation**: Fully compliant with BlueZ Agent1 interface specification
+  - Proper D-Bus method signatures matching BlueZ specifications
+  - Correct error handling with BlueZ-specific D-Bus exceptions
+  - Proper agent registration and cleanup on shutdown
 - **Pairing Confirmations**: Full support for modern Bluetooth pairing with passkey/PIN confirmations
   - Automatically handles passkey display and confirmation dialogs
-  - Supports 6-digit passkey matching (Numeric Comparison pairing)
-  - Supports PIN code entry when required
+  - Supports 6-digit passkey matching (Numeric Comparison pairing, 000000-999999)
+  - Supports PIN code entry when required (4-16 digits, validated)
   - Shows authorization dialogs for device connections
-- Prefers GStreamer BlueZ plugin for audio streaming when available
-- Falls back to PipeWire/PulseAudio routing if GStreamer plugin not installed
-- All Bluetooth operations use the official BlueZ library via D-Bus
+  - Proper validation of all pairing inputs according to Bluetooth standards
+- **Device Trust Management**: Automatically trusts devices after successful pairing
+  - Trusted devices can reconnect automatically without user intervention
+  - Follows Bluetooth security best practices
+- **Connection State Management**: Robust handling of connection state transitions
+  - Proper handling of pairing, connection, and disconnection states
+  - Signal-based property change monitoring
+  - Clean resource management and cleanup
+- **A2DP Sink Profile**: Verifies A2DP sink profile availability before enabling
+  - Prefers GStreamer BlueZ plugin for audio streaming when available
+  - Falls back to PipeWire/PulseAudio routing if GStreamer plugin not installed
+  - All Bluetooth operations use the official BlueZ library via D-Bus
 
 ## Project Structure
 

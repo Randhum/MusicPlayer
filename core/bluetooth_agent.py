@@ -67,10 +67,30 @@ class BluetoothAgent(dbus.service.Object):
             agent_manager.RegisterAgent(self.AGENT_PATH, "KeyboardDisplay")
             agent_manager.RequestDefaultAgent(self.AGENT_PATH)
             print("Bluetooth Agent registered successfully with KeyboardDisplay capability")
+        except dbus.exceptions.DBusException as e:
+            print(f"Error registering Bluetooth Agent: {e}")
+            # Re-raise BlueZ-specific exceptions
+            raise
         except Exception as e:
             print(f"Error registering Bluetooth Agent: {e}")
             import traceback
             traceback.print_exc()
+    
+    def unregister_agent(self):
+        """Unregister this agent from BlueZ."""
+        try:
+            agent_manager = dbus.Interface(
+                self.bus.get_object('org.bluez', self.AGENT_MANAGER_PATH),
+                self.AGENT_MANAGER_INTERFACE
+            )
+            agent_manager.UnregisterAgent(self.AGENT_PATH)
+            print("Bluetooth Agent unregistered successfully")
+        except dbus.exceptions.DBusException as e:
+            # Agent might already be unregistered, which is fine
+            if 'org.bluez.Error.DoesNotExist' not in str(e):
+                print(f"Error unregistering Bluetooth Agent: {e}")
+        except Exception as e:
+            print(f"Error unregistering Bluetooth Agent: {e}")
     
     def release(self):
         """Called when the agent is released."""
@@ -86,11 +106,17 @@ class BluetoothAgent(dbus.service.Object):
         """
         Request a PIN code for pairing.
         
+        According to BlueZ specification:
+        - PIN codes are typically 4-16 digits
+        - Must return a string of digits
+        - Raises org.bluez.Error.Canceled if user cancels
+        - Raises org.bluez.Error.Rejected if invalid
+        
         Args:
-            device_path: D-Bus path of the device
+            device_path: D-Bus path of the device (object path)
             
         Returns:
-            PIN code string
+            PIN code string (4-16 digits)
         """
         device_name = self._get_device_name(device_path)
         print(f"PIN code requested for device: {device_name} ({device_path})")
@@ -99,11 +125,26 @@ class BluetoothAgent(dbus.service.Object):
             try:
                 pin = self.on_pin_request(device_name)
                 if pin:
-                    self.pin_code = pin
+                    # Validate PIN: 4-16 digits (Bluetooth standard)
+                    pin_str = str(pin).strip()
+                    if not pin_str.isdigit():
+                        raise dbus.exceptions.DBusException(
+                            'org.bluez.Error.Rejected',
+                            'PIN code must contain only digits'
+                        )
+                    if len(pin_str) < 4 or len(pin_str) > 16:
+                        raise dbus.exceptions.DBusException(
+                            'org.bluez.Error.Rejected',
+                            'PIN code must be 4-16 digits'
+                        )
+                    self.pin_code = pin_str
                     print(f"Returning PIN code for {device_name}")
-                    return pin
+                    return pin_str
                 else:
                     print(f"No PIN code provided for {device_name}")
+            except dbus.exceptions.DBusException:
+                # Re-raise D-Bus exceptions
+                raise
             except Exception as e:
                 print(f"Error in PIN request callback: {e}")
                 import traceback
@@ -120,11 +161,17 @@ class BluetoothAgent(dbus.service.Object):
         """
         Request a passkey (6-digit number) for pairing.
         
+        According to BlueZ specification:
+        - Passkey must be exactly 6 digits (000000-999999)
+        - Returns uint32 value
+        - Raises org.bluez.Error.Canceled if user cancels
+        - Raises org.bluez.Error.Rejected if invalid
+        
         Args:
-            device_path: D-Bus path of the device
+            device_path: D-Bus path of the device (object path)
             
         Returns:
-            6-digit passkey (0-999999)
+            6-digit passkey as uint32 (0-999999)
         """
         device_name = self._get_device_name(device_path)
         print(f"Passkey requested for device: {device_name} ({device_path})")
@@ -132,12 +179,35 @@ class BluetoothAgent(dbus.service.Object):
         if self.on_passkey_request:
             try:
                 passkey = self.on_passkey_request(device_name)
-                if passkey and 0 <= passkey <= 999999:
+                if passkey is not None:
+                    # Validate passkey: must be exactly 6 digits (0-999999)
+                    if isinstance(passkey, str):
+                        if not passkey.isdigit() or len(passkey) != 6:
+                            raise dbus.exceptions.DBusException(
+                                'org.bluez.Error.Rejected',
+                                'Passkey must be exactly 6 digits'
+                            )
+                        passkey = int(passkey)
+                    elif not isinstance(passkey, int):
+                        raise dbus.exceptions.DBusException(
+                            'org.bluez.Error.Rejected',
+                            'Passkey must be a 6-digit number'
+                        )
+                    
+                    if not (0 <= passkey <= 999999):
+                        raise dbus.exceptions.DBusException(
+                            'org.bluez.Error.Rejected',
+                            'Passkey must be between 000000 and 999999'
+                        )
+                    
                     self.passkey = passkey
                     print(f"Returning passkey {passkey:06d} for {device_name}")
                     return dbus.UInt32(passkey)
                 else:
-                    print(f"Invalid passkey returned: {passkey}")
+                    print(f"No passkey provided for {device_name}")
+            except dbus.exceptions.DBusException:
+                # Re-raise D-Bus exceptions
+                raise
             except Exception as e:
                 print(f"Error in passkey request callback: {e}")
                 import traceback
@@ -154,38 +224,64 @@ class BluetoothAgent(dbus.service.Object):
         """
         Display a passkey that needs to be confirmed on the other device.
         
+        According to BlueZ specification:
+        - Called during Numeric Comparison pairing
+        - passkey: uint32 (0-999999)
+        - entered: uint16 (0-6) indicating digits entered so far
+        - This is informational only, no return value
+        
         Args:
-            device_path: D-Bus path of the device
-            passkey: 6-digit passkey to display
-            entered: Number of digits entered so far (0-6)
+            device_path: D-Bus path of the device (object path)
+            passkey: 6-digit passkey to display (uint32)
+            entered: Number of digits entered so far (uint16, 0-6)
         """
+        # Convert dbus types to Python types
+        passkey_int = int(passkey) if isinstance(passkey, (dbus.UInt32, dbus.Int32)) else int(passkey)
+        entered_int = int(entered) if isinstance(entered, (dbus.UInt16, dbus.Int16)) else int(entered)
+        
         device_name = self._get_device_name(device_path)
-        print(f"Display passkey for {device_name}: {passkey:06d} (entered: {entered})")
+        print(f"Display passkey for {device_name}: {passkey_int:06d} (entered: {entered_int}/6)")
         
         if self.on_passkey_display:
-            self.on_passkey_display(device_name, passkey)
+            try:
+                self.on_passkey_display(device_name, passkey_int)
+            except Exception as e:
+                print(f"Error in passkey display callback: {e}")
+                # Don't raise - this is informational only
     
     @dbus.service.method(AGENT_INTERFACE, in_signature='ou', out_signature='')
     def RequestConfirmation(self, device_path, passkey):
         """
         Request confirmation that the passkey matches on both devices.
         
+        According to BlueZ specification:
+        - Called during Numeric Comparison pairing
+        - passkey: uint32 (0-999999)
+        - Raises org.bluez.Error.Rejected if user rejects
+        - Returns normally if user confirms
+        
         Args:
-            device_path: D-Bus path of the device
-            passkey: 6-digit passkey to confirm
+            device_path: D-Bus path of the device (object path)
+            passkey: 6-digit passkey to confirm (uint32)
         """
+        # Convert dbus type to Python type
+        passkey_int = int(passkey) if isinstance(passkey, (dbus.UInt32, dbus.Int32)) else int(passkey)
+        
         device_name = self._get_device_name(device_path)
-        print(f"Passkey confirmation requested for {device_name}: {passkey:06d}")
+        print(f"Passkey confirmation requested for {device_name}: {passkey_int:06d}")
         
         # Use passkey confirmation callback if available
         if self.on_passkey_confirm:
             try:
-                confirmed = self.on_passkey_confirm(device_name, passkey)
+                confirmed = self.on_passkey_confirm(device_name, passkey_int)
                 if confirmed:
-                    print(f"Passkey {passkey:06d} confirmed for {device_name}")
+                    print(f"Passkey {passkey_int:06d} confirmed for {device_name}")
                     return
                 else:
-                    print(f"Passkey {passkey:06d} rejected for {device_name}")
+                    print(f"Passkey {passkey_int:06d} rejected for {device_name}")
+            except dbus.exceptions.DBusException:
+                # Re-raise D-Bus exceptions
+                raise
             except Exception as e:
                 print(f"Error in passkey confirmation callback: {e}")
                 import traceback
@@ -194,10 +290,13 @@ class BluetoothAgent(dbus.service.Object):
             # Fallback: use authorization request
             try:
                 confirmed = self.on_authorization_request(
-                    f"Does the passkey {passkey:06d} match what's shown on {device_name}?"
+                    f"Does the passkey {passkey_int:06d} match what's shown on {device_name}?"
                 )
                 if confirmed:
                     return
+            except dbus.exceptions.DBusException:
+                # Re-raise D-Bus exceptions
+                raise
             except Exception as e:
                 print(f"Error in authorization callback: {e}")
                 import traceback
@@ -214,16 +313,29 @@ class BluetoothAgent(dbus.service.Object):
         """
         Request authorization for a device connection.
         
+        According to BlueZ specification:
+        - Called when a device requests connection authorization
+        - Raises org.bluez.Error.Rejected if user rejects
+        - Returns normally if user authorizes
+        
         Args:
-            device_path: D-Bus path of the device
+            device_path: D-Bus path of the device (object path)
         """
         device_name = self._get_device_name(device_path)
         print(f"Authorization requested for device: {device_name} ({device_path})")
         
         if self.on_authorization_request:
-            authorized = self.on_authorization_request(f"Authorize connection to {device_name}?")
-            if authorized:
-                return
+            try:
+                authorized = self.on_authorization_request(f"Authorize connection to {device_name}?")
+                if authorized:
+                    return
+            except dbus.exceptions.DBusException:
+                # Re-raise D-Bus exceptions
+                raise
+            except Exception as e:
+                print(f"Error in authorization callback: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Default: reject
         raise dbus.exceptions.DBusException(
@@ -302,7 +414,20 @@ class BluetoothAgentUI:
         passkey_label.add_css_class("title-1")
         content.append(passkey_label)
         
-        dialog.run()
+        # GTK4: Use response signal instead of run()
+        response_received = {'value': None}
+        
+        def on_response(dialog, response_id):
+            response_received['value'] = response_id
+            dialog.close()
+        
+        dialog.connect('response', on_response)
+        dialog.present()
+        
+        # Wait for response using main loop
+        while response_received['value'] is None:
+            GLib.MainContext.default().iteration(True)
+        
         dialog.destroy()
     
     def show_passkey_confirmation(self, device_name: str, passkey: int) -> bool:
@@ -350,7 +475,21 @@ class BluetoothAgentUI:
         passkey_label.add_css_class("title-1")
         content.append(passkey_label)
         
-        response = dialog.run()
+        # GTK4: Use response signal instead of run()
+        response_received = {'value': None}
+        
+        def on_response(dialog, response_id):
+            response_received['value'] = response_id
+            dialog.close()
+        
+        dialog.connect('response', on_response)
+        dialog.present()
+        
+        # Wait for response using main loop
+        while response_received['value'] is None:
+            GLib.MainContext.default().iteration(True)
+        
+        response = response_received['value']
         dialog.destroy()
         
         return response == Gtk.ResponseType.YES
@@ -388,7 +527,21 @@ class BluetoothAgentUI:
         dialog.set_default_response(Gtk.ResponseType.OK)
         entry.grab_focus()
         
-        response = dialog.run()
+        # GTK4: Use response signal instead of run()
+        response_received = {'value': None}
+        
+        def on_response(dialog, response_id):
+            response_received['value'] = response_id
+            dialog.close()
+        
+        dialog.connect('response', on_response)
+        dialog.present()
+        
+        # Wait for response using main loop
+        while response_received['value'] is None:
+            GLib.MainContext.default().iteration(True)
+        
+        response = response_received['value']
         pin = entry.get_text() if response == Gtk.ResponseType.OK else None
         dialog.destroy()
         
@@ -427,7 +580,21 @@ class BluetoothAgentUI:
         message_label.set_wrap(True)
         content.append(message_label)
         
-        response = dialog.run()
+        # GTK4: Use response signal instead of run()
+        response_received = {'value': None}
+        
+        def on_response(dialog, response_id):
+            response_received['value'] = response_id
+            dialog.close()
+        
+        dialog.connect('response', on_response)
+        dialog.present()
+        
+        # Wait for response using main loop
+        while response_received['value'] is None:
+            GLib.MainContext.default().iteration(True)
+        
+        response = response_received['value']
         dialog.destroy()
         
         return response == Gtk.ResponseType.YES

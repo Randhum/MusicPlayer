@@ -60,6 +60,9 @@ class BluetoothManager:
         self.agent_ui: Optional[BluetoothAgentUI] = None
         self.parent_window = parent_window
         
+        # Track signal receivers for cleanup
+        self._signal_receivers = []
+        
         self._setup_adapter()
         self._setup_agent()
         self._setup_signals()
@@ -152,7 +155,22 @@ class BluetoothManager:
         dialog.set_default_response(Gtk.ResponseType.OK)
         entry.grab_focus()
         
-        response = dialog.run()
+        # GTK4: Use response signal instead of run()
+        from gi.repository import GLib
+        response_received = {'value': None}
+        
+        def on_response(dialog, response_id):
+            response_received['value'] = response_id
+            dialog.close()
+        
+        dialog.connect('response', on_response)
+        dialog.present()
+        
+        # Wait for response using main loop
+        while response_received['value'] is None:
+            GLib.MainContext.default().iteration(True)
+        
+        response = response_received['value']
         passkey_str = entry.get_text() if response == Gtk.ResponseType.OK else None
         dialog.destroy()
         
@@ -167,23 +185,28 @@ class BluetoothManager:
         """Set up D-Bus signals for device changes."""
         try:
             # Set up properties changed signal
-            self.bus.add_signal_receiver(
+            receiver = self.bus.add_signal_receiver(
                 self._on_properties_changed,
                 dbus_interface=self.PROPERTIES_INTERFACE,
                 signal_name='PropertiesChanged',
                 path_keyword='path'
             )
+            self._signal_receivers.append(receiver)
             
             # Set up interfaces added/removed signals
-            self.bus.add_signal_receiver(
+            receiver = self.bus.add_signal_receiver(
                 self._on_interfaces_added,
-                signal_name='InterfacesAdded'
+                signal_name='InterfacesAdded',
+                bus_name=self.BLUEZ_SERVICE
             )
+            self._signal_receivers.append(receiver)
             
-            self.bus.add_signal_receiver(
+            receiver = self.bus.add_signal_receiver(
                 self._on_interfaces_removed,
-                signal_name='InterfacesRemoved'
+                signal_name='InterfacesRemoved',
+                bus_name=self.BLUEZ_SERVICE
             )
+            self._signal_receivers.append(receiver)
         except Exception as e:
             print(f"Error setting up Bluetooth signals: {e}")
     
@@ -194,7 +217,9 @@ class BluetoothManager:
             if device_path in self.devices:
                 device = self.devices[device_path]
                 old_connected = device.connected
+                old_paired = device.paired
                 
+                # Update Connected state
                 if 'Connected' in changed:
                     device.connected = bool(changed['Connected'])
                     device.properties['Connected'] = device.connected
@@ -208,6 +233,20 @@ class BluetoothManager:
                             self.connected_device = None
                         if self.on_device_disconnected:
                             self.on_device_disconnected(device)
+                
+                # Update Paired state
+                if 'Paired' in changed:
+                    device.paired = bool(changed['Paired'])
+                    device.properties['Paired'] = device.paired
+                    
+                    # Trust device after successful pairing (Bluetooth best practice)
+                    if device.paired and not old_paired:
+                        self._trust_device(device_path)
+                
+                # Update Trusted state
+                if 'Trusted' in changed:
+                    device.trusted = bool(changed['Trusted'])
+                    device.properties['Trusted'] = device.trusted
     
     def _on_interfaces_added(self, path, interfaces):
         """Handle new interfaces (devices) being added."""
@@ -347,20 +386,52 @@ class BluetoothManager:
         return self.connected_device
     
     def pair_device(self, device_path: str) -> bool:
-        """Pair with a Bluetooth device."""
+        """
+        Pair with a Bluetooth device.
+        
+        According to BlueZ specification:
+        - Raises org.bluez.Error.AlreadyExists if already paired
+        - Raises org.bluez.Error.AuthenticationFailed if pairing fails
+        - Raises org.bluez.Error.AuthenticationCanceled if user cancels
+        - Raises org.bluez.Error.AuthenticationTimeout if timeout
+        """
         try:
             device_proxy = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, device_path),
                 self.DEVICE_INTERFACE
             )
             device_proxy.Pair()
+            # Note: Trusting happens automatically in _on_properties_changed
+            # when Paired property changes to True
             return True
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'org.bluez.Error.AlreadyExists' in error_name:
+                print(f"Device {device_path} is already paired")
+                return True  # Already paired is not an error
+            elif 'org.bluez.Error.AuthenticationCanceled' in error_name:
+                print(f"Pairing canceled by user")
+            elif 'org.bluez.Error.AuthenticationFailed' in error_name:
+                print(f"Pairing failed: authentication error")
+            elif 'org.bluez.Error.AuthenticationTimeout' in error_name:
+                print(f"Pairing failed: timeout")
+            else:
+                print(f"Error pairing device: {e}")
+            return False
         except Exception as e:
             print(f"Error pairing device: {e}")
             return False
     
     def connect_device(self, device_path: str) -> bool:
-        """Connect to a Bluetooth device."""
+        """
+        Connect to a Bluetooth device.
+        
+        According to BlueZ specification:
+        - Device should be paired before connecting
+        - Raises org.bluez.Error.Failed if connection fails
+        - Raises org.bluez.Error.AlreadyConnected if already connected
+        - Raises org.bluez.Error.NotReady if adapter not ready
+        """
         try:
             device_proxy = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, device_path),
@@ -368,12 +439,30 @@ class BluetoothManager:
             )
             device_proxy.Connect()
             return True
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'org.bluez.Error.AlreadyConnected' in error_name:
+                print(f"Device {device_path} is already connected")
+                return True  # Already connected is not an error
+            elif 'org.bluez.Error.Failed' in error_name:
+                print(f"Connection failed: {e}")
+            elif 'org.bluez.Error.NotReady' in error_name:
+                print(f"Bluetooth adapter not ready")
+            else:
+                print(f"Error connecting device: {e}")
+            return False
         except Exception as e:
             print(f"Error connecting device: {e}")
             return False
     
     def disconnect_device(self, device_path: str) -> bool:
-        """Disconnect from a Bluetooth device."""
+        """
+        Disconnect from a Bluetooth device.
+        
+        According to BlueZ specification:
+        - Raises org.bluez.Error.NotConnected if not connected
+        - Raises org.bluez.Error.Failed if disconnection fails
+        """
         try:
             device_proxy = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, device_path),
@@ -381,6 +470,16 @@ class BluetoothManager:
             )
             device_proxy.Disconnect()
             return True
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'org.bluez.Error.NotConnected' in error_name:
+                print(f"Device {device_path} is not connected")
+                return True  # Not connected is not an error for disconnect
+            elif 'org.bluez.Error.Failed' in error_name:
+                print(f"Disconnection failed: {e}")
+            else:
+                print(f"Error disconnecting device: {e}")
+            return False
         except Exception as e:
             print(f"Error disconnecting device: {e}")
             return False
@@ -393,7 +492,65 @@ class BluetoothManager:
         try:
             self.adapter_proxy.RemoveDevice(device_path)
             return True
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'org.bluez.Error.DoesNotExist' in error_name:
+                print(f"Device {device_path} does not exist")
+            else:
+                print(f"Error removing device: {e}")
+            return False
         except Exception as e:
             print(f"Error removing device: {e}")
             return False
+    
+    def _trust_device(self, device_path: str) -> bool:
+        """
+        Mark a device as trusted after successful pairing.
+        
+        This is a Bluetooth best practice - trusted devices can reconnect
+        automatically without user intervention.
+        """
+        try:
+            device_obj = self.bus.get_object(self.BLUEZ_SERVICE, device_path)
+            props = dbus.Interface(device_obj, self.PROPERTIES_INTERFACE)
+            props.Set(self.DEVICE_INTERFACE, 'Trusted', dbus.Boolean(True))
+            print(f"Device {device_path} marked as trusted")
+            return True
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'org.bluez.Error.DoesNotExist' not in error_name:
+                print(f"Error trusting device: {e}")
+            return False
+        except Exception as e:
+            print(f"Error trusting device: {e}")
+            return False
+    
+    def cleanup(self):
+        """
+        Clean up Bluetooth resources.
+        
+        This should be called when the application shuts down to:
+        - Unregister the Bluetooth agent
+        - Remove signal receivers
+        - Disconnect devices if needed
+        """
+        try:
+            # Unregister agent
+            if self.agent:
+                self.agent.unregister_agent()
+            
+            # Remove signal receivers
+            for receiver in self._signal_receivers:
+                try:
+                    self.bus.remove_signal_receiver(receiver)
+                except:
+                    pass
+            self._signal_receivers.clear()
+            
+            # Stop discovery if active
+            self.stop_discovery()
+            
+            print("Bluetooth manager cleaned up")
+        except Exception as e:
+            print(f"Error during Bluetooth cleanup: {e}")
 
