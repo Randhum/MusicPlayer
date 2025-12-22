@@ -35,7 +35,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.library = MusicLibrary()
         self.player = AudioPlayer()
         self.playlist_manager = PlaylistManager()
-        self.bt_manager = BluetoothManager()
+        # Initialize BT manager with this window for pairing dialogs
+        self.bt_manager = BluetoothManager(parent_window=self)
         self.bt_sink = BluetoothSink(self.bt_manager)
         
         # Initialize dock manager

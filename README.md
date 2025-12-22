@@ -176,6 +176,11 @@ To use your computer as a Bluetooth speaker:
 
 **Bluetooth Implementation:**
 - Uses BlueZ D-Bus API for device management (pairing, connection, discovery)
+- **Pairing Confirmations**: Full support for modern Bluetooth pairing with passkey/PIN confirmations
+  - Automatically handles passkey display and confirmation dialogs
+  - Supports 6-digit passkey matching (Numeric Comparison pairing)
+  - Supports PIN code entry when required
+  - Shows authorization dialogs for device connections
 - Prefers GStreamer BlueZ plugin for audio streaming when available
 - Falls back to PipeWire/PulseAudio routing if GStreamer plugin not installed
 - All Bluetooth operations use the official BlueZ library via D-Bus
@@ -218,6 +223,12 @@ MusicPlayer/
 1. Ensure BlueZ is running: `systemctl status bluetooth`
 2. Check adapter is powered: `bluetoothctl power on`
 3. Verify PipeWire/PulseAudio Bluetooth modules are loaded
+
+### Bluetooth device refresh errors
+If you see errors like `module 'dbus' has no attribute 'UTF8String'`:
+- This is fixed in the current version - the code now uses modern dbus-python APIs
+- Ensure you have the latest version of `dbus-python` installed
+- The code automatically handles dbus type conversions for compatibility
 
 ### Panel layout issues
 Delete `~/.config/musicplayer/layout.json` to reset to default layout.
