@@ -165,24 +165,69 @@ class BluetoothSink:
             return False
     
     def disable_sink_mode(self) -> bool:
-        """Disable Bluetooth A2DP sink mode."""
+        """
+        Disable Bluetooth A2DP sink mode.
+        
+        Properly terminates all A2DP connections and cleans up resources:
+        - Disconnects all connected devices
+        - Terminates A2DP transport connections
+        - Stops being discoverable and pairable
+        - Cleans up audio routing
+        """
         try:
-            # Stop being discoverable
-            self._set_discoverable(False)
+            print("Disabling Bluetooth sink mode...")
             
-            # Disconnect any connected audio devices
+            # First, disconnect and terminate A2DP connections for all connected devices
+            connected_devices = []
             if self.connected_device:
-                self.bt_manager.disconnect_device(self.connected_device.path)
+                connected_devices.append(self.connected_device)
+            else:
+                # Check for any connected devices
+                for device in self.bt_manager.get_devices():
+                    if device.connected:
+                        connected_devices.append(device)
             
+            for device in connected_devices:
+                print(f"Disconnecting device: {device.name} ({device.address})")
+                
+                # Notify that audio stream is stopping
+                if self.on_audio_stream_stopped:
+                    self.on_audio_stream_stopped()
+                
+                # Terminate A2DP transport if active (this closes the audio stream)
+                self._terminate_a2dp_transport(device)
+                
+                # Small delay to allow transport to close
+                import time
+                time.sleep(0.3)
+                
+                # Disconnect the device
+                self.bt_manager.disconnect_device(device.path)
+                
+                # Small delay to allow disconnection to complete
+                time.sleep(0.2)
+            
+            # Stop being discoverable and pairable
+            self._set_discoverable(False)
+            self._set_pairable(False)
+            
+            # Clear connected device reference
+            self.connected_device = None
+            
+            # Update state flags
             self.is_sink_enabled = False
             self.is_discoverable = False
             
+            # Notify callbacks
             if self.on_sink_disabled:
                 self.on_sink_disabled()
             
+            print("Bluetooth sink mode disabled successfully")
             return True
         except Exception as e:
             print(f"Error disabling Bluetooth sink: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _verify_a2dp_sink_support(self) -> bool:
@@ -468,6 +513,53 @@ class BluetoothSink:
         except Exception as e:
             print(f"Error checking A2DP transport: {e}")
             return False
+    
+    def _terminate_a2dp_transport(self, device: BluetoothDevice):
+        """
+        Terminate A2DP transport connection for a device.
+        
+        This properly closes the A2DP audio stream before disconnecting the device.
+        """
+        try:
+            manager = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+                'org.freedesktop.DBus.ObjectManager'
+            )
+            objects = manager.GetManagedObjects()
+            
+            # Find and terminate all MediaTransport interfaces for this device
+            for path, interfaces in objects.items():
+                if self.MEDIA_TRANSPORT_INTERFACE in interfaces:
+                    transport_props = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
+                    device_path = str(transport_props.get('Device', ''))
+                    
+                    if device_path == device.path:
+                        state = str(transport_props.get('State', ''))
+                        print(f"Terminating A2DP transport for {device.name} (state: {state})")
+                        
+                        # Get the transport interface
+                        transport_obj = self.bt_manager.bus.get_object(
+                            self.bt_manager.BLUEZ_SERVICE, path
+                        )
+                        transport = dbus.Interface(
+                            transport_obj, self.MEDIA_TRANSPORT_INTERFACE
+                        )
+                        
+                        # Disconnect the transport
+                        try:
+                            transport.Disconnect()
+                            print(f"A2DP transport disconnected for {device.name}")
+                        except dbus.exceptions.DBusException as e:
+                            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                            if 'org.bluez.Error.NotConnected' not in error_name:
+                                print(f"Error disconnecting A2DP transport: {e}")
+                        except Exception as e:
+                            print(f"Error disconnecting A2DP transport: {e}")
+                            
+        except Exception as e:
+            print(f"Error terminating A2DP transport: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _retry_audio_routing(self, device: BluetoothDevice) -> bool:
         """Retry audio routing configuration after delay."""
