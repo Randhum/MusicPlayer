@@ -14,10 +14,10 @@ from core.fractal_generator import FractalGenerator
 
 
 class FractalScreensaver(Gtk.DrawingArea):
-    """A drawing area that displays a fractal pattern as a screensaver background."""
+    """A drawing area that displays an animated fractal pattern as a screensaver background."""
     
     def __init__(self, rules: Optional[List[int]] = None, iterations: int = 8,
-                 color_scheme: str = "binary", animation_speed: float = 0.0):
+                 color_scheme: str = "binary", animation_speed: float = 0.05):
         """
         Initialize the fractal screensaver.
         
@@ -33,20 +33,22 @@ class FractalScreensaver(Gtk.DrawingArea):
         if rules is None:
             rules = [random.randint(0, 15) for _ in range(4)]
         
+        self.base_rules = rules[:]  # Store base rules
         self.generator = FractalGenerator(rules=rules, iterations=iterations)
         self.color_scheme = color_scheme
         self.animation_speed = animation_speed
         self.animation_offset = 0.0
+        self.animation_time = 0.0
+        self.animation_id = None
         
         # Connect draw signal
         self.set_draw_func(self._on_draw)
         
-        # Setup animation timer if needed
-        if animation_speed > 0:
-            GLib.timeout_add(50, self._animate)  # Update every 50ms
+        # Start animation timer
+        self._start_animation()
     
     def _on_draw(self, widget, cr, width: int, height: int):
-        """Draw the fractal pattern."""
+        """Draw the animated fractal pattern."""
         # Clear background
         cr.set_source_rgb(0, 0, 0)
         cr.paint()
@@ -59,39 +61,48 @@ class FractalScreensaver(Gtk.DrawingArea):
         pixel_width = width / fractal_size
         pixel_height = height / fractal_size
         
-        # Draw fractal
+        # Draw fractal with animation
         for y in range(fractal_size):
             for x in range(fractal_size):
                 value = fractal[y][x]
                 
-                # Calculate position
-                px = x * pixel_width
-                py = y * pixel_height
+                # Calculate position with animation offset for "flowing" effect
+                # Use sine waves to create smooth flowing motion
+                flow_x = math.sin((x / fractal_size) * math.pi * 2 + self.animation_time * 0.5) * 0.1
+                flow_y = math.cos((y / fractal_size) * math.pi * 2 + self.animation_time * 0.7) * 0.1
                 
-                # Set color based on scheme
+                # Calculate position
+                px = (x + flow_x) * pixel_width
+                py = (y + flow_y) * pixel_height
+                
+                # Set color based on scheme with animation
                 if self.color_scheme == "binary":
-                    # Black and white
-                    color = 1.0 if value == 1 else 0.0
+                    # Animated black and white with flowing effect
+                    base_color = 1.0 if value == 1 else 0.0
+                    # Add subtle animation based on position and time
+                    anim_factor = math.sin((x + y) * 0.05 + self.animation_time) * 0.15
+                    color = max(0.0, min(1.0, base_color + anim_factor))
                     cr.set_source_rgb(color, color, color)
                 elif self.color_scheme == "grey":
-                    # Grayscale with variation
+                    # Grayscale with flowing variation
                     base = 1.0 if value == 1 else 0.0
-                    # Add slight variation based on position
-                    variation = math.sin((x + y) * 0.1 + self.animation_offset) * 0.1
+                    variation = math.sin((x + y) * 0.1 + self.animation_time) * 0.2
                     color = max(0.0, min(1.0, base + variation))
                     cr.set_source_rgb(color, color, color)
                 elif self.color_scheme == "rgb":
-                    # Color based on position
+                    # Flowing color based on position and time
                     if value == 1:
-                        r = (x / fractal_size + self.animation_offset * 0.1) % 1.0
-                        g = (y / fractal_size + self.animation_offset * 0.15) % 1.0
-                        b = ((x + y) / (fractal_size * 2) + self.animation_offset * 0.2) % 1.0
+                        r = (x / fractal_size + self.animation_time * 0.1) % 1.0
+                        g = (y / fractal_size + self.animation_time * 0.15) % 1.0
+                        b = ((x + y) / (fractal_size * 2) + self.animation_time * 0.2) % 1.0
                         cr.set_source_rgb(r, g, b)
                     else:
                         cr.set_source_rgb(0, 0, 0)
                 else:
                     # Default to binary
-                    color = 1.0 if value == 1 else 0.0
+                    base_color = 1.0 if value == 1 else 0.0
+                    anim_factor = math.sin((x + y) * 0.05 + self.animation_time) * 0.15
+                    color = max(0.0, min(1.0, base_color + anim_factor))
                     cr.set_source_rgb(color, color, color)
                 
                 # Draw rectangle
@@ -100,13 +111,40 @@ class FractalScreensaver(Gtk.DrawingArea):
         
         return True
     
+    def _start_animation(self):
+        """Start the animation timer."""
+        if self.animation_id is None:
+            self.animation_id = GLib.timeout_add(33, self._animate)  # ~30 FPS
+    
+    def _stop_animation(self):
+        """Stop the animation timer."""
+        if self.animation_id is not None:
+            GLib.source_remove(self.animation_id)
+            self.animation_id = None
+    
     def _animate(self):
-        """Animation callback."""
-        if self.animation_speed > 0:
-            self.animation_offset += self.animation_speed
-            self.queue_draw()
-            return True
-        return False
+        """Animation callback - makes fractals flow and change."""
+        # Update animation time
+        self.animation_time += self.animation_speed
+        
+        # Periodically morph the rules to create evolving patterns
+        # Change rules slowly over time to create "living" fractals
+        if int(self.animation_time * 10) % 100 == 0:  # Every ~3 seconds
+            # Slightly modify rules to create morphing effect
+            new_rules = []
+            for i, rule in enumerate(self.base_rules):
+                # Add subtle variation that cycles
+                variation = int(math.sin(self.animation_time * 0.3 + i) * 2)
+                new_rule = (rule + variation) % 16
+                new_rules.append(new_rule)
+            
+            # Only regenerate if rules actually changed
+            if new_rules != self.generator.rules:
+                self.generator.rules = new_rules
+                self.generator.clear_cache()
+        
+        self.queue_draw()
+        return True
     
     def get_pixel_value(self, x: int, y: int) -> float:
         """
@@ -134,13 +172,18 @@ class FractalScreensaver(Gtk.DrawingArea):
         if rules is None:
             rules = [random.randint(0, 15) for _ in range(4)]
         
+        self.base_rules = rules[:]
         self.generator = FractalGenerator(rules=rules, iterations=self.generator.iterations)
         self.generator.clear_cache()
         self.queue_draw()
+    
+    def cleanup(self):
+        """Clean up animation timer."""
+        self._stop_animation()
 
 
 class FractalBackground(Gtk.Box):
-    """A container that displays content on a fractal background with inverted text."""
+    """A container that displays content on an animated fractal background with inverted text."""
     
     def __init__(self, content: Gtk.Widget, rules: Optional[List[int]] = None,
                  iterations: int = 8, color_scheme: str = "binary"):
@@ -158,12 +201,12 @@ class FractalBackground(Gtk.Box):
         # Create overlay to stack screensaver and content
         overlay = Gtk.Overlay()
         
-        # Create screensaver as background
+        # Create animated screensaver as background
         self.screensaver = FractalScreensaver(
             rules=rules,
             iterations=iterations,
             color_scheme=color_scheme,
-            animation_speed=0.0  # Static for background
+            animation_speed=0.05  # Animated for flowing effect
         )
         self.screensaver.set_vexpand(True)
         self.screensaver.set_hexpand(True)
@@ -205,3 +248,8 @@ class FractalBackground(Gtk.Box):
     def regenerate(self, rules: Optional[List[int]] = None):
         """Regenerate the fractal background."""
         self.screensaver.regenerate(rules)
+    
+    def cleanup(self):
+        """Clean up the fractal background and stop animation."""
+        if self.screensaver:
+            self.screensaver.cleanup()

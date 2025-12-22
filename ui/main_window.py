@@ -217,23 +217,34 @@ class MainWindow(Gtk.ApplicationWindow):
                 min-height: 8px;
             }
             
-            /* Fractal screensaver inverted text */
+            /* Fractal screensaver inverted text - high contrast for visibility */
             .fractal-inverted-text {
                 color: white;
                 background-color: transparent;
+                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
             }
             
             .fractal-inverted-text label {
                 color: white;
+                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
             }
             
             .fractal-inverted-text button {
                 color: white;
+                background-color: rgba(0, 0, 0, 0.4);
+                border-color: rgba(255, 255, 255, 0.3);
+                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
+            }
+            
+            .fractal-inverted-text button:hover {
+                background-color: rgba(255, 255, 255, 0.2);
             }
             
             .fractal-inverted-text entry {
                 color: white;
-                background-color: rgba(0, 0, 0, 0.3);
+                background-color: rgba(0, 0, 0, 0.5);
+                border-color: rgba(255, 255, 255, 0.3);
+                text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.8);
             }
             
             /* Tree views with inverted text */
@@ -243,7 +254,16 @@ class MainWindow(Gtk.ApplicationWindow):
             }
             
             .fractal-inverted-text treeview:selected {
-                background-color: rgba(255, 255, 255, 0.2);
+                background-color: rgba(255, 255, 255, 0.25);
+                color: white;
+            }
+            
+            .fractal-inverted-text treeview row {
+                color: white;
+            }
+            
+            .fractal-inverted-text treeview row:selected {
+                background-color: rgba(255, 255, 255, 0.25);
                 color: white;
             }
         """)
@@ -366,6 +386,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle window close."""
         self.dock_manager.cleanup()
         self.player.cleanup()
+        # Cleanup Bluetooth resources
+        if hasattr(self, 'bt_manager'):
+            self.bt_manager.cleanup()
         return False  # Allow close to proceed
     
     def _on_library_scan_complete(self):
