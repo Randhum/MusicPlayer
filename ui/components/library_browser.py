@@ -73,6 +73,7 @@ class LibraryBrowser(Gtk.Box):
         # Context menu
         self.context_menu = None
         self.selected_path = None
+        self._menu_showing = False  # Flag to prevent multiple menus
         
         # Single-click expand/collapse state
         self._click_timeout_id = None
@@ -237,11 +238,15 @@ class LibraryBrowser(Gtk.Box):
     
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
-        self._show_context_menu_at_position(x, y)
+        # Only show menu if not already showing
+        if not self._menu_showing:
+            self._show_context_menu_at_position(x, y)
     
     def _on_long_press(self, gesture, x, y):
         """Handle long-press to show context menu (touch-friendly)."""
-        self._show_context_menu_at_position(x, y)
+        # Only show menu if not already showing
+        if not self._menu_showing:
+            self._show_context_menu_at_position(x, y)
     
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position."""
@@ -266,6 +271,10 @@ class LibraryBrowser(Gtk.Box):
     
     def _show_context_menu(self, item_type: str, data, x: float, y: float):
         """Show context menu for the selected item."""
+        # Prevent multiple menus
+        if self._menu_showing:
+            return
+        
         # Properly close and remove old menu if exists
         if self.context_menu:
             try:
@@ -278,6 +287,9 @@ class LibraryBrowser(Gtk.Box):
             except:
                 pass
             self.context_menu = None
+        
+        # Set flag to prevent multiple menus
+        self._menu_showing = True
         
         # Create popover
         self.context_menu = Gtk.Popover()
@@ -344,6 +356,8 @@ class LibraryBrowser(Gtk.Box):
     
     def _on_popover_closed(self, popover):
         """Handle popover closed signal for cleanup."""
+        # Reset flag immediately
+        self._menu_showing = False
         # Clean up after a short delay to avoid issues
         GLib.timeout_add(100, self._cleanup_popover)
     
@@ -360,29 +374,36 @@ class LibraryBrowser(Gtk.Box):
                 pass
             finally:
                 self.context_menu = None
+        # Ensure flag is reset
+        self._menu_showing = False
         return False  # Don't repeat
     
     def _on_menu_play_track(self, track: TrackMetadata):
         """Handle 'Play Now' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         self.emit('track-selected', track)
     
     def _on_menu_add_track(self, track: TrackMetadata):
         """Handle 'Add to Playlist' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         self.emit('add-track', track)
     
     def _on_menu_play_album(self, tracks):
         """Handle 'Play Album' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         self.emit('album-selected', tracks)
     
     def _on_menu_add_album(self, tracks):
         """Handle 'Add Album to Playlist' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         self.emit('add-album', tracks)
+    
+    def _close_menu(self):
+        """Close the context menu safely."""
+        if self.context_menu:
+            try:
+                self.context_menu.popdown()
+            except:
+                pass
+        self._menu_showing = False
 

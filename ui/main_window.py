@@ -152,6 +152,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self.left_paned = left_paned
         self.right_paned = right_paned
         
+        # Store parent container references in panels for reattachment
+        library_panel.parent_container = left_paned
+        playlist_panel.parent_container = left_paned
+        metadata_panel.parent_container = right_paned
+        bt_panel.parent_container = right_paned
+        
         main_box.append(self.content_paned)
         
         # Bottom - Player controls (not dockable)
@@ -286,17 +292,44 @@ class MainWindow(Gtk.ApplicationWindow):
     def _reattach_panel(self, panel_id: str):
         """Reattach a detached panel to its original position."""
         panel = self.dock_manager.panels.get(panel_id)
-        if not panel:
+        if not panel or not panel.parent_container:
             return
         
-        if panel_id == "library":
-            self.left_paned.set_start_child(panel)
-        elif panel_id == "playlist":
-            self.left_paned.set_end_child(panel)
-        elif panel_id == "metadata":
-            self.right_paned.set_start_child(panel)
-        elif panel_id == "bluetooth":
-            self.right_paned.set_end_child(panel)
+        # Make sure panel is not already a child of something
+        current_parent = panel.get_parent()
+        if current_parent:
+            if isinstance(current_parent, Gtk.Paned):
+                if current_parent.get_start_child() is panel:
+                    current_parent.set_start_child(None)
+                elif current_parent.get_end_child() is panel:
+                    current_parent.set_end_child(None)
+            elif isinstance(current_parent, Gtk.Box):
+                current_parent.remove(panel)
+            elif isinstance(current_parent, Gtk.Window):
+                current_parent.set_child(None)
+        
+        # Reattach to original parent container
+        parent = panel.parent_container
+        if isinstance(parent, Gtk.Paned):
+            # Use stored position or determine from panel_id
+            if panel.parent_position == 'start':
+                parent.set_start_child(panel)
+            elif panel.parent_position == 'end':
+                parent.set_end_child(panel)
+            else:
+                # Fallback: determine from panel_id
+                if panel_id == "library":
+                    parent.set_start_child(panel)
+                elif panel_id == "playlist":
+                    parent.set_end_child(panel)
+                elif panel_id == "metadata":
+                    parent.set_start_child(panel)
+                elif panel_id == "bluetooth":
+                    parent.set_end_child(panel)
+        elif isinstance(parent, Gtk.Box):
+            parent.append(panel)
+        elif isinstance(parent, Gtk.Window):
+            parent.set_child(panel)
     
     def _on_close(self, window):
         """Handle window close."""

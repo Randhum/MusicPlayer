@@ -24,10 +24,35 @@ class PlaylistView(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         
-        # Header
-        header = Gtk.Label(label="Playlist")
-        header.add_css_class("title-2")
-        self.append(header)
+        # Header with action buttons
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header_box.set_margin_start(5)
+        header_box.set_margin_end(5)
+        header_box.set_margin_top(5)
+        header_box.set_margin_bottom(5)
+        
+        header_label = Gtk.Label(label="Playlist")
+        header_label.add_css_class("title-2")
+        header_label.set_halign(Gtk.Align.START)
+        header_label.set_hexpand(True)
+        header_box.append(header_label)
+        
+        # Action buttons
+        self.clear_button = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
+        self.clear_button.set_tooltip_text("Clear Playlist")
+        self.clear_button.add_css_class("flat")
+        self.clear_button.set_size_request(36, 36)  # Touch-friendly size
+        self.clear_button.connect('clicked', lambda w: self.emit('clear-playlist'))
+        header_box.append(self.clear_button)
+        
+        self.save_button = Gtk.Button.new_from_icon_name("document-save-symbolic")
+        self.save_button.set_tooltip_text("Save Playlist")
+        self.save_button.add_css_class("flat")
+        self.save_button.set_size_request(36, 36)  # Touch-friendly size
+        self.save_button.connect('clicked', lambda w: self.emit('save-playlist'))
+        header_box.append(self.save_button)
+        
+        self.append(header_box)
         
         # Scrolled window
         scrolled = Gtk.ScrolledWindow()
@@ -58,6 +83,7 @@ class PlaylistView(Gtk.Box):
         # Context menu
         self.context_menu = None
         self.selected_index = -1
+        self._menu_showing = False  # Flag to prevent multiple menus
         self.set_vexpand(True)  # Expand to fill available vertical space
         
         # Columns with touch-friendly padding
@@ -110,6 +136,12 @@ class PlaylistView(Gtk.Box):
         self.current_index = current_index
         self._update_view()
     
+    def _update_button_states(self):
+        """Update the state of action buttons based on playlist content."""
+        has_tracks = len(self.tracks) > 0
+        self.clear_button.set_sensitive(has_tracks)
+        self.save_button.set_sensitive(has_tracks)
+    
     def set_current_index(self, index: int):
         """Set the currently playing track index."""
         self.current_index = index
@@ -124,6 +156,8 @@ class PlaylistView(Gtk.Box):
             duration = self._format_duration(track.duration) if track.duration else "--:--"
             self.store.append([i + 1, title, artist, duration])
         self._update_selection()
+        # Update button states
+        self._update_button_states()
     
     def _update_selection(self):
         """Update the selection to highlight current track."""
@@ -151,11 +185,15 @@ class PlaylistView(Gtk.Box):
     
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
-        self._show_context_menu_at_position(x, y)
+        # Only show menu if not already showing
+        if not self._menu_showing:
+            self._show_context_menu_at_position(x, y)
     
     def _on_long_press(self, gesture, x, y):
         """Handle long-press to show context menu (touch-friendly)."""
-        self._show_context_menu_at_position(x, y)
+        # Only show menu if not already showing
+        if not self._menu_showing:
+            self._show_context_menu_at_position(x, y)
     
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position."""
@@ -173,6 +211,10 @@ class PlaylistView(Gtk.Box):
     
     def _show_context_menu(self, x: float, y: float):
         """Show context menu."""
+        # Prevent multiple menus
+        if self._menu_showing:
+            return
+        
         # Properly close and remove old menu if exists
         if self.context_menu:
             try:
@@ -185,6 +227,9 @@ class PlaylistView(Gtk.Box):
             except:
                 pass
             self.context_menu = None
+        
+        # Set flag to prevent multiple menus
+        self._menu_showing = True
         
         # Create popover
         self.context_menu = Gtk.Popover()
@@ -265,6 +310,8 @@ class PlaylistView(Gtk.Box):
     
     def _on_popover_closed(self, popover):
         """Handle popover closed signal for cleanup."""
+        # Reset flag immediately
+        self._menu_showing = False
         # Clean up after a short delay to avoid issues
         GLib.timeout_add(100, self._cleanup_popover)
     
@@ -281,45 +328,50 @@ class PlaylistView(Gtk.Box):
                 pass
             finally:
                 self.context_menu = None
+        # Ensure flag is reset
+        self._menu_showing = False
         return False  # Don't repeat
     
     def _on_menu_play(self):
         """Handle 'Play' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         if self.selected_index >= 0:
             self.emit('track-activated', self.selected_index)
     
     def _on_menu_remove(self):
         """Handle 'Remove' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         if self.selected_index >= 0:
             self.emit('remove-track', self.selected_index)
     
     def _on_menu_move_up(self):
         """Handle 'Move Up' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         if self.selected_index > 0:
             self.emit('move-track-up', self.selected_index)
     
     def _on_menu_move_down(self):
         """Handle 'Move Down' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         if self.selected_index < len(self.tracks) - 1:
             self.emit('move-track-down', self.selected_index)
     
     def _on_menu_clear(self):
         """Handle 'Clear Playlist' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         self.emit('clear-playlist')
     
     def _on_menu_save(self):
         """Handle 'Save Playlist' from context menu."""
-        if self.context_menu:
-            self.context_menu.popdown()
+        self._close_menu()
         self.emit('save-playlist')
+    
+    def _close_menu(self):
+        """Close the context menu safely."""
+        if self.context_menu:
+            try:
+                self.context_menu.popdown()
+            except:
+                pass
+        self._menu_showing = False
 

@@ -21,6 +21,7 @@ class DockablePanel(Gtk.Box):
         self.is_detached = False
         self.detached_window: Optional[Gtk.Window] = None
         self.parent_container = None
+        self.parent_position = None  # 'start' or 'end' for Paned
         self.on_reattach: Optional[Callable] = None
         
         # Create header bar with title and detach button
@@ -82,8 +83,10 @@ class DockablePanel(Gtk.Box):
             # Gtk.Paned does not have remove(); clear the appropriate child
             if isinstance(self.parent_container, Gtk.Paned):
                 if self.parent_container.get_start_child() is self:
+                    self.parent_position = 'start'
                     self.parent_container.set_start_child(None)
                 elif self.parent_container.get_end_child() is self:
+                    self.parent_position = 'end'
                     self.parent_container.set_end_child(None)
             # Gtk.Box and other containers support remove()
             elif isinstance(self.parent_container, Gtk.Box):
@@ -104,9 +107,11 @@ class DockablePanel(Gtk.Box):
         if not self.is_detached:
             return
         
-        # Remove from detached window
+        # Remove from detached window first
         if self.detached_window:
-            self.detached_window.set_child(None)
+            # Make sure panel is removed from window before closing
+            if self.detached_window.get_child() is self:
+                self.detached_window.set_child(None)
             self.detached_window.close()
             self.detached_window = None
         
@@ -115,7 +120,7 @@ class DockablePanel(Gtk.Box):
         self.detach_button.set_tooltip_text("Detach panel")
         self.is_detached = False
         
-        # Notify dock manager to reattach
+        # Notify dock manager to reattach (this will add panel back to parent)
         if self.on_reattach:
             self.on_reattach(self)
     
