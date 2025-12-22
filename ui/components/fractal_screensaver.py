@@ -3,11 +3,12 @@
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
-gi.require_version('Cairo', '1.0')
-from gi.repository import Gtk, Gdk, GLib, cairo
+from gi.repository import Gtk, Gdk, GLib
 from typing import Optional, List
 import random
 import math
+
+# Note: Cairo context is provided by GTK4's draw function, no import needed
 
 from core.fractal_generator import FractalGenerator
 
@@ -44,7 +45,7 @@ class FractalScreensaver(Gtk.DrawingArea):
         if animation_speed > 0:
             GLib.timeout_add(50, self._animate)  # Update every 50ms
     
-    def _on_draw(self, widget, cr: cairo.Context, width: int, height: int):
+    def _on_draw(self, widget, cr, width: int, height: int):
         """Draw the fractal pattern."""
         # Clear background
         cr.set_source_rgb(0, 0, 0)
