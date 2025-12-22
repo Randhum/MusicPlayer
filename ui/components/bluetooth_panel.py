@@ -6,6 +6,7 @@ gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GObject, GLib
 from typing import Optional
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
+from core.bluetooth_sink import BluetoothSink
 
 
 class BluetoothPanel(Gtk.Box):
@@ -15,9 +16,12 @@ class BluetoothPanel(Gtk.Box):
         'device-selected': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
     
-    def __init__(self, bt_manager: BluetoothManager):
+    def __init__(self, bt_manager: BluetoothManager, bt_sink: Optional[BluetoothSink] = None):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.bt_manager = bt_manager
+        self.bt_sink = bt_sink
+        self.sink_toggle: Optional[Gtk.ToggleButton] = None
+        self.sink_status: Optional[Gtk.Label] = None
         
         # Status indicator
         status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
@@ -59,6 +63,25 @@ class BluetoothPanel(Gtk.Box):
         button_box.append(self.connect_button)
         
         self.append(button_box)
+        
+        # Sink mode toggle
+        if self.bt_sink:
+            sink_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+            sink_box.set_margin_top(5)
+            
+            self.sink_toggle = Gtk.ToggleButton(label="Enable Speaker Mode")
+            self.sink_toggle.connect('toggled', self._on_sink_toggled)
+            sink_box.append(self.sink_toggle)
+            
+            self.sink_status = Gtk.Label(label="")
+            sink_box.append(self.sink_status)
+            
+            self.append(sink_box)
+            
+            # Setup sink callbacks
+            self.bt_sink.on_sink_enabled = self._on_sink_enabled
+            self.bt_sink.on_sink_disabled = self._on_sink_disabled
+            self.bt_sink.on_device_connected = self._on_sink_device_connected
         
         # Setup callbacks
         self.bt_manager.on_device_connected = self._on_device_connected
@@ -145,4 +168,45 @@ class BluetoothPanel(Gtk.Box):
     def _on_device_added(self, device: BluetoothDevice):
         """Handle new device added."""
         self._refresh_devices()
+    
+    def _on_sink_toggled(self, button):
+        """Handle sink mode toggle."""
+        if not self.bt_sink or not self.sink_status:
+            return
+        
+        if button.get_active():
+            # Enable sink mode
+            if self.bt_sink.enable_sink_mode():
+                self.sink_status.set_text("Speaker mode enabled")
+            else:
+                button.set_active(False)
+                if self.sink_status:
+                    self.sink_status.set_text("Failed to enable")
+        else:
+            # Disable sink mode
+            self.bt_sink.disable_sink_mode()
+            if self.sink_status:
+                self.sink_status.set_text("Speaker mode disabled")
+    
+    def _on_sink_enabled(self):
+        """Handle sink enabled."""
+        if self.sink_toggle:
+            self.sink_toggle.set_active(True)
+        if self.sink_status:
+            self.sink_status.set_text("Speaker mode: Ready for connection")
+        self._update_status()
+    
+    def _on_sink_disabled(self):
+        """Handle sink disabled."""
+        if self.sink_toggle:
+            self.sink_toggle.set_active(False)
+        if self.sink_status:
+            self.sink_status.set_text("")
+        self._update_status()
+    
+    def _on_sink_device_connected(self, device: BluetoothDevice):
+        """Handle device connected in sink mode."""
+        if self.sink_status:
+            self.sink_status.set_text(f"Receiving audio from: {device.name}")
+        self._update_status()
 

@@ -30,20 +30,30 @@ class PlayerControls(Gtk.Box):
         progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         
         self.time_label = Gtk.Label(label="00:00")
-        self.time_label.set_min_width(50)
+        self.time_label.set_size_request(50, -1)
         progress_box.append(self.time_label)
         
         self.progress_scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, 0.0, 100.0, 1.0
         )
         self.progress_scale.set_draw_value(False)
+        self.progress_scale.set_hexpand(True)
+        
+        # Use GTK4 gesture controllers for button events
+        gesture_press = Gtk.GestureClick()
+        gesture_press.connect('pressed', self._on_progress_press)
+        self.progress_scale.add_controller(gesture_press)
+        
+        gesture_release = Gtk.GestureClick()
+        gesture_release.connect('released', self._on_progress_release)
+        self.progress_scale.add_controller(gesture_release)
+        
+        # Connect value-changed for seeking
         self.progress_scale.connect('value-changed', self._on_progress_changed)
-        self.progress_scale.connect('button-press-event', self._on_progress_press)
-        self.progress_scale.connect('button-release-event', self._on_progress_release)
         progress_box.append(self.progress_scale)
         
         self.duration_label = Gtk.Label(label="00:00")
-        self.duration_label.set_min_width(50)
+        self.duration_label.set_size_request(50, -1)
         progress_box.append(self.duration_label)
         
         self.append(progress_box)
@@ -130,12 +140,12 @@ class PlayerControls(Gtk.Box):
             position = (value / 100.0) * self._duration
             self.emit('seek-changed', position)
     
-    def _on_progress_press(self, scale, event):
-        """Handle progress bar press."""
+    def _on_progress_press(self, gesture, n_press, x, y):
+        """Handle progress bar press (GTK4 gesture)."""
         self._seeking = True
     
-    def _on_progress_release(self, scale, event):
-        """Handle progress bar release."""
+    def _on_progress_release(self, gesture, n_press, x, y):
+        """Handle progress bar release (GTK4 gesture)."""
         self._seeking = False
     
     def _on_volume_changed(self, scale):

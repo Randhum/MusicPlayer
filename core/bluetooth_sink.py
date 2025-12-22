@@ -1,0 +1,344 @@
+"""Bluetooth A2DP sink management for receiving audio from mobile devices."""
+
+import subprocess
+import os
+import dbus
+from typing import Optional, Callable
+from core.bluetooth_manager import BluetoothManager, BluetoothDevice
+
+
+class BluetoothSink:
+    """
+    Manages Bluetooth A2DP sink functionality.
+    
+    When enabled, this allows the computer to act as a Bluetooth speaker,
+    receiving audio from phones and other devices, and playing it through
+    the local audio output (ALSA).
+    """
+    
+    MEDIA_CONTROL_INTERFACE = 'org.bluez.MediaControl1'
+    MEDIA_PLAYER_INTERFACE = 'org.bluez.MediaPlayer1'
+    MEDIA_TRANSPORT_INTERFACE = 'org.bluez.MediaTransport1'
+    
+    def __init__(self, bt_manager: BluetoothManager):
+        self.bt_manager = bt_manager
+        self.is_sink_enabled = False
+        self.is_discoverable = False
+        self.connected_device: Optional[BluetoothDevice] = None
+        self.device_name = "Music Player Speaker"
+        
+        # Callbacks
+        self.on_sink_enabled: Optional[Callable] = None
+        self.on_sink_disabled: Optional[Callable] = None
+        self.on_device_connected: Optional[Callable] = None
+        self.on_device_disconnected: Optional[Callable] = None
+        self.on_audio_stream_started: Optional[Callable] = None
+        self.on_audio_stream_stopped: Optional[Callable] = None
+        
+        # Setup BT manager callbacks
+        self._original_device_connected = self.bt_manager.on_device_connected
+        self._original_device_disconnected = self.bt_manager.on_device_disconnected
+        self.bt_manager.on_device_connected = self._on_device_connected
+        self.bt_manager.on_device_disconnected = self._on_device_disconnected
+    
+    def enable_sink_mode(self) -> bool:
+        """
+        Enable Bluetooth A2DP sink mode.
+        This configures the system to receive audio from Bluetooth devices
+        and makes the computer discoverable as a Bluetooth speaker.
+        """
+        try:
+            # Ensure Bluetooth is powered on
+            if not self.bt_manager.is_powered():
+                if not self.bt_manager.set_powered(True):
+                    print("Failed to power on Bluetooth adapter")
+                    return False
+            
+            # Set device name
+            self._set_adapter_name(self.device_name)
+            
+            # Make adapter discoverable and pairable
+            self._set_discoverable(True)
+            self._set_pairable(True)
+            
+            # Configure audio subsystem
+            audio_system = self._detect_audio_system()
+            
+            if audio_system == 'pipewire':
+                success = self._enable_pipewire_sink()
+            elif audio_system == 'pulseaudio':
+                success = self._enable_pulseaudio_sink()
+            else:
+                print("No compatible audio system found. Trying basic setup.")
+                success = self._enable_basic_sink()
+            
+            if success:
+                self.is_sink_enabled = True
+                if self.on_sink_enabled:
+                    self.on_sink_enabled()
+            
+            return success
+            
+        except Exception as e:
+            print(f"Error enabling Bluetooth sink: {e}")
+            return False
+    
+    def disable_sink_mode(self) -> bool:
+        """Disable Bluetooth A2DP sink mode."""
+        try:
+            # Stop being discoverable
+            self._set_discoverable(False)
+            
+            # Disconnect any connected audio devices
+            if self.connected_device:
+                self.bt_manager.disconnect_device(self.connected_device.path)
+            
+            self.is_sink_enabled = False
+            self.is_discoverable = False
+            
+            if self.on_sink_disabled:
+                self.on_sink_disabled()
+            
+            return True
+        except Exception as e:
+            print(f"Error disabling Bluetooth sink: {e}")
+            return False
+    
+    def _detect_audio_system(self) -> str:
+        """Detect which audio system is running."""
+        try:
+            # Check for PipeWire first (modern)
+            result = subprocess.run(['pgrep', '-x', 'pipewire'], 
+                                  capture_output=True, timeout=2)
+            if result.returncode == 0:
+                return 'pipewire'
+            
+            # Check for PulseAudio
+            result = subprocess.run(['pgrep', '-x', 'pulseaudio'], 
+                                  capture_output=True, timeout=2)
+            if result.returncode == 0:
+                return 'pulseaudio'
+            
+            return 'none'
+        except:
+            return 'none'
+    
+    def _set_adapter_name(self, name: str):
+        """Set the Bluetooth adapter's visible name."""
+        try:
+            if not self.bt_manager.adapter_path:
+                return
+            
+            props = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, 
+                                                self.bt_manager.adapter_path),
+                self.bt_manager.PROPERTIES_INTERFACE
+            )
+            props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Alias', dbus.String(name))
+            print(f"Set Bluetooth name to: {name}")
+        except Exception as e:
+            print(f"Error setting adapter name: {e}")
+    
+    def _set_discoverable(self, discoverable: bool, timeout: int = 0):
+        """
+        Set the Bluetooth adapter's discoverability.
+        
+        Args:
+            discoverable: Whether to be discoverable
+            timeout: Timeout in seconds (0 = indefinite)
+        """
+        try:
+            if not self.bt_manager.adapter_path:
+                return
+            
+            props = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, 
+                                                self.bt_manager.adapter_path),
+                self.bt_manager.PROPERTIES_INTERFACE
+            )
+            
+            props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Discoverable', 
+                     dbus.Boolean(discoverable))
+            
+            if discoverable and timeout == 0:
+                # Set no timeout for indefinite discoverability
+                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'DiscoverableTimeout',
+                         dbus.UInt32(0))
+            
+            self.is_discoverable = discoverable
+            print(f"Discoverable: {discoverable}")
+        except Exception as e:
+            print(f"Error setting discoverable: {e}")
+    
+    def _set_pairable(self, pairable: bool, timeout: int = 0):
+        """Set the Bluetooth adapter's pairability."""
+        try:
+            if not self.bt_manager.adapter_path:
+                return
+            
+            props = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, 
+                                                self.bt_manager.adapter_path),
+                self.bt_manager.PROPERTIES_INTERFACE
+            )
+            
+            props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Pairable', 
+                     dbus.Boolean(pairable))
+            
+            if pairable and timeout == 0:
+                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'PairableTimeout',
+                         dbus.UInt32(0))
+            
+            print(f"Pairable: {pairable}")
+        except Exception as e:
+            print(f"Error setting pairable: {e}")
+    
+    def _enable_pipewire_sink(self) -> bool:
+        """Enable A2DP sink using PipeWire (modern setup)."""
+        try:
+            # PipeWire with wireplumber handles A2DP automatically
+            # Just ensure the Bluetooth module is running
+            
+            # Check if wireplumber is running
+            result = subprocess.run(['pgrep', '-x', 'wireplumber'],
+                                  capture_output=True, timeout=2)
+            
+            if result.returncode != 0:
+                print("wireplumber not running, trying to start...")
+                subprocess.Popen(['wireplumber'], 
+                               stdout=subprocess.DEVNULL, 
+                               stderr=subprocess.DEVNULL)
+            
+            # PipeWire should now handle A2DP connections automatically
+            print("PipeWire sink mode enabled")
+            return True
+            
+        except Exception as e:
+            print(f"Error enabling PipeWire sink: {e}")
+            return False
+    
+    def _enable_pulseaudio_sink(self) -> bool:
+        """Enable A2DP sink using PulseAudio."""
+        try:
+            # Load Bluetooth modules
+            subprocess.run(['pactl', 'load-module', 'module-bluetooth-discover'],
+                         capture_output=True, timeout=5)
+            subprocess.run(['pactl', 'load-module', 'module-bluetooth-policy'],
+                         capture_output=True, timeout=5)
+            
+            print("PulseAudio sink mode enabled")
+            return True
+            
+        except Exception as e:
+            print(f"Error enabling PulseAudio sink: {e}")
+            return False
+    
+    def _enable_basic_sink(self) -> bool:
+        """Enable basic A2DP sink without sound server (direct ALSA)."""
+        try:
+            # This is a fallback - just ensure Bluetooth is ready
+            # Note: Direct ALSA A2DP requires additional setup (bluez-alsa)
+            print("Warning: No PipeWire or PulseAudio. Install bluez-alsa for ALSA support.")
+            return True
+        except Exception as e:
+            print(f"Error enabling basic sink: {e}")
+            return False
+    
+    def _on_device_connected(self, device: BluetoothDevice):
+        """Handle Bluetooth device connection."""
+        self.connected_device = device
+        
+        # Call original callback if set
+        if self._original_device_connected:
+            self._original_device_connected(device)
+        
+        # Call our callback
+        if self.on_device_connected:
+            self.on_device_connected(device)
+        
+        # If sink mode is enabled, ensure audio is routed properly
+        if self.is_sink_enabled:
+            self._configure_audio_routing(device)
+    
+    def _on_device_disconnected(self, device: BluetoothDevice):
+        """Handle Bluetooth device disconnection."""
+        if self.connected_device and self.connected_device.path == device.path:
+            self.connected_device = None
+        
+        # Call original callback if set
+        if self._original_device_disconnected:
+            self._original_device_disconnected(device)
+        
+        # Call our callback
+        if self.on_device_disconnected:
+            self.on_device_disconnected(device)
+        
+        if self.on_audio_stream_stopped:
+            self.on_audio_stream_stopped()
+    
+    def _configure_audio_routing(self, device: BluetoothDevice):
+        """Configure audio routing for the connected device."""
+        try:
+            audio_system = self._detect_audio_system()
+            
+            if audio_system == 'pipewire':
+                # PipeWire handles routing automatically
+                print(f"Audio from {device.name} will be routed via PipeWire")
+            elif audio_system == 'pulseaudio':
+                # Find the Bluetooth source and loopback to ALSA sink
+                self._setup_pulseaudio_routing(device)
+            
+            if self.on_audio_stream_started:
+                self.on_audio_stream_started()
+                
+        except Exception as e:
+            print(f"Error configuring audio routing: {e}")
+    
+    def _setup_pulseaudio_routing(self, device: BluetoothDevice):
+        """Set up PulseAudio loopback from Bluetooth to ALSA."""
+        try:
+            # Get Bluetooth source
+            result = subprocess.run(['pactl', 'list', 'sources', 'short'],
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if 'bluez' in line.lower():
+                        source = line.split()[1]
+                        
+                        # Get ALSA sink
+                        sink_result = subprocess.run(['pactl', 'list', 'sinks', 'short'],
+                                                   capture_output=True, text=True, timeout=5)
+                        
+                        if sink_result.returncode == 0:
+                            for sink_line in sink_result.stdout.strip().split('\n'):
+                                if 'alsa' in sink_line.lower():
+                                    sink = sink_line.split()[1]
+                                    
+                                    # Create loopback
+                                    subprocess.run([
+                                        'pactl', 'load-module', 'module-loopback',
+                                        f'source={source}', f'sink={sink}'
+                                    ], capture_output=True, timeout=5)
+                                    
+                                    print(f"Created loopback: {source} -> {sink}")
+                                    return
+        except Exception as e:
+            print(f"Error setting up PulseAudio routing: {e}")
+    
+    def get_status(self) -> dict:
+        """Get current sink status."""
+        return {
+            'enabled': self.is_sink_enabled,
+            'discoverable': self.is_discoverable,
+            'connected_device': self.connected_device.name if self.connected_device else None,
+            'device_address': self.connected_device.address if self.connected_device else None,
+            'bluetooth_powered': self.bt_manager.is_powered(),
+            'audio_system': self._detect_audio_system(),
+        }
+    
+    def set_device_name(self, name: str):
+        """Set the Bluetooth speaker name."""
+        self.device_name = name
+        if self.is_sink_enabled:
+            self._set_adapter_name(name)
