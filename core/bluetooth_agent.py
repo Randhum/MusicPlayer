@@ -500,33 +500,63 @@ class BluetoothAgentUI:
         content.append(passkey_label)
         
         # GTK4: Use response signal instead of run()
-        # Use a main loop to properly handle the dialog synchronously
+        # We need to use the default GLib main context to ensure GTK events are processed
         response_received = {'value': None}
-        main_loop = GLib.MainLoop()
+        main_context = GLib.MainContext.default()
+        main_loop = GLib.MainLoop(main_context)
         
         def on_response(dialog, response_id):
-            response_received['value'] = response_id
-            dialog.close()
-            main_loop.quit()
-        
-        def on_close(dialog):
-            # Handle window close (X button) - treat as rejection
+            # Only process if we haven't already received a response
             if response_received['value'] is None:
-                response_received['value'] = Gtk.ResponseType.NO
+                print(f"Dialog response received: {response_id}")
+                response_received['value'] = response_id
+                # Quit the main loop - dialog will be destroyed after
                 main_loop.quit()
         
+        def on_close_request(dialog):
+            # Handle window close (X button) - treat as rejection
+            # Only handle if we haven't received a response yet
+            if response_received['value'] is None:
+                print("Dialog closed by user (X button), treating as rejection")
+                response_received['value'] = Gtk.ResponseType.NO
+                main_loop.quit()
+            # Always allow close - we've handled it
+            return True
+        
         dialog.connect('response', on_response)
-        dialog.connect('close-request', on_close)
+        dialog.connect('close-request', on_close_request)
+        
+        # Make sure dialog is visible and modal
+        dialog.set_modal(True)
         dialog.present()
         
+        # Ensure dialog is shown and events are processed
+        # Process pending events to make sure dialog appears
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+        
+        print("Waiting for user response...")
         # Run main loop until response is received
+        # This will process GTK events in the default context
         main_loop.run()
         
+        # Get the response
         response = response_received['value']
+        
+        # Destroy the dialog
         dialog.destroy()
         
-        result = response == Gtk.ResponseType.YES
-        print(f"Dialog response: {response}, confirmed: {result}")
+        # Map response to boolean
+        if response == Gtk.ResponseType.YES:
+            result = True
+        elif response == Gtk.ResponseType.NO:
+            result = False
+        else:
+            # Any other response (shouldn't happen, but be safe)
+            print(f"Warning: Unexpected dialog response: {response}, treating as rejection")
+            result = False
+        
+        print(f"Final result: response={response}, confirmed={result}")
         return result
     
     def show_pin_request(self, device_name: str) -> Optional[str]:
