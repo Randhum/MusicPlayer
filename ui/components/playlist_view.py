@@ -49,6 +49,7 @@ class PlaylistView(Gtk.Box):
         # Context menu
         self.context_menu = None
         self.selected_index = -1
+        self.set_vexpand(True)  # Expand to fill available vertical space
         
         # Columns
         col_index = Gtk.TreeViewColumn("#")
@@ -84,6 +85,7 @@ class PlaylistView(Gtk.Box):
         self.tree_view.append_column(col_duration)
         
         scrolled.set_child(self.tree_view)
+        scrolled.set_vexpand(True)
         self.append(scrolled)
         
         self.tracks: List[TrackMetadata] = []

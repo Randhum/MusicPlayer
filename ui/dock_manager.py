@@ -68,7 +68,7 @@ class DockablePanel(Gtk.Box):
         if self.is_detached:
             return
         
-        # Remember parent
+        # Remember parent container
         self.parent_container = self.get_parent()
         
         # Create detached window
@@ -78,7 +78,17 @@ class DockablePanel(Gtk.Box):
         
         # Remove from parent and add to window
         if self.parent_container:
-            self.parent_container.remove(self)
+            # Gtk.Paned does not have remove(); clear the appropriate child
+            if isinstance(self.parent_container, Gtk.Paned):
+                if self.parent_container.get_start_child() is self:
+                    self.parent_container.set_start_child(None)
+                elif self.parent_container.get_end_child() is self:
+                    self.parent_container.set_end_child(None)
+            # Gtk.Box and other containers support remove()
+            elif isinstance(self.parent_container, Gtk.Box):
+                self.parent_container.remove(self)
+            elif isinstance(self.parent_container, Gtk.Window):
+                self.parent_container.set_child(None)
         
         self.detached_window.set_child(self)
         self.detached_window.present()
@@ -222,4 +232,5 @@ class DockManager:
         for panel in self.panels.values():
             if panel.is_detached and panel.detached_window:
                 panel.detached_window.close()
+
 
