@@ -74,6 +74,7 @@ class DockablePanel(Gtk.Box):
         # Create detached window
         self.detached_window = Gtk.Window(title=self.title)
         self.detached_window.set_default_size(400, 500)
+        self.detached_window.set_resizable(True)  # Allow resizing and maximizing
         self.detached_window.connect("close-request", self._on_window_close)
         
         # Remove from parent and add to window
