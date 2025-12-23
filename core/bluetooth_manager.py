@@ -61,6 +61,9 @@ class BluetoothManager:
         self.agent_ui: Optional[BluetoothAgentUI] = None
         self.parent_window = parent_window
         
+        # Reference to BluetoothSink for checking sink mode state
+        self._sink_instance: Optional[object] = None
+        
         # Track signal receivers for cleanup
         self._signal_receivers = []
         
@@ -220,20 +223,7 @@ class BluetoothManager:
                 old_connected = device.connected
                 old_paired = device.paired
                 
-                # Update Connected state
-                if 'Connected' in changed:
-                    device.connected = bool(changed['Connected'])
-                    device.properties['Connected'] = device.connected
-                    
-                    if device.connected and not old_connected:
-                        self.connected_device = device
-                        if self.on_device_connected:
-                            self.on_device_connected(device)
-                    elif not device.connected and old_connected:
-                        if self.connected_device == device:
-                            self.connected_device = None
-                        if self.on_device_disconnected:
-                            self.on_device_disconnected(device)
+                # Connected state handling moved above (after Paired state)
                 
                 # Update Paired state
                 if 'Paired' in changed:
@@ -244,10 +234,37 @@ class BluetoothManager:
                     if device.paired and not old_paired:
                         self._trust_device(device_path)
                         # After pairing and trusting, try to connect if not already connected
-                        # This is important for A2DP sink mode - device needs to connect to stream audio
+                        # BUT only if sink mode is enabled (soft-switch behavior)
                         if not device.connected:
-                            # Use GLib.idle_add to avoid blocking the signal handler
-                            GLib.idle_add(self._auto_connect_after_pairing, device_path)
+                            # Check if sink mode is enabled before auto-connecting
+                            if self._is_sink_mode_enabled():
+                                # Use GLib.idle_add to avoid blocking the signal handler
+                                GLib.idle_add(self._auto_connect_after_pairing, device_path)
+                            else:
+                                print(f"Device {device.name} paired but sink mode is disabled - not auto-connecting")
+                
+                # Update Connected state
+                if 'Connected' in changed:
+                    new_connected = bool(changed['Connected'])
+                    device.connected = new_connected
+                    device.properties['Connected'] = device.connected
+                    
+                    # If device connected but sink mode is disabled, disconnect it
+                    if new_connected and not old_connected:
+                        if not self._is_sink_mode_enabled():
+                            print(f"Device {device.name} connected but sink mode is disabled - disconnecting")
+                            # Disconnect in the next event loop iteration to avoid blocking
+                            GLib.idle_add(self._disconnect_if_sink_disabled, device_path)
+                            return  # Don't process connection callbacks
+                        
+                        self.connected_device = device
+                        if self.on_device_connected:
+                            self.on_device_connected(device)
+                    elif not new_connected and old_connected:
+                        if self.connected_device == device:
+                            self.connected_device = None
+                        if self.on_device_disconnected:
+                            self.on_device_disconnected(device)
                 
                 # Update Trusted state
                 if 'Trusted' in changed:
@@ -437,6 +454,8 @@ class BluetoothManager:
         - Raises org.bluez.Error.Failed if connection fails
         - Raises org.bluez.Error.AlreadyConnected if already connected
         - Raises org.bluez.Error.NotReady if adapter not ready
+        
+        Note: For A2DP sink mode, this will only succeed if sink mode is enabled.
         """
         try:
             device = self.devices.get(device_path)
@@ -445,6 +464,12 @@ class BluetoothManager:
             print(f"  Paired: {device.paired if device else 'unknown'}")
             print(f"  Trusted: {device.trusted if device else 'unknown'}")
             print(f"  Currently connected: {device.connected if device else 'unknown'}")
+            
+            # Check if sink mode is enabled (soft-switch behavior)
+            if not self._is_sink_mode_enabled():
+                print(f"Connection rejected: Sink mode is disabled")
+                print(f"  Enable speaker mode first to allow device connections")
+                return False
             
             device_proxy = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, device_path),
@@ -578,6 +603,11 @@ class BluetoothManager:
         try:
             device = self.devices.get(device_path)
             if device and device.paired and not device.connected:
+                # Double-check sink mode is still enabled before connecting
+                if not self._is_sink_mode_enabled():
+                    print(f"Sink mode disabled - not connecting {device.name}")
+                    return False
+                
                 print(f"Connecting device {device.name}...")
                 success = self.connect_device(device_path)
                 if success:
@@ -587,6 +617,38 @@ class BluetoothManager:
             return False  # Remove from timeout
         except Exception as e:
             print(f"Error in auto-connect: {e}")
+            return False
+    
+    def register_sink_instance(self, sink_instance):
+        """
+        Register a BluetoothSink instance so we can check sink mode state.
+        
+        Args:
+            sink_instance: BluetoothSink instance
+        """
+        self._sink_instance = sink_instance
+    
+    def _is_sink_mode_enabled(self) -> bool:
+        """
+        Check if sink mode is enabled.
+        
+        This checks the BluetoothSink instance if available.
+        """
+        if self._sink_instance and hasattr(self._sink_instance, 'is_sink_enabled'):
+            return self._sink_instance.is_sink_enabled
+        return False
+    
+    def _disconnect_if_sink_disabled(self, device_path: str) -> bool:
+        """Disconnect a device if sink mode is disabled."""
+        try:
+            if not self._is_sink_mode_enabled():
+                device = self.devices.get(device_path)
+                if device and device.connected:
+                    print(f"Disconnecting {device.name} - sink mode is disabled")
+                    self.disconnect_device(device_path)
+            return False  # Remove from idle queue
+        except Exception as e:
+            print(f"Error disconnecting device: {e}")
             return False
     
     def cleanup(self):
