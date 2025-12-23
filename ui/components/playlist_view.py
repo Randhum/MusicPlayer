@@ -22,6 +22,7 @@ class PlaylistView(Gtk.Box):
         'move-track-down': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'clear-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'save-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'load-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'refresh-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
     
@@ -62,6 +63,13 @@ class PlaylistView(Gtk.Box):
         self.save_button.set_size_request(36, 36)  # Touch-friendly size
         self.save_button.connect('clicked', lambda w: self.emit('save-playlist'))
         header_box.append(self.save_button)
+        
+        self.load_button = Gtk.Button.new_from_icon_name("document-open-symbolic")
+        self.load_button.set_tooltip_text("Load Saved Playlist")
+        self.load_button.add_css_class("flat")
+        self.load_button.set_size_request(36, 36)  # Touch-friendly size
+        self.load_button.connect('clicked', lambda w: self.emit('load-playlist'))
+        header_box.append(self.load_button)
         
         self.append(header_box)
         
