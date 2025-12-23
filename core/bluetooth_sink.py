@@ -44,6 +44,10 @@ class BluetoothSink:
         self.on_audio_stream_started: Optional[Callable] = None
         self.on_audio_stream_stopped: Optional[Callable] = None
         
+        # Register this sink instance with the BT manager so it can check sink mode state
+        if hasattr(self.bt_manager, 'register_sink_instance'):
+            self.bt_manager.register_sink_instance(self)
+        
         # Setup BT manager callbacks
         self._original_device_connected = self.bt_manager.on_device_connected
         self._original_device_disconnected = self.bt_manager.on_device_disconnected
@@ -211,12 +215,24 @@ class BluetoothSink:
             self._set_discoverable(False)
             self._set_pairable(False)
             
+            # Update state flags BEFORE clearing connected device
+            # This ensures _is_sink_mode_enabled() returns False immediately
+            self.is_sink_enabled = False
+            self.is_discoverable = False
+            
             # Clear connected device reference
             self.connected_device = None
             
-            # Update state flags
-            self.is_sink_enabled = False
-            self.is_discoverable = False
+            # After disabling, disconnect any devices that might still be connected
+            # (in case they connected while we were disabling or after)
+            remaining_connected = []
+            for device in self.bt_manager.get_devices():
+                if device.connected:
+                    remaining_connected.append(device)
+            
+            for device in remaining_connected:
+                print(f"Disconnecting {device.name} - sink mode is now disabled")
+                self.bt_manager.disconnect_device(device.path)
             
             # Notify callbacks
             if self.on_sink_disabled:
