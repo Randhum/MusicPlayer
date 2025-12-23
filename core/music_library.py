@@ -10,8 +10,25 @@ import threading
 from core.metadata import TrackMetadata
 
 
-# Supported audio file extensions
-AUDIO_EXTENSIONS = {'.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wav', '.opus', '.mp4'}
+# Supported audio file extensions (covers ~90% of common formats)
+AUDIO_EXTENSIONS = {
+    # Lossy formats
+    '.mp3',           # MPEG Audio Layer 3
+    '.m4a', '.aac',   # Advanced Audio Coding (iTunes/Apple)
+    '.ogg',           # OGG Vorbis
+    '.opus',          # Opus codec
+    '.wma',           # Windows Media Audio
+    # Lossless formats
+    '.flac',          # Free Lossless Audio Codec
+    '.wav',           # Waveform Audio
+    '.aiff', '.aif',  # Audio Interchange File Format
+    '.alac', '.m4a',  # Apple Lossless (also uses .m4a)
+    '.ape',           # Monkey's Audio
+    # Container formats (may contain audio)
+    '.mp4',           # MPEG-4 (may contain AAC/ALAC)
+    '.mkv',           # Matroska (may contain audio)
+    '.webm',          # WebM (may contain Opus/Vorbis)
+}
 
 # Index file location
 INDEX_FILE = Path.home() / '.config' / 'musicplayer' / 'library_index.json'
