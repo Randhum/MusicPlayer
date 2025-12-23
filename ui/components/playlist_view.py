@@ -6,6 +6,7 @@ gi.require_version('Gdk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GObject, Gdk, GLib
 from typing import Optional, Callable, List
+from pathlib import Path
 from core.metadata import TrackMetadata
 
 
@@ -151,7 +152,8 @@ class PlaylistView(Gtk.Box):
         """Update the tree view with current tracks."""
         self.store.clear()
         for i, track in enumerate(self.tracks):
-            title = track.title or "Unknown Track"
+            # Use filename as fallback if title is missing
+            title = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
             duration = self._format_duration(track.duration) if track.duration else "--:--"
             self.store.append([i + 1, title, artist, duration])

@@ -110,6 +110,13 @@ The player automatically scans `~/Music` and `~/Musik` directories for audio fil
 - WAV
 - Any format supported by GStreamer
 
+**Metadata Extraction:**
+The player uses a generic, format-agnostic metadata extraction system that works across all audio formats:
+- Automatically detects and extracts metadata from FLAC (Vorbis comments), MP3 (ID3), MP4 (iTunes tags), OGG, and other formats
+- Extracts title, artist, album, album artist, genre, year, track number, and duration
+- Falls back to filename if metadata is missing, ensuring tracks are always identifiable
+- Supports album art extraction from embedded cover images
+
 **Audio Quality:**
 All audio is processed and output at professional quality:
 - **24-bit PCM** (S24LE format) for maximum dynamic range
