@@ -1,12 +1,14 @@
 """Bluetooth A2DP sink management for receiving audio from mobile devices."""
 
-import subprocess
 import os
-import dbus
+import subprocess
 from typing import Optional, Callable
+
+import dbus
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
+
 from core.bluetooth_manager import BluetoothManager, BluetoothDevice
 
 
@@ -295,7 +297,8 @@ class BluetoothSink:
                 return 'pulseaudio'
             
             return 'none'
-        except:
+        except (OSError, subprocess.SubprocessError, FileNotFoundError):
+            # Audio system detection failed
             return 'none'
     
     def _set_adapter_name(self, name: str):

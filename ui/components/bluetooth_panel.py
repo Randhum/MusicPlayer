@@ -1,10 +1,12 @@
 """Bluetooth panel component - shows BT status and controls."""
 
+from typing import Optional
+
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GObject, GLib
-from typing import Optional
+
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 

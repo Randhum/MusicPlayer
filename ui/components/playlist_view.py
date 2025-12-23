@@ -1,12 +1,14 @@
 """Playlist view component - shows current queue/playlist."""
 
+from pathlib import Path
+from typing import Optional, Callable, List
+
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GObject, Gdk, GLib
-from typing import Optional, Callable, List
-from pathlib import Path
+
 from core.metadata import TrackMetadata
 
 
@@ -233,12 +235,14 @@ class PlaylistView(Gtk.Box):
         if self.context_menu:
             try:
                 self.context_menu.popdown()
-            except:
+            except (AttributeError, RuntimeError):
+                # Widget may have been destroyed
                 pass
             try:
                 if self.context_menu.get_parent():
                     self.context_menu.unparent()
-            except:
+            except (AttributeError, RuntimeError):
+                # Widget may have been destroyed
                 pass
             self.context_menu = None
         
@@ -385,7 +389,8 @@ class PlaylistView(Gtk.Box):
         if self.context_menu:
             try:
                 self.context_menu.popdown()
-            except:
+            except (AttributeError, RuntimeError):
+                # Widget may have been destroyed
                 pass
         self._menu_showing = False
 

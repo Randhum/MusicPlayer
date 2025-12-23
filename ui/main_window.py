@@ -1,27 +1,36 @@
 """Main application window with dockable panels."""
 
+import random
+from pathlib import Path
+from typing import Optional, List
+
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
-from typing import Optional, List
-from pathlib import Path
 
-from ui.components.library_browser import LibraryBrowser
-from ui.components.playlist_view import PlaylistView
-from ui.components.player_controls import PlayerControls
-from ui.components.metadata_panel import MetadataPanel
-from ui.components.bluetooth_panel import BluetoothPanel
-from ui.dock_manager import DockManager, DockablePanel
-
-from core.music_library import MusicLibrary
 from core.audio_player import AudioPlayer, VIDEO_EXTENSIONS
-from core.playlist_manager import PlaylistManager
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.metadata import TrackMetadata
-from core.moc_controller import MocController
-import random
+from core.moc_controller import MocController, MOC_PLAYLIST_PATH
+from core.music_library import MusicLibrary
+from core.playlist_manager import PlaylistManager
+from ui.components.bluetooth_panel import BluetoothPanel
+from ui.components.library_browser import LibraryBrowser
+from ui.components.metadata_panel import MetadataPanel
+from ui.components.player_controls import PlayerControls
+from ui.components.playlist_view import PlaylistView
+from ui.dock_manager import DockManager
+
+
+# Update intervals (milliseconds)
+POSITION_UPDATE_INTERVAL = 500
+MOC_STATUS_UPDATE_INTERVAL = 500
+
+# Window defaults
+DEFAULT_WINDOW_WIDTH = 1200
+DEFAULT_WINDOW_HEIGHT = 800
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -30,7 +39,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.set_title("Music Player")
-        self.set_default_size(1200, 800)
+        self.set_default_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         # Ensure window can be maximized
         self.set_resizable(True)
         
@@ -73,16 +82,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.library.scan_library(callback=self._on_library_scan_complete)
         
         # Start position update timer
-        GLib.timeout_add(500, self._update_position)
+        GLib.timeout_add(POSITION_UPDATE_INTERVAL, self._update_position)
         # If MOC is available, periodically sync status from mocp
         if self.use_moc:
-            playlist_path = Path.home() / ".moc" / "playlist.m3u"
-            if playlist_path.exists():
+            if MOC_PLAYLIST_PATH.exists():
                 try:
-                    self._moc_playlist_mtime = playlist_path.stat().st_mtime
+                    self._moc_playlist_mtime = MOC_PLAYLIST_PATH.stat().st_mtime
                 except OSError:
                     self._moc_playlist_mtime = 0.0
-            GLib.timeout_add(500, self._update_moc_status)
+            GLib.timeout_add(MOC_STATUS_UPDATE_INTERVAL, self._update_moc_status)
         
         # Connect close signal to save layout
         self.connect('close-request', self._on_close)
@@ -93,6 +101,15 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         suffix = Path(track.file_path).suffix.lower()
         return suffix in VIDEO_EXTENSIONS
+    
+    def _should_use_moc(self, track: Optional[TrackMetadata]) -> bool:
+        """Return True if playback should use MOC instead of internal player."""
+        return self.use_moc and not self._is_video_track(track)
+    
+    def _stop_internal_player_if_needed(self):
+        """Stop internal GStreamer player if it's active (e.g., when switching to MOC)."""
+        if self.player.is_playing or self.player.current_track:
+            self.player.stop()
     
     def _create_ui(self):
         """Create the user interface with dockable panels."""
@@ -372,7 +389,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.use_moc and hasattr(self, "moc_controller"):
             try:
                 self.moc_controller.shutdown()
-            except Exception:
+            except OSError:
+                # Ignore errors shutting down MOC server (may already be stopped)
                 pass
         # Cleanup Bluetooth resources
         if hasattr(self, 'bt_manager'):
@@ -416,10 +434,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_playlist_view()
         # Prefer our GStreamer pipeline for video containers (e.g. MP4),
         # even when MOC is available.
-        if self.use_moc and not self._is_video_track(track):
-            # If we are handing playback over to MOC, make sure any active
-            # internal GStreamer pipeline (including video) is stopped.
-            self.player.stop()
+        if self._should_use_moc(track):
+            self._stop_internal_player_if_needed()
             self._sync_playlist_to_moc(start_playback=True)
         else:
             self._play_current_track()
@@ -433,8 +449,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Decide based on the first track; if it's a video container, prefer
         # our internal player over MOC for this album selection.
         first_track = tracks[0] if tracks else None
-        if self.use_moc and not self._is_video_track(first_track):
-            self.player.stop()
+        if self._should_use_moc(first_track):
+            self._stop_internal_player_if_needed()
             self._sync_playlist_to_moc(start_playback=True)
         else:
             self._play_current_track()
@@ -444,9 +460,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_manager.set_current_index(index)
         self._update_playlist_view()
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and not self._is_video_track(track):
+        if self._should_use_moc(track):
             # Ensure MOC playlist matches our view, then play the selected file
-            self.player.stop()
+            self._stop_internal_player_if_needed()
             self._sync_playlist_to_moc(start_playback=False)
             if track:
                 self.moc_controller.play_file(track.file_path)
@@ -466,10 +482,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_play(self):
         """Handle play button click."""
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and not self._is_video_track(track):
-            # Stop any active internal playback (including video) when we
-            # resume via MOC.
-            self.player.stop()
+        if self._should_use_moc(track):
+            self._stop_internal_player_if_needed()
             self.moc_controller.play()
         else:
             if not self.player.current_track:
@@ -479,14 +493,16 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_pause(self):
         """Handle pause button click."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self._should_use_moc(track):
             self.moc_controller.pause()
         else:
             self.player.pause()
     
     def _on_stop(self):
         """Handle stop button click."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self._should_use_moc(track):
             self.moc_controller.stop()
         else:
             self.player.stop()
@@ -496,8 +512,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_next(self):
         """Handle next button click."""
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and not self._is_video_track(track):
-            self.player.stop()
+        if self._should_use_moc(track):
+            self._stop_internal_player_if_needed()
             self.moc_controller.next()
         elif self.shuffle_enabled:
             self._play_random_track()
@@ -510,8 +526,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_prev(self):
         """Handle previous button click."""
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and not self._is_video_track(track):
-            self.player.stop()
+        if self._should_use_moc(track):
+            self._stop_internal_player_if_needed()
             self.moc_controller.previous()
         else:
             track = self.playlist_manager.get_previous_track()
@@ -522,7 +538,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_seek(self, controls, position: float):
         """Handle seek operation."""
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and not self._is_video_track(track):
+        if self._should_use_moc(track):
             # Use relative seek based on last known position from MOC
             delta = position - self._moc_last_position
             self.moc_controller.seek_relative(delta)
@@ -532,7 +548,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_volume_changed(self, controls, volume: float):
         """Handle volume change."""
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and not self._is_video_track(track):
+        if self._should_use_moc(track):
             self.moc_controller.set_volume(volume)
         else:
             self.player.set_volume(volume)
@@ -602,9 +618,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._update_playlist_view()
                     break
         # Detect external playlist changes (e.g. from MOC UI) by watching the M3U file
-        playlist_path = Path.home() / ".moc" / "playlist.m3u"
         try:
-            mtime = playlist_path.stat().st_mtime
+            mtime = MOC_PLAYLIST_PATH.stat().st_mtime
         except OSError:
             # If the playlist file temporarily disappears (e.g. while MOC rewrites
             # it), don't treat this as a "real" mtime change; just keep the old

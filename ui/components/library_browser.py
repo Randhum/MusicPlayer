@@ -1,13 +1,18 @@
 """Library browser component - sidebar with artist/album/track tree."""
 
+from pathlib import Path
+from typing import Optional, Callable, TYPE_CHECKING
+
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Gdk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GObject, Gdk, GLib
-from typing import Optional, Callable
-from pathlib import Path
+
 from core.metadata import TrackMetadata
+
+if TYPE_CHECKING:
+    from core.music_library import MusicLibrary
 
 
 class LibraryBrowser(Gtk.Box):
@@ -92,7 +97,7 @@ class LibraryBrowser(Gtk.Box):
         scrolled.set_child(self.tree_view)
         self.append(scrolled)
     
-    def populate(self, library):
+    def populate(self, library: 'MusicLibrary') -> None:
         """Populate the tree with folder structure."""
         self.store.clear()
         
@@ -279,12 +284,14 @@ class LibraryBrowser(Gtk.Box):
         if self.context_menu:
             try:
                 self.context_menu.popdown()
-            except:
+            except (AttributeError, RuntimeError):
+                # Widget may have been destroyed
                 pass
             try:
                 if self.context_menu.get_parent():
                     self.context_menu.unparent()
-            except:
+            except (AttributeError, RuntimeError):
+                # Widget may have been destroyed
                 pass
             self.context_menu = None
         
@@ -403,7 +410,8 @@ class LibraryBrowser(Gtk.Box):
         if self.context_menu:
             try:
                 self.context_menu.popdown()
-            except:
+            except (AttributeError, RuntimeError):
+                # Widget may have been destroyed
                 pass
         self._menu_showing = False
 
