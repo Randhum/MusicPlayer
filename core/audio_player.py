@@ -63,8 +63,7 @@ class AudioPlayer:
         if not flac_available:
             print("Warning: FLAC decoder not found.")
             print("To enable FLAC playback, install:")
-            print("  emerge -av media-libs/gst-plugins-good")
-            print("  (Make sure the 'flac' USE flag is enabled)")
+            print("  emerge -av media-plugins/gst-plugins-flac")
         else:
             print("FLAC decoder available")
         
@@ -131,6 +130,58 @@ class AudioPlayer:
             
             print(f"Audio pipeline configured for {self.BIT_DEPTH}-bit, {self.SAMPLE_RATE} Hz, {self.CHANNELS}-channel stereo")
         
+        # Set up video sink for video files with proper synchronization
+        # Create a video processing bin with sync enabled
+        video_bin = Gst.Bin.new("video-bin")
+        
+        # Try different video sinks in order of preference
+        video_sink = None
+        video_sink_name = None
+        
+        # Try autovideosink first (automatically chooses best available)
+        video_sink = Gst.ElementFactory.make("autovideosink", "autovideosink")
+        if video_sink:
+            video_sink_name = "autovideosink"
+        else:
+            # Fallback to xvimagesink for X11
+            video_sink = Gst.ElementFactory.make("xvimagesink", "xvimagesink")
+            if video_sink:
+                video_sink_name = "xvimagesink"
+            else:
+                # Fallback to ximagesink
+                video_sink = Gst.ElementFactory.make("ximagesink", "ximagesink")
+                if video_sink:
+                    video_sink_name = "ximagesink"
+        
+        if video_sink:
+            # Enable synchronization for smooth video playback
+            video_sink.set_property("sync", True)
+            
+            # Add to bin
+            video_bin.add(video_sink)
+            
+            # Create ghost pad
+            pad = video_sink.get_static_pad("sink")
+            if pad:
+                ghost_pad = Gst.GhostPad.new("sink", pad)
+                video_bin.add_pad(ghost_pad)
+            
+            # Set video bin as video sink
+            self.playbin.set_property("video-sink", video_bin)
+            print(f"Video output enabled using {video_sink_name} (will display video if present)")
+        else:
+            print("Warning: No video sink available, video will not be displayed")
+        
+        # Ensure both audio and video are enabled by setting playbin flags
+        # Flags: AUDIO=1, VIDEO=2, SOFT_VOLUME=8, TEXT=16
+        try:
+            # Try using PlayFlags enum if available
+            flags = Gst.PlayFlags.AUDIO | Gst.PlayFlags.VIDEO | Gst.PlayFlags.SOFT_VOLUME
+            self.playbin.set_property("flags", flags)
+        except (AttributeError, TypeError):
+            # Fallback: use integer values directly
+            self.playbin.set_property("flags", 1 | 2 | 8)  # AUDIO | VIDEO | SOFT_VOLUME
+        
         # Set initial volume
         self.playbin.set_property("volume", self.volume)
     
@@ -150,13 +201,45 @@ class AudioPlayer:
                 print(f"Debug info: {debug}")
             
             # Check for missing codec/plugin errors
-            if "flac" in error_msg.lower() or ("no decoder" in error_msg.lower() and self.current_track and self.current_track.file_path.endswith('.flac')):
-                print("\nERROR: FLAC decoder not available!")
-                print("Install FLAC support with:")
-                print("  emerge -av media-libs/gst-plugins-good")
-                print("  (Make sure the 'flac' USE flag is enabled)")
-                print("  You can check USE flags with: emerge -pv media-libs/gst-plugins-good")
-            elif "could not link" in error_msg.lower() or "no element" in error_msg.lower():
+            error_lower = error_msg.lower()
+            debug_lower = debug.lower() if debug else ""
+            
+            # Check for FLAC decoder errors (multiple patterns)
+            is_flac_error = (
+                "flac" in error_lower or
+                ("missing decoder" in debug_lower and "flac" in debug_lower) or
+                ("no suitable plugins found" in debug_lower and "flac" in debug_lower) or
+                ("no decoder" in error_lower and self.current_track and self.current_track.file_path.lower().endswith('.flac'))
+            )
+            
+            if is_flac_error:
+                print("\n" + "="*60)
+                print("ERROR: FLAC decoder not available!")
+                print("="*60)
+                print("To enable FLAC playback, install GStreamer FLAC support:")
+                print("  1. Install the FLAC plugin package:")
+                print("     emerge -av media-plugins/gst-plugins-flac")
+                print("  2. Verify FLAC decoder is available:")
+                print("     gst-inspect-1.0 flacdec")
+                print("="*60)
+            elif "missing decoder" in debug_lower or "no suitable plugins found" in debug_lower:
+                print("\n" + "="*60)
+                print("ERROR: Missing GStreamer decoder plugin!")
+                print("="*60)
+                print("The audio format requires a decoder that is not installed.")
+                print("Install additional GStreamer plugins:")
+                print("  emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad")
+                print("="*60)
+            elif "h264" in error_lower or "openh264" in error_lower or ("missing decoder" in debug_lower and "h264" in debug_lower):
+                print("\n" + "="*60)
+                print("ERROR: H.264/OpenH264 decoder not available!")
+                print("="*60)
+                print("To enable H.264 video playback, install:")
+                print("  emerge -av media-plugins/gst-plugins-openh264")
+                print("Or for broader codec support:")
+                print("  emerge -av media-libs/gst-plugins-bad media-libs/gst-plugins-ugly")
+                print("="*60)
+            elif "could not link" in error_lower or "no element" in error_lower:
                 print("\nERROR: Missing GStreamer plugin!")
                 print("You may need to install additional GStreamer plugins.")
                 print("Try: emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad")
@@ -232,22 +315,28 @@ class AudioPlayer:
             print(f"Error: File not found: {track.file_path}")
             return False
         
-        # Check file extension to provide helpful error messages
+        # Check file extension to provide helpful error messages for common formats
         file_ext = os.path.splitext(track.file_path)[1].lower()
-        if file_ext == '.flac':
-            # Verify FLAC decoder is available (playbin will handle it, but check anyway)
-            flac_available = False
-            for decoder_name in ["flacdec", "flac", "flacparse"]:
+        
+        # Format-specific decoder checks and helpful messages
+        # Note: playbin handles most formats automatically, but we check for critical ones
+        format_checks = {
+            '.flac': (['flacdec', 'flac', 'flacparse'], 'media-plugins/gst-plugins-flac'),
+        }
+        
+        if file_ext in format_checks:
+            decoder_names, package = format_checks[file_ext]
+            decoder_available = False
+            for decoder_name in decoder_names:
                 decoder = Gst.ElementFactory.make(decoder_name, decoder_name)
                 if decoder:
-                    flac_available = True
+                    decoder_available = True
                     break
             
-            if not flac_available:
-                print("WARNING: FLAC decoder may not be available.")
-                print("If playback fails, install FLAC support:")
-                print("  emerge -av media-libs/gst-plugins-good")
-                print("  (Ensure 'flac' USE flag is enabled)")
+            if not decoder_available:
+                print(f"WARNING: {file_ext.upper()} decoder may not be available.")
+                print(f"If playback fails, install support:")
+                print(f"  emerge -av {package}")
         
         # Stop current playback
         self._stop()

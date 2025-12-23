@@ -32,31 +32,27 @@ Install the following packages using `emerge`:
 
 ```bash
 # Core GTK / GStreamer (required for playback)
+# Base plugins provide essential codecs (WAV, OGG, etc.)
+# Good plugins provide additional open formats (Opus, etc.)
+# Bad plugins provide additional formats (WMA, APE, ALAC, etc.)
+# Ugly plugins provide patented formats (MP3, AAC via alternative codecs)
 emerge -av \
   media-libs/gstreamer \
   media-libs/gst-plugins-base \
   media-libs/gst-plugins-good \
   media-libs/gst-plugins-bad \
-  media-plugins/gst-plugins-alsa \
+  media-libs/gst-plugins-ugly \
   media-plugins/gst-plugins-mpg123 \
   media-plugins/gst-plugins-faac \
+  media-plugins/gst-plugins-flac \
+  media-plugins/gst-plugins-openh264 \
   media-plugins/gst-plugins-bluez
-
-# For FLAC support, ensure the 'flac' USE flag is enabled for gst-plugins-good:
-# Check current flags: emerge -pv media-libs/gst-plugins-good
-# Enable if needed: echo "media-libs/gst-plugins-good flac" >> /etc/portage/package.use
-# Then reinstall: emerge -av media-libs/gst-plugins-good
 
 # Audio stack
 emerge -av media-libs/alsa-lib
 
 # Bluetooth support
 emerge -av net-wireless/bluez
-
-# GStreamer BlueZ plugin (recommended for Bluetooth audio)
-# This provides native GStreamer integration with BlueZ for A2DP audio streaming
-# The application will automatically use this plugin if available
-emerge -av media-plugins/gst-plugins-bluez
 
 # Audio system (choose one or both)
 # Note: GStreamer BlueZ plugin works independently, but these provide additional routing options
@@ -102,13 +98,30 @@ python main.py
 
 ### Music Library
 
-The player automatically scans `~/Music` and `~/Musik` directories for audio files. Supported formats include:
-- MP3
-- FLAC (with full metadata support and 24-bit bitstream decoding)
-- OGG
-- M4A/AAC
-- WAV
-- Any format supported by GStreamer
+The player automatically scans `~/Music` and `~/Musik` directories for audio files. 
+
+**Supported Formats (~90% of common audio formats):**
+
+**Lossy Formats:**
+- **MP3** - MPEG Audio Layer 3 (most common)
+- **AAC/M4A** - Advanced Audio Coding (iTunes/Apple)
+- **OGG Vorbis** - Open source lossy format
+- **Opus** - Modern efficient codec
+- **WMA** - Windows Media Audio
+
+**Lossless Formats:**
+- **FLAC** - Free Lossless Audio Codec (with full metadata support and 24-bit bitstream decoding)
+- **WAV** - Uncompressed waveform audio
+- **AIFF** - Audio Interchange File Format
+- **ALAC** - Apple Lossless (also uses .m4a extension)
+- **APE** - Monkey's Audio
+
+**Container Formats:**
+- **MP4** - MPEG-4 container (may contain AAC/ALAC audio)
+- **MKV** - Matroska container (may contain various audio codecs)
+- **WebM** - WebM container (may contain Opus/Vorbis audio)
+
+**Note:** If a format is not directly supported by GStreamer, the player can use FFmpeg as a fallback decoder (if installed). This ensures maximum compatibility with rare or proprietary formats.
 
 **Metadata Extraction:**
 The player uses a generic, format-agnostic metadata extraction system that works across all audio formats:
@@ -249,6 +262,25 @@ If you see errors like `module 'dbus' has no attribute 'UTF8String'`:
 - This is fixed in the current version - the code now uses modern dbus-python APIs
 - Ensure you have the latest version of `dbus-python` installed
 - The code automatically handles dbus type conversions for compatibility
+
+### FLAC playback not working
+If you see errors like "Missing decoder: Free Lossless Audio Codec (FLAC)":
+
+1. **Install the FLAC plugin package**:
+   ```bash
+   emerge -av media-plugins/gst-plugins-flac
+   ```
+
+2. **Verify FLAC decoder is available**:
+   ```bash
+   gst-inspect-1.0 flacdec
+   ```
+   This should show information about the FLAC decoder. If it says "No such element", the plugin is not installed correctly.
+
+3. **Alternative: Check all available FLAC-related plugins**:
+   ```bash
+   gst-inspect-1.0 | grep -i flac
+   ```
 
 ### Panel layout issues
 Delete `~/.config/musicplayer/layout.json` to reset to default layout.
