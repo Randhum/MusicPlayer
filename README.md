@@ -181,6 +181,15 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
   - The **current track / time** display follows whatever MOC is playing.
 - The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
 
+#### File type handling with MOC vs internal player
+
+- MOC is primarily an **audio player**; our internal GStreamer-based player supports both **audio and video containers** (e.g. MP4, MKV, WebM).
+- When `mocp` is available, the app will:
+  - Use **MOC for pure audio files** (MP3, FLAC, OGG, etc.).
+  - Automatically **prefer the internal player for video containers** (`.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.flv`, `.wmv`, `.m4v`), even if MOC is installed.
+    - This avoids handing formats to MOC that it may not support as reliably.
+    - Playback, seeking and volume for these video files are handled entirely by GStreamer, just like when MOC is not available.
+
 #### How playlist sync behaves with external `mocp` changes
 
 When you edit the playlist directly in MOC (e.g. via the `mocp` ncurses UI or CLI):
