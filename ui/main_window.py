@@ -5,6 +5,7 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
 from typing import Optional, List
+from pathlib import Path
 
 from ui.components.library_browser import LibraryBrowser
 from ui.components.playlist_view import PlaylistView
@@ -19,6 +20,7 @@ from core.playlist_manager import PlaylistManager
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.metadata import TrackMetadata
+from core.moc_controller import MocController
 import random
 
 
@@ -39,6 +41,12 @@ class MainWindow(Gtk.ApplicationWindow):
         # Initialize BT manager with this window for pairing dialogs
         self.bt_manager = BluetoothManager(parent_window=self)
         self.bt_sink = BluetoothSink(self.bt_manager)
+        # MOC integration (Music On Console)
+        self.moc_controller = MocController()
+        self.use_moc = self.moc_controller.is_available()
+        self._moc_last_position: float = 0.0
+        self._moc_last_file: Optional[str] = None
+        self._moc_playlist_mtime: float = 0.0
         
         # Initialize dock manager
         self.dock_manager = DockManager(self)
@@ -66,6 +74,15 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Start position update timer
         GLib.timeout_add(500, self._update_position)
+        # If MOC is available, periodically sync status from mocp
+        if self.use_moc:
+            playlist_path = Path.home() / ".moc" / "playlist.m3u"
+            if playlist_path.exists():
+                try:
+                    self._moc_playlist_mtime = playlist_path.stat().st_mtime
+                except OSError:
+                    self._moc_playlist_mtime = 0.0
+            GLib.timeout_add(500, self._update_moc_status)
         
         # Connect close signal to save layout
         self.connect('close-request', self._on_close)
@@ -350,6 +367,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Called when library scan is complete."""
         self.library_browser.populate(self.library)
         GLib.idle_add(self._update_playlist_view)
+        # If MOC is available, sync playlist view to MOC's playlist
+        if self.use_moc:
+            GLib.idle_add(self._load_moc_playlist_from_moc)
     
     def _update_playlist_view(self):
         """Update the playlist view."""
@@ -369,6 +389,8 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self.playlist_manager.clear()
             self._update_playlist_view()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=False)
     
     def _on_track_selected(self, browser, track: TrackMetadata):
         """Handle track selection from library browser."""
@@ -376,7 +398,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_manager.add_track(track)
         self.playlist_manager.set_current_index(0)
         self._update_playlist_view()
-        self._play_current_track()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=True)
+        else:
+            self._play_current_track()
     
     def _on_album_selected(self, browser, tracks: List[TrackMetadata]):
         """Handle album selection from library browser."""
@@ -384,13 +409,23 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_manager.add_tracks(tracks)
         self.playlist_manager.set_current_index(0)
         self._update_playlist_view()
-        self._play_current_track()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=True)
+        else:
+            self._play_current_track()
     
     def _on_playlist_track_activated(self, view, index: int):
         """Handle track activation in playlist."""
         self.playlist_manager.set_current_index(index)
         self._update_playlist_view()
-        self._play_current_track()
+        if self.use_moc:
+            # Ensure MOC playlist matches our view, then play the selected file
+            self._sync_playlist_to_moc(start_playback=False)
+            track = self.playlist_manager.get_current_track()
+            if track:
+                self.moc_controller.play_file(track.file_path)
+        else:
+            self._play_current_track()
     
     def _play_current_track(self):
         """Play the current track from playlist."""
@@ -402,24 +437,35 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_play(self):
         """Handle play button click."""
-        if not self.player.current_track:
-            self._play_current_track()
+        if self.use_moc:
+            self.moc_controller.play()
         else:
-            self.player.play()
+            if not self.player.current_track:
+                self._play_current_track()
+            else:
+                self.player.play()
     
     def _on_pause(self):
         """Handle pause button click."""
-        self.player.pause()
+        if self.use_moc:
+            self.moc_controller.pause()
+        else:
+            self.player.pause()
     
     def _on_stop(self):
         """Handle stop button click."""
-        self.player.stop()
-        self.playlist_manager.set_current_index(-1)
-        self._update_playlist_view()
+        if self.use_moc:
+            self.moc_controller.stop()
+        else:
+            self.player.stop()
+            self.playlist_manager.set_current_index(-1)
+            self._update_playlist_view()
     
     def _on_next(self):
         """Handle next button click."""
-        if self.shuffle_enabled:
+        if self.use_moc:
+            self.moc_controller.next()
+        elif self.shuffle_enabled:
             self._play_random_track()
         else:
             track = self.playlist_manager.get_next_track()
@@ -429,18 +475,29 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_prev(self):
         """Handle previous button click."""
-        track = self.playlist_manager.get_previous_track()
-        if track:
-            self._update_playlist_view()
-            self._play_current_track()
+        if self.use_moc:
+            self.moc_controller.previous()
+        else:
+            track = self.playlist_manager.get_previous_track()
+            if track:
+                self._update_playlist_view()
+                self._play_current_track()
     
     def _on_seek(self, controls, position: float):
         """Handle seek operation."""
-        self.player.seek(position)
+        if self.use_moc:
+            # Use relative seek based on last known position from MOC
+            delta = position - self._moc_last_position
+            self.moc_controller.seek_relative(delta)
+        else:
+            self.player.seek(position)
     
     def _on_volume_changed(self, controls, volume: float):
         """Handle volume change."""
-        self.player.set_volume(volume)
+        if self.use_moc:
+            self.moc_controller.set_volume(volume)
+        else:
+            self.player.set_volume(volume)
     
     def _on_player_state_changed(self, is_playing: bool):
         """Handle player state change."""
@@ -448,7 +505,9 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_player_position_changed(self, position: float, duration: float):
         """Handle player position change."""
-        self.player_controls.update_progress(position, duration)
+        # In MOC mode we drive position from mocp status polling instead
+        if not self.use_moc:
+            self.player_controls.update_progress(position, duration)
     
     def _on_track_finished(self):
         """Handle track finished."""
@@ -459,10 +518,58 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _update_position(self):
         """Periodically update position display."""
-        if self.player.is_playing:
+        # When using MOC, playback position is updated by _update_moc_status
+        if not self.use_moc and self.player.is_playing:
             position = self.player.get_position()
             duration = self.player.get_duration()
             self.player_controls.update_progress(position, duration)
+        return True
+
+    def _update_moc_status(self):
+        """Periodically pull status from MOC and sync UI/playlist."""
+        if not self.use_moc:
+            return False
+
+        status = self.moc_controller.get_status()
+        if not status:
+            return True  # Try again later
+
+        state = status.get("state", "STOP")
+        file_path = status.get("file_path")
+        position = float(status.get("position", 0.0))
+        duration = float(status.get("duration", 0.0))
+        volume = float(status.get("volume", 1.0))
+
+        # Remember last known position for relative seeks
+        self._moc_last_position = position
+
+        # Sync basic playback UI
+        self.player_controls.set_playing(state == "PLAY")
+        self.player_controls.update_progress(position, duration)
+        self.player_controls.set_volume(volume)
+
+        # If track changed, update metadata + playlist selection
+        if file_path and file_path != self._moc_last_file:
+            self._moc_last_file = file_path
+            track = TrackMetadata(file_path)
+            self.metadata_panel.set_track(track)
+
+            playlist = self.playlist_manager.get_playlist()
+            for idx, t in enumerate(playlist):
+                if t.file_path == file_path:
+                    self.playlist_manager.set_current_index(idx)
+                    self._update_playlist_view()
+                    break
+        # Detect external playlist changes (e.g. from MOC UI) by watching the M3U file
+        playlist_path = Path.home() / ".moc" / "playlist.m3u"
+        try:
+            mtime = playlist_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        if mtime != self._moc_playlist_mtime:
+            self._moc_playlist_mtime = mtime
+            self._load_moc_playlist_from_moc()
+
         return True
 
     def _on_shuffle_toggled(self, controls, active: bool):
@@ -494,34 +601,65 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle 'Add to Playlist' from library browser context menu."""
         self.playlist_manager.add_track(track)
         self._update_playlist_view()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=False)
     
     def _on_add_album(self, browser, tracks):
         """Handle 'Add Album to Playlist' from library browser context menu."""
         self.playlist_manager.add_tracks(tracks)
         self._update_playlist_view()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_remove_track(self, view, index: int):
         """Handle track removal from playlist."""
         self.playlist_manager.remove_track(index)
         self._update_playlist_view()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_move_up(self, view, index: int):
         """Handle moving track up in playlist."""
         if index > 0:
             self.playlist_manager.move_track(index, index - 1)
             self._update_playlist_view()
+            if self.use_moc:
+                self._sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_move_down(self, view, index: int):
         """Handle moving track down in playlist."""
         if index < len(self.playlist_manager.current_playlist) - 1:
             self.playlist_manager.move_track(index, index + 1)
             self._update_playlist_view()
+            if self.use_moc:
+                self._sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_clear(self, view):
         """Handle clearing playlist."""
-        self.player.stop()
+        if self.use_moc:
+            self.moc_controller.stop()
+        else:
+            self.player.stop()
         self.playlist_manager.clear()
         self._update_playlist_view()
+        if self.use_moc:
+            self._sync_playlist_to_moc(start_playback=False)
+
+    def _sync_playlist_to_moc(self, start_playback: bool = False):
+        """Push the current GUI playlist into MOC's internal playlist."""
+        if not self.use_moc:
+            return
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
+        if not tracks:
+            # Clear MOC playlist
+            self.moc_controller.set_playlist([], -1, start_playback=False)
+            return
+        self.moc_controller.set_playlist(
+            tracks,
+            current_index=current_index if start_playback else -1,
+            start_playback=start_playback,
+        )
     
     def _on_playlist_save(self, view):
         """Handle saving playlist."""
@@ -544,6 +682,17 @@ class MainWindow(Gtk.ApplicationWindow):
         
         dialog.connect('response', lambda d, r: self._on_save_dialog_response(d, r, entry))
         dialog.present()
+
+    def _load_moc_playlist_from_moc(self):
+        """Replace current playlist with tracks from MOC's playlist file."""
+        tracks, current_index = self.moc_controller.get_playlist()
+        self.playlist_manager.clear()
+        if tracks:
+            self.playlist_manager.add_tracks(tracks)
+            if current_index >= 0:
+                self.playlist_manager.set_current_index(current_index)
+        self._update_playlist_view()
+        return False
     
     def _on_save_dialog_response(self, dialog, response, entry):
         """Handle save dialog response."""

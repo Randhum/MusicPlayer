@@ -169,6 +169,18 @@ You should see a window with your music library, playlist, and Bluetooth control
   - **Shuffle**: toggle to play the current playlist in **random order**; the *Next* button and automatic track advance will pick a random track instead of the next in sequence.
   - **Seek & Volume**: larger, touch-friendly sliders for scrubbing through the track and adjusting volume.
 
+### MOC Integration (Music On Console, Gentoo)
+
+If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
+
+- **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel.
+- **Write back changes** you make in the GTK playlist (add/remove/move/clear/search-based queues) into MOC’s internal playlist so both stay aligned.
+- **Sync player controls** with MOC:
+  - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood.
+  - The **volume slider** controls MOC’s volume.
+  - The **current track / time** display follows whatever MOC is playing.
+- The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
+
 ---
 
 ## 🧠 Understanding IoT Through This Project
