@@ -186,6 +186,15 @@ class MocController:
         self.ensure_server()
         self._run("--stop")
 
+    def shutdown(self):
+        """Completely stop the MOC server (equivalent to `mocp --exit`)."""
+        if not self.is_available():
+            return
+        # We don't call ensure_server() here on purpose – if the server is not
+        # running, there is nothing to shut down.
+        self._run("--exit")
+        self._server_initialized = False
+
     def next(self):
         """Skip to next track."""
         if not self.is_available():

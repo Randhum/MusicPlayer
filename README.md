@@ -189,21 +189,30 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
   - Automatically **prefer the internal player for video containers** (`.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.flv`, `.wmv`, `.m4v`), even if MOC is installed.
     - This avoids handing formats to MOC that it may not support as reliably.
     - Playback, seeking and volume for these video files are handled entirely by GStreamer, just like when MOC is not available.
+  - Cleanly **shut down the MOC server** (`mocp --exit`) when you close the GTK app window, so there are no stray `mocp` servers left running from this UI.
+
+In all cases, when we hand playback responsibility from one backend to the other (for example, from a video file played via GStreamer to an audio-only playlist in MOC), any active GStreamer pipeline is stopped first, ensuring that previous video streams are not left running in the background.
 
 #### How playlist sync behaves with external `mocp` changes
 
 When you edit the playlist directly in MOC (e.g. via the `mocp` ncurses UI or CLI):
 
 - The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes.
-- Additionally, whenever MOC reports that the **current track changed** and that track is **not found in the GTK playlist**, the app assumes the playlist was modified externally and will:
-  - Reload the full playlist from `~/.moc/playlist.m3u`.
-  - Update the selection to follow the current MOC track.
+- Additionally, whenever MOC reports that the **current track changed**, the app reloads the full playlist from `~/.moc/playlist.m3u` and updates the selection to follow the current MOC track.
+
+**Important limitation:** MOC keeps its playlist in memory and only saves to `~/.moc/playlist.m3u` at certain times (e.g., when MOC exits, or when you press `S` in the MOC UI to save). This means:
+
+- If you modify the playlist in MOC's UI **without changing tracks or saving**, the app will still show the old playlist until you either:
+  - Skip to another track in MOC (triggers automatic reload).
+  - Press `S` in MOC's ncurses UI to save the playlist.
+  - Click the **Refresh** button (🔄) in this app's playlist panel.
 
 This means:
 
-- **Most changes are reflected almost immediately**:
-  - Adding/removing/reordering tracks in MOC.
-  - Skipping to a track in MOC that is not currently in the GTK playlist.
+- **Changes are reflected** when:
+  - You skip to another track in MOC (automatic reload on every track change).
+  - MOC saves its playlist (press `S` in MOC, or when MOC exits).
+  - You click the **Refresh** button in the playlist panel.
 - There may be a **small delay (up to ~0.5s)** because status and playlist are polled periodically.
 - If `~/.moc/playlist.m3u` is moved or disabled, the GTK playlist will no longer auto-sync until it becomes available again.
 

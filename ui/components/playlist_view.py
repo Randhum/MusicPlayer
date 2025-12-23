@@ -20,6 +20,7 @@ class PlaylistView(Gtk.Box):
         'move-track-down': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         'clear-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'save-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'refresh-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
     
     def __init__(self):
@@ -39,6 +40,13 @@ class PlaylistView(Gtk.Box):
         header_box.append(header_label)
         
         # Action buttons
+        self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        self.refresh_button.set_tooltip_text("Refresh from MOC")
+        self.refresh_button.add_css_class("flat")
+        self.refresh_button.set_size_request(36, 36)  # Touch-friendly size
+        self.refresh_button.connect('clicked', lambda w: self.emit('refresh-playlist'))
+        header_box.append(self.refresh_button)
+        
         self.clear_button = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
         self.clear_button.set_tooltip_text("Clear Playlist")
         self.clear_button.add_css_class("flat")
@@ -136,6 +144,10 @@ class PlaylistView(Gtk.Box):
         self.tracks = tracks
         self.current_index = current_index
         self._update_view()
+    
+    def set_moc_mode(self, enabled: bool):
+        """Show or hide the Refresh button based on whether MOC mode is active."""
+        self.refresh_button.set_visible(enabled)
     
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""

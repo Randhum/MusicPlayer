@@ -120,12 +120,13 @@ class TrackMetadata:
             # Extract album art
             self.album_art_path = self._extract_album_art(audio_file)
             
-            # Fallback to filename if no title
-            if not self.title:
-                self.title = Path(self.file_path).stem
-            
         except Exception as e:
             print(f"Error extracting metadata from {self.file_path}: {e}")
+        finally:
+            # Always ensure we at least have a sensible title, even if Mutagen
+            # failed to parse tags for this file.
+            if not self.title:
+                self.title = Path(self.file_path).stem
     
     def _get_tag_generic(self, audio_file, tag_keys: list) -> Optional[str]:
         """Get a tag value trying multiple possible keys - works for all formats."""
