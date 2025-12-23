@@ -32,7 +32,8 @@ emerge -av \
   media-libs/gst-plugins-ugly \
   media-plugins/gst-plugins-mpg123 \
   media-plugins/gst-plugins-faac \
-  media-plugins/gst-plugins-flac \
+  media-plugins/gst-plugins-flac \ 
+  media-plugins/gst-plugins-faad \
   media-plugins/gst-plugins-openh264 \
   media-plugins/gst-plugins-bluez
 
