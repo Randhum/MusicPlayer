@@ -181,6 +181,23 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
   - The **current track / time** display follows whatever MOC is playing.
 - The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
 
+#### How playlist sync behaves with external `mocp` changes
+
+When you edit the playlist directly in MOC (e.g. via the `mocp` ncurses UI or CLI):
+
+- The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes.
+- Additionally, whenever MOC reports that the **current track changed** and that track is **not found in the GTK playlist**, the app assumes the playlist was modified externally and will:
+  - Reload the full playlist from `~/.moc/playlist.m3u`.
+  - Update the selection to follow the current MOC track.
+
+This means:
+
+- **Most changes are reflected almost immediately**:
+  - Adding/removing/reordering tracks in MOC.
+  - Skipping to a track in MOC that is not currently in the GTK playlist.
+- There may be a **small delay (up to ~0.5s)** because status and playlist are polled periodically.
+- If `~/.moc/playlist.m3u` is moved or disabled, the GTK playlist will no longer auto-sync until it becomes available again.
+
 ---
 
 ## 🧠 Understanding IoT Through This Project
