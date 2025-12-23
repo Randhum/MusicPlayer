@@ -297,6 +297,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_view.connect('move-track-down', self._on_playlist_move_down)
         self.playlist_view.connect('clear-playlist', self._on_playlist_clear)
         self.playlist_view.connect('save-playlist', self._on_playlist_save)
+        self.playlist_view.connect('refresh-playlist', self._on_playlist_refresh)
+        # Show refresh button only when MOC is available
+        self.playlist_view.set_moc_mode(self.use_moc)
     
     def _create_metadata_panel(self):
         """Create the metadata panel."""
@@ -365,6 +368,12 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle window close."""
         self.dock_manager.cleanup()
         self.player.cleanup()
+        # Cleanly stop MOC server if we started it
+        if self.use_moc and hasattr(self, "moc_controller"):
+            try:
+                self.moc_controller.shutdown()
+            except Exception:
+                pass
         # Cleanup Bluetooth resources
         if hasattr(self, 'bt_manager'):
             self.bt_manager.cleanup()
@@ -408,6 +417,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Prefer our GStreamer pipeline for video containers (e.g. MP4),
         # even when MOC is available.
         if self.use_moc and not self._is_video_track(track):
+            # If we are handing playback over to MOC, make sure any active
+            # internal GStreamer pipeline (including video) is stopped.
+            self.player.stop()
             self._sync_playlist_to_moc(start_playback=True)
         else:
             self._play_current_track()
@@ -422,6 +434,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # our internal player over MOC for this album selection.
         first_track = tracks[0] if tracks else None
         if self.use_moc and not self._is_video_track(first_track):
+            self.player.stop()
             self._sync_playlist_to_moc(start_playback=True)
         else:
             self._play_current_track()
@@ -433,6 +446,7 @@ class MainWindow(Gtk.ApplicationWindow):
         track = self.playlist_manager.get_current_track()
         if self.use_moc and not self._is_video_track(track):
             # Ensure MOC playlist matches our view, then play the selected file
+            self.player.stop()
             self._sync_playlist_to_moc(start_playback=False)
             if track:
                 self.moc_controller.play_file(track.file_path)
@@ -453,6 +467,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle play button click."""
         track = self.playlist_manager.get_current_track()
         if self.use_moc and not self._is_video_track(track):
+            # Stop any active internal playback (including video) when we
+            # resume via MOC.
+            self.player.stop()
             self.moc_controller.play()
         else:
             if not self.player.current_track:
@@ -480,6 +497,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle next button click."""
         track = self.playlist_manager.get_current_track()
         if self.use_moc and not self._is_video_track(track):
+            self.player.stop()
             self.moc_controller.next()
         elif self.shuffle_enabled:
             self._play_random_track()
@@ -493,6 +511,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle previous button click."""
         track = self.playlist_manager.get_current_track()
         if self.use_moc and not self._is_video_track(track):
+            self.player.stop()
             self.moc_controller.previous()
         else:
             track = self.playlist_manager.get_previous_track()
@@ -567,12 +586,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.player_controls.update_progress(position, duration)
         self.player_controls.set_volume(volume)
 
-        # If track changed, update metadata + playlist selection
+        # If track changed, update metadata and reload playlist from MOC
         if file_path and file_path != self._moc_last_file:
             self._moc_last_file = file_path
             track = TrackMetadata(file_path)
             self.metadata_panel.set_track(track)
 
+            # Always reload the playlist from MOC on track change to stay in sync
+            self._load_moc_playlist_from_moc()
+            # Select the current track
             playlist = self.playlist_manager.get_playlist()
             for idx, t in enumerate(playlist):
                 if t.file_path == file_path:
@@ -656,6 +678,11 @@ class MainWindow(Gtk.ApplicationWindow):
             if self.use_moc:
                 self._sync_playlist_to_moc(start_playback=False)
     
+    def _on_playlist_refresh(self, view):
+        """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
+        if self.use_moc:
+            self._load_moc_playlist_from_moc()
+
     def _on_playlist_clear(self, view):
         """Handle clearing playlist."""
         if self.use_moc:
