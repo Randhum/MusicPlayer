@@ -118,7 +118,7 @@ Each panel has a header with a detach button to pop it out as a separate window.
 4. Audio streams through your computer's speakers
 
 **Requirements:**
-- BlueZ daemon running (`systemctl start bluetooth`)
+- BlueZ daemon running (`rc-service bluetooth start`)
 - GStreamer BlueZ plugin: `media-plugins/gst-plugins-bluez`
 - Bluetooth adapter with A2DP sink support
 
@@ -166,7 +166,7 @@ emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad
 
 ### Bluetooth not working
 ```bash
-systemctl status bluetooth      # Check BlueZ
+rc-service bluetooth status     # Check BlueZ
 bluetoothctl power on           # Power on adapter
 ```
 
