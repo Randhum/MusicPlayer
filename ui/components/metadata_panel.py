@@ -77,8 +77,10 @@ class MetadataPanel(Gtk.Box):
         else:
             self.art_image.set_filename(None)
         
-        # Set text labels
-        self.title_label.set_text(track.title or "Unknown Track")
+        # Set text labels - use filename as fallback for title
+        from pathlib import Path
+        title = track.title or Path(track.file_path).stem
+        self.title_label.set_text(title)
         self.artist_label.set_text(track.artist or "Unknown Artist")
         self.album_label.set_text(track.album or "Unknown Album")
         

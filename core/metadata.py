@@ -29,53 +29,88 @@ class TrackMetadata:
         self._extract_metadata()
     
     def _extract_metadata(self):
-        """Extract metadata from the audio file."""
+        """Extract metadata from the audio file using a generic approach."""
         try:
             audio_file = File(self.file_path)
             if audio_file is None:
                 return
             
-            # Check if it's a FLAC file for special handling
+            # Determine file type for format-specific handling
+            file_type = type(audio_file).__name__
             is_flac = isinstance(audio_file, FLAC)
+            is_mp3 = isinstance(audio_file, MP3)
+            is_mp4 = isinstance(audio_file, MP4)
+            is_ogg = isinstance(audio_file, OggVorbis)
             
-            # Extract basic metadata
-            # FLAC uses Vorbis comments: TITLE, ARTIST, ALBUM, ALBUMARTIST, GENRE, DATE
-            # MP3 uses ID3: TIT2, TPE1, TALB, TPE2, TCON, TDRC
-            # MP4 uses: \xa9nam, \xa9ART, \xa9alb, aART, \xa9gen, \xa9day
-            if is_flac:
-                # FLAC-specific tag names (Vorbis comments)
-                self.title = self._get_tag(audio_file, ['TITLE', 'TIT2', '\xa9nam'])
-                self.artist = self._get_tag(audio_file, ['ARTIST', 'TPE1', '\xa9ART'])
-                self.album = self._get_tag(audio_file, ['ALBUM', 'TALB', '\xa9alb'])
-                self.album_artist = self._get_tag(audio_file, ['ALBUMARTIST', 'ALBUM ARTIST', 'TPE2', 'aART'])
-                self.genre = self._get_tag(audio_file, ['GENRE', 'TCON', '\xa9gen'])
-                self.year = self._get_tag(audio_file, ['DATE', 'YEAR', 'TDRC', '\xa9day'])
-            else:
-                # Standard tag names for other formats
-                self.title = self._get_tag(audio_file, ['TIT2', 'TITLE', '\xa9nam'])
-                self.artist = self._get_tag(audio_file, ['TPE1', 'ARTIST', '\xa9ART'])
-                self.album = self._get_tag(audio_file, ['TALB', 'ALBUM', '\xa9alb'])
-                self.album_artist = self._get_tag(audio_file, ['TPE2', 'ALBUMARTIST', 'ALBUM ARTIST', 'aART'])
-                self.genre = self._get_tag(audio_file, ['TCON', 'GENRE', '\xa9gen'])
-                self.year = self._get_tag(audio_file, ['TDRC', 'DATE', 'YEAR', '\xa9day'])
+            # Extract basic metadata using format-agnostic approach
+            # Try all common tag names for each field across all formats
+            self.title = self._get_tag_generic(audio_file, [
+                'TITLE',      # FLAC, OGG (Vorbis)
+                'TIT2',       # MP3 (ID3v2)
+                '\xa9nam',    # MP4 (iTunes)
+                'TIT1',       # MP3 (ID3v1 title)
+            ])
+            
+            self.artist = self._get_tag_generic(audio_file, [
+                'ARTIST',     # FLAC, OGG (Vorbis)
+                'TPE1',       # MP3 (ID3v2)
+                '\xa9ART',    # MP4 (iTunes)
+                'TP1',        # MP3 (ID3v1 artist)
+            ])
+            
+            self.album = self._get_tag_generic(audio_file, [
+                'ALBUM',      # FLAC, OGG (Vorbis)
+                'TALB',       # MP3 (ID3v2)
+                '\xa9alb',    # MP4 (iTunes)
+                'TAL',        # MP3 (ID3v1 album)
+            ])
+            
+            self.album_artist = self._get_tag_generic(audio_file, [
+                'ALBUMARTIST',    # FLAC, OGG (Vorbis)
+                'ALBUM ARTIST',   # FLAC, OGG (alternative)
+                'TPE2',           # MP3 (ID3v2)
+                'aART',           # MP4 (iTunes)
+            ])
+            
+            self.genre = self._get_tag_generic(audio_file, [
+                'GENRE',      # FLAC, OGG (Vorbis)
+                'TCON',       # MP3 (ID3v2)
+                '\xa9gen',    # MP4 (iTunes)
+                'TCO',        # MP3 (ID3v1 genre)
+            ])
+            
+            self.year = self._get_tag_generic(audio_file, [
+                'DATE',       # FLAC, OGG (Vorbis)
+                'YEAR',       # Alternative
+                'TDRC',       # MP3 (ID3v2 date)
+                'TDRL',       # MP3 (ID3v2 release date)
+                'TDOR',       # MP3 (ID3v2 original release date)
+                '\xa9day',    # MP4 (iTunes)
+                'TYE',        # MP3 (ID3v1 year)
+            ])
             
             # Extract track number
-            if is_flac:
-                track_num = self._get_tag(audio_file, ['TRACKNUMBER', 'TRACK', 'TRCK', 'trkn'])
-            else:
-                track_num = self._get_tag(audio_file, ['TRCK', 'TRACKNUMBER', 'TRACK', 'trkn'])
+            track_num = self._get_tag_generic(audio_file, [
+                'TRACKNUMBER',  # FLAC, OGG (Vorbis)
+                'TRACK',        # Alternative
+                'TRCK',         # MP3 (ID3v2)
+                'trkn',         # MP4 (iTunes - tuple format)
+                'TRK',          # MP3 (ID3v1 track)
+            ])
             
             if track_num:
                 try:
-                    # Handle formats like "1/10" or just "1"
-                    if isinstance(track_num, list):
-                        track_num = track_num[0]
+                    # Handle different formats
+                    # MP4 uses tuples like (track_number, total_tracks)
                     if isinstance(track_num, tuple):
                         track_num = track_num[0]
-                    # FLAC track numbers are often just strings like "1" or "01"
+                    # Most formats use lists
+                    if isinstance(track_num, list):
+                        track_num = track_num[0]
+                    # Convert to string and extract number (handle "1/10" format)
                     track_str = str(track_num).split('/')[0].strip()
                     self.track_number = int(track_str)
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError, TypeError):
                     pass
             
             # Extract duration
@@ -92,24 +127,71 @@ class TrackMetadata:
         except Exception as e:
             print(f"Error extracting metadata from {self.file_path}: {e}")
     
-    def _get_tag(self, audio_file, tag_keys: list) -> Optional[str]:
-        """Get a tag value trying multiple possible keys."""
+    def _get_tag_generic(self, audio_file, tag_keys: list) -> Optional[str]:
+        """Get a tag value trying multiple possible keys - works for all formats."""
         for key in tag_keys:
             try:
-                value = audio_file.get(key)
+                value = None
+                
+                # Try different access methods based on file type
+                # FLAC and OGG use Vorbis comments accessed via tags attribute
+                if isinstance(audio_file, (FLAC, OggVorbis)):
+                    # Access via tags dictionary
+                    if hasattr(audio_file, 'tags') and audio_file.tags is not None:
+                        if key in audio_file.tags:
+                            value = audio_file.tags[key]
+                # MP3 uses ID3 tags - can access directly or via tags
+                elif isinstance(audio_file, MP3):
+                    # Try direct access first
+                    try:
+                        if key in audio_file:
+                            value = audio_file[key]
+                    except (KeyError, TypeError):
+                        # Try via tags attribute
+                        if hasattr(audio_file, 'tags') and audio_file.tags is not None:
+                            if key in audio_file.tags:
+                                value = audio_file.tags[key]
+                # MP4 uses a different structure
+                elif isinstance(audio_file, MP4):
+                    # MP4 tags are accessed directly
+                    if key in audio_file:
+                        value = audio_file[key]
+                else:
+                    # Generic fallback: try direct access, then tags attribute
+                    try:
+                        if key in audio_file:
+                            value = audio_file[key]
+                    except (KeyError, TypeError):
+                        if hasattr(audio_file, 'tags') and audio_file.tags is not None:
+                            if key in audio_file.tags:
+                                value = audio_file.tags[key]
+                
                 if value is None:
                     continue
                 
                 # Handle different tag formats
+                # Most formats return lists
                 if isinstance(value, list):
-                    value = value[0]
+                    if len(value) > 0:
+                        value = value[0]
+                    else:
+                        continue
+                # MP4 sometimes returns tuples
                 if isinstance(value, tuple):
-                    value = value[0]
+                    if len(value) > 0:
+                        value = value[0]
+                    else:
+                        continue
+                # Some formats return bytes
                 if isinstance(value, bytes):
                     value = value.decode('utf-8', errors='ignore')
                 
-                return str(value).strip() if value else None
-            except (KeyError, AttributeError, TypeError):
+                # Convert to string and clean up
+                result = str(value).strip()
+                if result:
+                    return result
+                    
+            except (KeyError, AttributeError, TypeError, IndexError):
                 continue
         return None
     
