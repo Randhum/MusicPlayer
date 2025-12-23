@@ -565,7 +565,10 @@ class MainWindow(Gtk.ApplicationWindow):
         try:
             mtime = playlist_path.stat().st_mtime
         except OSError:
-            mtime = 0.0
+            # If the playlist file temporarily disappears (e.g. while MOC rewrites
+            # it), don't treat this as a "real" mtime change; just keep the old
+            # value so we only react when a concrete new file timestamp appears.
+            mtime = self._moc_playlist_mtime
         if mtime != self._moc_playlist_mtime:
             self._moc_playlist_mtime = mtime
             self._load_moc_playlist_from_moc()
