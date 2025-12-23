@@ -1,13 +1,14 @@
 """BlueZ Agent for handling Bluetooth pairing confirmations and passkeys."""
 
+from time import sleep
+from typing import Optional, Callable
+
 import dbus
 import dbus.service
 from dbus.mainloop.glib import DBusGMainLoop
-from typing import Optional, Callable
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
-from time import sleep
 
 
 class BluetoothAgent(dbus.service.Object):

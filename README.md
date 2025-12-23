@@ -218,6 +218,28 @@ This means:
 
 ---
 
+## 🧹 Code Quality & Architecture
+
+This project follows clean code principles:
+
+### Code Organization
+- **Constants extracted**: Magic numbers and strings are defined as constants (e.g., `VIDEO_EXTENSIONS`, `MOC_PLAYLIST_PATH`, `DURATION_UPDATE_INTERVAL`)
+- **Import organization**: Standardized import order (stdlib → third-party → local)
+- **Error handling**: Consistent exception handling patterns with specific exception types
+- **Type hints**: Public methods include type annotations for better IDE support and documentation
+
+### Architecture Patterns
+- **Separation of concerns**: Core logic (`core/`) separated from UI (`ui/`)
+- **Helper methods**: Complex routing logic extracted to reusable methods (e.g., `_should_use_moc()`, `_stop_internal_player_if_needed()`)
+- **Dockable panels**: Modular UI components that can be detached and reattached
+
+### Code Style
+- **Naming conventions**: `snake_case` for functions/variables, `PascalCase` for classes
+- **Private methods**: Internal methods prefixed with `_`
+- **Documentation**: Docstrings for all public methods
+
+---
+
 ## 🧠 Understanding IoT Through This Project
 
 ### What Even IS IoT?

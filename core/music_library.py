@@ -1,11 +1,11 @@
 """Music library scanning and indexing."""
 
-import os
 import json
-from pathlib import Path
-from typing import Dict, List, Optional, Set
-from collections import defaultdict
+import os
 import threading
+from collections import defaultdict
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Set
 
 from core.metadata import TrackMetadata
 
@@ -54,7 +54,7 @@ class MusicLibrary:
         # Load existing index
         self._load_index()
     
-    def scan_library(self, callback=None):
+    def scan_library(self, callback: Optional[Callable] = None) -> None:
         """Scan music directories asynchronously."""
         if self._scanning:
             return

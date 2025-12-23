@@ -1,13 +1,15 @@
 """Bluetooth device management using D-Bus and BlueZ."""
 
 from typing import List, Dict, Optional, Callable
+
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
-from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
+
+from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 
 
 class BluetoothDevice:
@@ -669,7 +671,8 @@ class BluetoothManager:
             for receiver in self._signal_receivers:
                 try:
                     self.bus.remove_signal_receiver(receiver)
-                except:
+                except (AttributeError, RuntimeError, dbus.exceptions.DBusException):
+                    # Receiver may have already been removed or bus destroyed
                     pass
             self._signal_receivers.clear()
             

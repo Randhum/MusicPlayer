@@ -1,9 +1,10 @@
 """Player controls component - play/pause/next/prev/volume/progress."""
 
+from typing import Optional, Callable
+
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GObject
-from typing import Optional, Callable
 
 
 class PlayerControls(Gtk.Box):

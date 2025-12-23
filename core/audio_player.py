@@ -1,15 +1,27 @@
 """GStreamer-based media player with automatic audio/video handling."""
 
 import os
+from typing import Optional, Callable
+
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
-from typing import Optional, Callable
+
 from core.metadata import TrackMetadata
 
 
 # Video container extensions - these get video+audio playback
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.wmv', '.m4v'}
+
+# GStreamer playbin flags
+GST_FLAG_VIDEO = 0x01
+GST_FLAG_AUDIO = 0x02
+GST_FLAG_TEXT = 0x04
+GST_FLAG_SOFT_VOLUME = 0x10
+
+# Update intervals (milliseconds)
+DURATION_UPDATE_INTERVAL = 100
+POSITION_UPDATE_INTERVAL = 500
 
 
 class AudioPlayer:
@@ -87,7 +99,7 @@ class AudioPlayer:
                 
                 if new_state == Gst.State.PLAYING:
                     self.is_playing = True
-                    GLib.timeout_add(100, self._update_duration)
+                    GLib.timeout_add(DURATION_UPDATE_INTERVAL, self._update_duration)
                 elif new_state in (Gst.State.PAUSED, Gst.State.NULL):
                     self.is_playing = False
                 
@@ -142,16 +154,16 @@ class AudioPlayer:
         self._stop()
         
         # Configure video flag based on file type
-        # GStreamer playbin flags: VIDEO=0x01, AUDIO=0x02, TEXT=0x04, SOFT_VOLUME=0x10
         is_video = self._is_video_file(track.file_path)
         try:
             if is_video:
                 # Video + Audio + Soft Volume
-                self.playbin.set_property("flags", 0x01 | 0x02 | 0x10)
+                self.playbin.set_property("flags", GST_FLAG_VIDEO | GST_FLAG_AUDIO | GST_FLAG_SOFT_VOLUME)
             else:
                 # Audio + Soft Volume (no video)
-                self.playbin.set_property("flags", 0x02 | 0x10)
-        except Exception:
+                self.playbin.set_property("flags", GST_FLAG_AUDIO | GST_FLAG_SOFT_VOLUME)
+        except (AttributeError, TypeError):
+            # Ignore errors setting flags (playbin might not support this property)
             pass
         
         self.current_track = track
@@ -185,7 +197,7 @@ class AudioPlayer:
             print("Failed to start playback")
             return False
         
-        GLib.timeout_add(500, self._update_position)
+        GLib.timeout_add(POSITION_UPDATE_INTERVAL, self._update_position)
         return True
     
     def pause(self):

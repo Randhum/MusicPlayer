@@ -1,12 +1,21 @@
 """Dock manager for modular dockable panels."""
 
+import json
+import os
+from typing import Dict, Optional, Callable
+
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('GLib', '2.0')
-from gi.repository import Gtk, GLib, Gio
-from typing import Dict, Optional, Callable
-import json
-import os
+from gi.repository import Gtk, GLib
+
+
+# Default detached window size
+DEFAULT_DETACHED_WIDTH = 400
+DEFAULT_DETACHED_HEIGHT = 500
+
+# Layout config file path
+LAYOUT_CONFIG_PATH = os.path.expanduser("~/.config/musicplayer/layout.json")
 
 
 class DockablePanel(Gtk.Box):
@@ -74,7 +83,7 @@ class DockablePanel(Gtk.Box):
         
         # Create detached window
         self.detached_window = Gtk.Window(title=self.title)
-        self.detached_window.set_default_size(400, 500)
+        self.detached_window.set_default_size(DEFAULT_DETACHED_WIDTH, DEFAULT_DETACHED_HEIGHT)
         self.detached_window.set_resizable(True)  # Allow resizing and maximizing
         self.detached_window.connect("close-request", self._on_window_close)
         
@@ -137,7 +146,7 @@ class DockManager:
         self.main_window = main_window
         self.panels: Dict[str, DockablePanel] = {}
         self.layout_config: Dict = {}
-        self.config_path = os.path.expanduser("~/.config/musicplayer/layout.json")
+        self.config_path = LAYOUT_CONFIG_PATH
         
         # Ensure config directory exists
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
@@ -225,8 +234,8 @@ class DockManager:
                             pos = self.layout_config.get("positions", {}).get(panel_id, {})
                             if panel.detached_window and pos:
                                 panel.detached_window.set_default_size(
-                                    pos.get("width", 400),
-                                    pos.get("height", 500)
+                                    pos.get("width", DEFAULT_DETACHED_WIDTH),
+                                    pos.get("height", DEFAULT_DETACHED_HEIGHT)
                                 )
         except Exception as e:
             print(f"Failed to load layout: {e}")

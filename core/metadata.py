@@ -3,12 +3,17 @@
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any
+
 from mutagen import File
+from mutagen.flac import FLAC
 from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import MP3
-from mutagen.flac import FLAC
-from mutagen.oggvorbis import OggVorbis
 from mutagen.mp4 import MP4
+from mutagen.oggvorbis import OggVorbis
+
+
+# Album art cache directory
+ALBUM_ART_CACHE_DIR = Path.home() / '.cache' / 'musicplayer' / 'art'
 
 
 class TrackMetadata:
@@ -269,7 +274,7 @@ class TrackMetadata:
         """Save album art to a temporary file."""
         try:
             # Create cache directory
-            cache_dir = Path.home() / '.cache' / 'musicplayer' / 'art'
+            cache_dir = ALBUM_ART_CACHE_DIR
             cache_dir.mkdir(parents=True, exist_ok=True)
             
             # Generate filename from track path hash

@@ -17,12 +17,16 @@ from typing import Dict, List, Optional, Tuple
 from core.metadata import TrackMetadata
 
 
+# MOC playlist file path
+MOC_PLAYLIST_PATH = Path.home() / ".moc" / "playlist.m3u"
+
+
 class MocController:
     """Minimal wrapper around `mocp` for playlist and playback control."""
 
     def __init__(self):
         self._mocp_path: Optional[str] = shutil.which("mocp")
-        self._playlist_path: Path = Path.home() / ".moc" / "playlist.m3u"
+        self._playlist_path: Path = MOC_PLAYLIST_PATH
         # Track whether we've already attempted to start the server to avoid
         # spamming `mocp --server` on every status poll.
         self._server_initialized: bool = False
