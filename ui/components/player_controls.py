@@ -128,6 +128,7 @@ class PlayerControls(Gtk.Box):
         
         self._seeking = False
         self._duration = 0.0
+        self._updating_volume = False  # Flag to prevent feedback loop
     
     def set_playing(self, playing: bool):
         """Update button states based on playing status."""
@@ -145,8 +146,10 @@ class PlayerControls(Gtk.Box):
         self.duration_label.set_text(self._format_time(duration))
     
     def set_volume(self, volume: float):
-        """Set volume slider value."""
+        """Set volume slider value (programmatically, without triggering signal)."""
+        self._updating_volume = True
         self.volume_scale.set_value(volume)
+        self._updating_volume = False
     
     def _format_time(self, seconds: float) -> str:
         """Format time in seconds to MM:SS."""
@@ -173,8 +176,10 @@ class PlayerControls(Gtk.Box):
     
     def _on_volume_changed(self, scale):
         """Handle volume slider change."""
-        volume = scale.get_value()
-        self.emit('volume-changed', volume)
+        # Only emit signal if this is a user interaction, not programmatic update
+        if not self._updating_volume:
+            volume = scale.get_value()
+            self.emit('volume-changed', volume)
 
     def _on_shuffle_toggled(self, button):
         """Handle shuffle toggle button."""
