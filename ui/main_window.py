@@ -19,6 +19,7 @@ from core.playlist_manager import PlaylistManager
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.metadata import TrackMetadata
+import random
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -41,6 +42,9 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Initialize dock manager
         self.dock_manager = DockManager(self)
+
+        # Playback options
+        self.shuffle_enabled: bool = False
         
         # Setup player callbacks
         self.player.on_state_changed = self._on_player_state_changed
@@ -289,6 +293,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.player_controls.connect('prev-clicked', lambda w: self._on_prev())
         self.player_controls.connect('seek-changed', self._on_seek)
         self.player_controls.connect('volume-changed', self._on_volume_changed)
+        self.player_controls.connect('shuffle-toggled', self._on_shuffle_toggled)
     
     def _reattach_panel(self, panel_id: str):
         """Reattach a detached panel to its original position."""
@@ -414,10 +419,13 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_next(self):
         """Handle next button click."""
-        track = self.playlist_manager.get_next_track()
-        if track:
-            self._update_playlist_view()
-            self._play_current_track()
+        if self.shuffle_enabled:
+            self._play_random_track()
+        else:
+            track = self.playlist_manager.get_next_track()
+            if track:
+                self._update_playlist_view()
+                self._play_current_track()
     
     def _on_prev(self):
         """Handle previous button click."""
@@ -444,7 +452,10 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_track_finished(self):
         """Handle track finished."""
-        self._on_next()
+        if self.shuffle_enabled:
+            self._play_random_track()
+        else:
+            self._on_next()
     
     def _update_position(self):
         """Periodically update position display."""
@@ -453,6 +464,27 @@ class MainWindow(Gtk.ApplicationWindow):
             duration = self.player.get_duration()
             self.player_controls.update_progress(position, duration)
         return True
+
+    def _on_shuffle_toggled(self, controls, active: bool):
+        """Handle shuffle toggle state changes."""
+        self.shuffle_enabled = active
+
+    def _play_random_track(self):
+        """Play a random track from the current playlist."""
+        tracks = self.playlist_manager.get_playlist()
+        if not tracks:
+            return
+        current_index = self.playlist_manager.get_current_index()
+        if len(tracks) == 1:
+            new_index = 0
+        else:
+            indices = [i for i in range(len(tracks)) if i != current_index]
+            if not indices:
+                return
+            new_index = random.choice(indices)
+        self.playlist_manager.set_current_index(new_index)
+        self._update_playlist_view()
+        self._play_current_track()
     
     def _on_bt_device_selected(self, panel, device_path: str):
         """Handle Bluetooth device selection."""
