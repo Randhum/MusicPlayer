@@ -15,7 +15,7 @@ from ui.components.bluetooth_panel import BluetoothPanel
 from ui.dock_manager import DockManager, DockablePanel
 
 from core.music_library import MusicLibrary
-from core.audio_player import AudioPlayer
+from core.audio_player import AudioPlayer, VIDEO_EXTENSIONS
 from core.playlist_manager import PlaylistManager
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
@@ -86,6 +86,13 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Connect close signal to save layout
         self.connect('close-request', self._on_close)
+    
+    def _is_video_track(self, track: Optional[TrackMetadata]) -> bool:
+        """Return True if the given track is a video container we should play via GStreamer."""
+        if not track or not track.file_path:
+            return False
+        suffix = Path(track.file_path).suffix.lower()
+        return suffix in VIDEO_EXTENSIONS
     
     def _create_ui(self):
         """Create the user interface with dockable panels."""
@@ -398,7 +405,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_manager.add_track(track)
         self.playlist_manager.set_current_index(0)
         self._update_playlist_view()
-        if self.use_moc:
+        # Prefer our GStreamer pipeline for video containers (e.g. MP4),
+        # even when MOC is available.
+        if self.use_moc and not self._is_video_track(track):
             self._sync_playlist_to_moc(start_playback=True)
         else:
             self._play_current_track()
@@ -409,7 +418,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_manager.add_tracks(tracks)
         self.playlist_manager.set_current_index(0)
         self._update_playlist_view()
-        if self.use_moc:
+        # Decide based on the first track; if it's a video container, prefer
+        # our internal player over MOC for this album selection.
+        first_track = tracks[0] if tracks else None
+        if self.use_moc and not self._is_video_track(first_track):
             self._sync_playlist_to_moc(start_playback=True)
         else:
             self._play_current_track()
@@ -418,13 +430,15 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle track activation in playlist."""
         self.playlist_manager.set_current_index(index)
         self._update_playlist_view()
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self.use_moc and not self._is_video_track(track):
             # Ensure MOC playlist matches our view, then play the selected file
             self._sync_playlist_to_moc(start_playback=False)
-            track = self.playlist_manager.get_current_track()
             if track:
                 self.moc_controller.play_file(track.file_path)
         else:
+            # For video containers or when MOC is unavailable, always use
+            # our internal GStreamer-based player.
             self._play_current_track()
     
     def _play_current_track(self):
@@ -437,7 +451,8 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_play(self):
         """Handle play button click."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self.use_moc and not self._is_video_track(track):
             self.moc_controller.play()
         else:
             if not self.player.current_track:
@@ -463,7 +478,8 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_next(self):
         """Handle next button click."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self.use_moc and not self._is_video_track(track):
             self.moc_controller.next()
         elif self.shuffle_enabled:
             self._play_random_track()
@@ -475,7 +491,8 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_prev(self):
         """Handle previous button click."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self.use_moc and not self._is_video_track(track):
             self.moc_controller.previous()
         else:
             track = self.playlist_manager.get_previous_track()
@@ -485,7 +502,8 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_seek(self, controls, position: float):
         """Handle seek operation."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self.use_moc and not self._is_video_track(track):
             # Use relative seek based on last known position from MOC
             delta = position - self._moc_last_position
             self.moc_controller.seek_relative(delta)
@@ -494,7 +512,8 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_volume_changed(self, controls, volume: float):
         """Handle volume change."""
-        if self.use_moc:
+        track = self.playlist_manager.get_current_track()
+        if self.use_moc and not self._is_video_track(track):
             self.moc_controller.set_volume(volume)
         else:
             self.player.set_volume(volume)
