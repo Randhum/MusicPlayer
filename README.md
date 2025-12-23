@@ -174,10 +174,10 @@ You should see a window with your music library, playlist, and Bluetooth control
 If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
 
 - **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel.
-- **Write back changes** you make in the GTK playlist (add/remove/move/clear/search-based queues) into MOC’s internal playlist so both stay aligned.
+- **Write back changes** you make in the GTK playlist (add/remove/move/clear/search-based queues) into MOC's internal playlist so both stay aligned.
 - **Sync player controls** with MOC:
   - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood.
-  - The **volume slider** controls MOC’s volume.
+  - The **volume slider** controls MOC's volume.
   - The **current track / time** display follows whatever MOC is playing.
 - The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
 
@@ -218,6 +218,9 @@ This means:
 
 ---
 
+<details>
+<summary><h2>📚 Technical Documentation</h2></summary>
+
 ## 🧹 Code Quality & Architecture
 
 This project follows clean code principles:
@@ -239,6 +242,213 @@ This project follows clean code principles:
 - **Documentation**: Docstrings for all public methods
 
 ---
+
+## 🏗️ Project Structure Explained
+
+```
+MusicPlayer/
+│
+├── 🚀 main.py                    # The starting point - run this!
+│
+├── 📦 core/                      # The "brain" - logic without UI
+│   ├── audio_player.py           # GStreamer playback
+│   ├── bluetooth_manager.py      # Device discovery & connection
+│   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
+│   ├── metadata.py               # Reading ID3 tags, album art
+│   ├── music_library.py          # Scanning folders for music
+│   └── playlist_manager.py       # Queue management
+│
+├── 🎨 ui/                        # The "face" - what users see
+│   ├── main_window.py            # Main application window
+│   ├── dock_manager.py           # Detachable panels
+│   └── components/               # Reusable UI pieces
+│       ├── bluetooth_panel.py    # Bluetooth controls
+│       ├── library_browser.py    # File browser
+│       ├── player_controls.py    # Play/pause/seek
+│       └── playlist_view.py      # Queue display
+│
+├── 📋 requirements.txt           # Python packages needed
+└── 📄 README.md                  # You're reading it!
+```
+
+### The MVC Pattern (Sort Of)
+
+We follow a pattern where:
+- **Model** = `core/` (data and logic)
+- **View** = `ui/` (what users see)
+- **Controller** = callbacks connecting them
+
+This separation makes code easier to understand and modify!
+
+---
+
+## 🔧 How the Bluetooth Speaker Mode Works
+
+This is the coolest IoT feature! Let's trace through what happens:
+
+### 1️⃣ Enable Speaker Mode
+
+At startup, all Bluetooth functionality is **inactive and cleared** in the UI.  
+When you click **"Enable Speaker Mode"**, the app will:
+
+```
+User clicks button
+       │
+       ▼
+┌─────────────────────────────────┐
+│ bluetooth_sink.py               │
+│ enable_sink_mode()              │
+│ - Set adapter as discoverable   │
+│ - Change adapter name           │
+│ - Register A2DP sink endpoint   │
+└─────────────────────────────────┘
+```
+
+### 2️⃣ Phone Connects
+
+When your phone pairs and connects (no manual Scan/Connect needed from the app):
+
+```
+Phone initiates pairing
+       │
+       ▼
+┌─────────────────────────────────┐
+│ bluetooth_agent.py              │
+│ - Receives pairing request      │
+│ - Shows confirmation dialog     │
+│ - User confirms                 │
+│ - Trust the device              │
+└─────────────────────────────────┘
+       │
+       ▼
+Phone sends A2DP audio stream
+       │
+       ▼
+┌─────────────────────────────────┐
+│ PipeWire / PulseAudio           │
+│ - Receives Bluetooth audio      │
+│ - Routes to speakers            │
+└─────────────────────────────────┘
+       │
+       ▼
+🔊 Music plays!
+```
+
+### 3️⃣ Audio Flows
+
+The actual audio routing is handled by **PipeWire** (or **PulseAudio**), not our code! We just set up the Bluetooth connection, and the audio system handles the rest.
+
+```
+Phone                    Computer
+  │                          │
+  │   A2DP Audio Stream     │
+  │  ─────────────────────► │
+  │   (Bluetooth SBC/AAC)   │
+  │                          │
+  │                    ┌─────┴─────┐
+  │                    │ PipeWire  │
+  │                    │   or      │
+  │                    │PulseAudio │
+  │                    └─────┬─────┘
+  │                          │
+  │                    ┌─────▼─────┐
+  │                    │ Speakers  │
+  │                    │   🔊      │
+  │                    └───────────┘
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+### "No sound output!"
+
+```bash
+# Check if audio works at all
+gst-launch-1.0 audiotestsrc ! autoaudiosink
+
+# Check ALSA (low-level audio)
+aplay -l
+
+# Check PipeWire/PulseAudio
+pactl info
+```
+
+### "Bluetooth not working!"
+
+```bash
+# Is Bluetooth service running? (Gentoo uses OpenRC)
+rc-service bluetooth status
+
+# Start it if not running
+rc-service bluetooth start
+
+# Is adapter on?
+bluetoothctl power on
+
+# List controllers
+bluetoothctl list
+```
+
+### "Missing codec errors!"
+
+```bash
+# Check what GStreamer plugins you have
+gst-inspect-1.0 | grep flac
+gst-inspect-1.0 | grep mp3
+
+# Install missing plugins (Gentoo)
+emerge -av media-libs/gst-plugins-good
+emerge -av media-libs/gst-plugins-bad
+
+# Specific codecs
+emerge -av media-plugins/gst-plugins-flac      # FLAC audio
+emerge -av media-plugins/gst-plugins-openh264  # H.264 video
+```
+
+### "Panel layout is messed up!"
+
+```bash
+# Reset to default layout
+rm ~/.config/musicplayer/layout.json
+```
+
+### "Missing icons (placeholders shown)!"
+
+```bash
+# Install Adwaita icon theme
+emerge -av x11-themes/adwaita-icon-theme
+
+# Set icon theme (add to ~/.config/gtk-4.0/settings.ini)
+echo "[Settings]" > ~/.config/gtk-4.0/settings.ini
+echo "gtk-icon-theme-name=Adwaita" >> ~/.config/gtk-4.0/settings.ini
+```
+
+---
+
+## 🤝 Contributing
+
+Found a bug? Have an idea? Want to share your learning journey?
+
+1. Fork this repository
+2. Create a branch for your feature
+3. Make your changes
+4. Open a Pull Request
+
+Remember: The best way to learn is by doing — and the second-best way is by teaching others!
+
+---
+
+## 📜 License
+
+This project is open source and available for personal and educational use.
+
+</details>
+
+---
+
+<details>
+<summary><h2>🧠 Learning Resources & Challenges</h2></summary>
 
 ## 🧠 Understanding IoT Through This Project
 
@@ -348,6 +558,30 @@ for path, interfaces in manager.GetManagedObjects().items():
 - Can you find your phone in the list?
 - What other properties does each device have?
 
+<details>
+<summary><strong>💡 Hints & Solutions</strong></summary>
+
+**Hints:**
+- Make sure Bluetooth is enabled: `bluetoothctl power on`
+- Try printing all properties: `print(device)` to see what's available
+- Check device connection status with `device.get('Connected', False)`
+
+**Solution:**
+To see all properties, modify the loop:
+```python
+for path, interfaces in manager.GetManagedObjects().items():
+    if 'org.bluez.Device1' in interfaces:
+        device = interfaces['org.bluez.Device1']
+        print(f"\nDevice: {device.get('Name', 'Unknown')}")
+        print(f"  Address: {device.get('Address')}")
+        print(f"  Connected: {device.get('Connected', False)}")
+        print(f"  Paired: {device.get('Paired', False)}")
+        print(f"  Trusted: {device.get('Trusted', False)}")
+        print(f"  All properties: {list(device.keys())}")
+```
+
+</details>
+
 > **📚 Learn More:** [BlueZ D-Bus API Documentation](https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/doc/device-api.txt)
 
 ---
@@ -414,6 +648,29 @@ Now try:
 - What messages appear when you toggle Bluetooth?
 - Can you spot the `PropertyChanged` signal when a device connects?
 - What other signals does BlueZ send?
+
+<details>
+<summary><strong>💡 Hints & Solutions</strong></summary>
+
+**Hints:**
+- Look for `PropertiesChanged` signals with `Connected` property changes
+- Watch for `InterfacesAdded` and `InterfacesRemoved` signals
+- Try filtering: `dbus-monitor --system "interface='org.bluez.Adapter1'"`
+
+**What to Look For:**
+When a device connects, you should see something like:
+```
+signal time=1234567890.123 sender=:1.23 -> destination=(null destination) serial=456 path=/org/bluez/hci0/dev_XX_XX_XX_XX_XX_XX; interface=org.freedesktop.DBus.Properties; member=PropertiesChanged
+   string "org.bluez.Device1"
+   array [
+      dict entry(
+         string "Connected"
+         variant             boolean true
+      )
+   ]
+```
+
+</details>
 
 > **📚 Learn More:** [D-Bus Tutorial](https://dbus.freedesktop.org/doc/dbus-tutorial.html)
 
@@ -487,6 +744,34 @@ gst-launch-1.0 playbin uri=file:///path/to/your/song.mp3
   (Hint: try adding `volume volume=0.5` between elements)
 - What wave shapes sound the coolest?
 
+<details>
+<summary><strong>💡 Hints & Solutions</strong></summary>
+
+**Hints:**
+- `freq=880` plays an octave higher (A note one octave up)
+- Volume element goes between `audioconvert` and `autoaudiosink`
+- Try `gst-inspect-1.0 volume` to see volume element properties
+
+**Solution:**
+Here's a pipeline with volume control:
+```bash
+gst-launch-1.0 audiotestsrc freq=440 ! audioconvert ! volume volume=0.5 ! autoaudiosink
+```
+
+To make it interactive (adjust volume while playing):
+```bash
+gst-launch-1.0 audiotestsrc freq=440 ! audioconvert ! volume volume=0.5 ! autoaudiosink
+# Then in another terminal:
+gst-launch-1.0 -e audiotestsrc freq=440 ! audioconvert ! volume volume=0.3 ! autoaudiosink
+```
+
+For a more complex example with multiple effects:
+```bash
+gst-launch-1.0 audiotestsrc wave=sine freq=440 ! audioconvert ! volume volume=0.7 ! autoaudiosink
+```
+
+</details>
+
 > **📚 Learn More:** [GStreamer Application Development Manual](https://gstreamer.freedesktop.org/documentation/application-development/index.html)
 
 ---
@@ -556,123 +841,57 @@ notification.set_body("Song Title - Artist Name")
 app.send_notification("now-playing", notification)
 ```
 
+<details>
+<summary><strong>💡 Hints & Solutions</strong></summary>
+
+**Step-by-Step Solution:**
+
+1. **Find where tracks are loaded** - Look in `core/audio_player.py` for methods that handle track changes
+2. **Get the application instance** - You'll need access to `Gtk.Application` to send notifications
+3. **Create the notification** - Use `Gio.Notification` with title and body
+4. **Extract metadata** - Get song title and artist from metadata
+
+**Full Implementation Example:**
+
+In `core/audio_player.py`, add this method:
+```python
+def _send_now_playing_notification(self, title: str, artist: str):
+    """Send a desktop notification when a track starts playing."""
+    from gi.repository import Gio
+    
+    # Get the application instance (you may need to pass this in)
+    app = self.app  # Assuming you store app reference
+    
+    notification = Gio.Notification.new("Now Playing")
+    notification.set_body(f"{title} - {artist}")
+    
+    # Optional: add an icon
+    icon = Gio.ThemedIcon.new("audio-x-generic")
+    notification.set_icon(icon)
+    
+    app.send_notification("now-playing", notification)
+```
+
+Then call it when a track loads:
+```python
+def on_track_loaded(self, metadata):
+    if metadata:
+        title = metadata.get('title', 'Unknown Title')
+        artist = metadata.get('artist', 'Unknown Artist')
+        self._send_now_playing_notification(title, artist)
+```
+
+**Alternative: Using GLib.idle_add for thread safety:**
+```python
+from gi.repository import GLib
+
+def _send_notification_safe(self, title: str, artist: str):
+    GLib.idle_add(self._send_now_playing_notification, title, artist)
+```
+
+</details>
+
 > **📚 Learn More:** [GTK4 Python Tutorial](https://pygobject.readthedocs.io/en/latest/)
-
----
-
-## 🏗️ Project Structure Explained
-
-```
-MusicPlayer/
-│
-├── 🚀 main.py                    # The starting point - run this!
-│
-├── 📦 core/                      # The "brain" - logic without UI
-│   ├── audio_player.py           # GStreamer playback
-│   ├── bluetooth_manager.py      # Device discovery & connection
-│   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
-│   ├── metadata.py               # Reading ID3 tags, album art
-│   ├── music_library.py          # Scanning folders for music
-│   └── playlist_manager.py       # Queue management
-│
-├── 🎨 ui/                        # The "face" - what users see
-│   ├── main_window.py            # Main application window
-│   ├── dock_manager.py           # Detachable panels
-│   └── components/               # Reusable UI pieces
-│       ├── bluetooth_panel.py    # Bluetooth controls
-│       ├── library_browser.py    # File browser
-│       ├── player_controls.py    # Play/pause/seek
-│       └── playlist_view.py      # Queue display
-│
-├── 📋 requirements.txt           # Python packages needed
-└── 📄 README.md                  # You're reading it!
-```
-
-### The MVC Pattern (Sort Of)
-
-We follow a pattern where:
-- **Model** = `core/` (data and logic)
-- **View** = `ui/` (what users see)
-- **Controller** = callbacks connecting them
-
-This separation makes code easier to understand and modify!
-
----
-
-## 🔧 How the Bluetooth Speaker Mode Works
-
-This is the coolest IoT feature! Let's trace through what happens:
-
-### 1️⃣ Enable Speaker Mode
-
-At startup, all Bluetooth functionality is **inactive and cleared** in the UI.  
-When you click **\"Enable Speaker Mode\"**, the app will:
-
-```
-User clicks button
-       │
-       ▼
-┌─────────────────────────────────┐
-│ bluetooth_sink.py               │
-│ enable_sink_mode()              │
-│ - Set adapter as discoverable   │
-│ - Change adapter name           │
-│ - Register A2DP sink endpoint   │
-└─────────────────────────────────┘
-```
-
-### 2️⃣ Phone Connects
-
-When your phone pairs and connects (no manual Scan/Connect needed from the app):
-
-```
-Phone initiates pairing
-       │
-       ▼
-┌─────────────────────────────────┐
-│ bluetooth_agent.py              │
-│ - Receives pairing request      │
-│ - Shows confirmation dialog     │
-│ - User confirms                 │
-│ - Trust the device              │
-└─────────────────────────────────┘
-       │
-       ▼
-Phone sends A2DP audio stream
-       │
-       ▼
-┌─────────────────────────────────┐
-│ PipeWire / PulseAudio           │
-│ - Receives Bluetooth audio      │
-│ - Routes to speakers            │
-└─────────────────────────────────┘
-       │
-       ▼
-🔊 Music plays!
-```
-
-### 3️⃣ Audio Flows
-
-The actual audio routing is handled by **PipeWire** (or **PulseAudio**), not our code! We just set up the Bluetooth connection, and the audio system handles the rest.
-
-```
-Phone                    Computer
-  │                          │
-  │   A2DP Audio Stream     │
-  │  ─────────────────────► │
-  │   (Bluetooth SBC/AAC)   │
-  │                          │
-  │                    ┌─────┴─────┐
-  │                    │ PipeWire  │
-  │                    │   or      │
-  │                    │PulseAudio │
-  │                    └─────┬─────┘
-  │                          │
-  │                    ┌─────▼─────┐
-  │                    │ Speakers  │
-  │                    │   🔊      │
-  │                    └───────────┘
-```
 
 ---
 
@@ -754,73 +973,6 @@ Now that you understand the basics, here are some projects to try:
 
 ---
 
-## 🛠️ Troubleshooting
-
-### "No sound output!"
-
-```bash
-# Check if audio works at all
-gst-launch-1.0 audiotestsrc ! autoaudiosink
-
-# Check ALSA (low-level audio)
-aplay -l
-
-# Check PipeWire/PulseAudio
-pactl info
-```
-
-### "Bluetooth not working!"
-
-```bash
-# Is Bluetooth service running? (Gentoo uses OpenRC)
-rc-service bluetooth status
-
-# Start it if not running
-rc-service bluetooth start
-
-# Is adapter on?
-bluetoothctl power on
-
-# List controllers
-bluetoothctl list
-```
-
-### "Missing codec errors!"
-
-```bash
-# Check what GStreamer plugins you have
-gst-inspect-1.0 | grep flac
-gst-inspect-1.0 | grep mp3
-
-# Install missing plugins (Gentoo)
-emerge -av media-libs/gst-plugins-good
-emerge -av media-libs/gst-plugins-bad
-
-# Specific codecs
-emerge -av media-plugins/gst-plugins-flac      # FLAC audio
-emerge -av media-plugins/gst-plugins-openh264  # H.264 video
-```
-
-### "Panel layout is messed up!"
-
-```bash
-# Reset to default layout
-rm ~/.config/musicplayer/layout.json
-```
-
-### "Missing icons (placeholders shown)!"
-
-```bash
-# Install Adwaita icon theme
-emerge -av x11-themes/adwaita-icon-theme
-
-# Set icon theme (add to ~/.config/gtk-4.0/settings.ini)
-echo "[Settings]" > ~/.config/gtk-4.0/settings.ini
-echo "gtk-icon-theme-name=Adwaita" >> ~/.config/gtk-4.0/settings.ini
-```
-
----
-
 ## 🏆 Achievement Checklist
 
 Track your learning progress!
@@ -842,24 +994,7 @@ Track your learning progress!
 - [ ] 🛠️ Modified the code (any small change counts!)
 - [ ] 🚀 Created your own IoT project idea
 
----
-
-## 🤝 Contributing
-
-Found a bug? Have an idea? Want to share your learning journey?
-
-1. Fork this repository
-2. Create a branch for your feature
-3. Make your changes
-4. Open a Pull Request
-
-Remember: The best way to learn is by doing — and the second-best way is by teaching others!
-
----
-
-## 📜 License
-
-This project is open source and available for personal and educational use.
+</details>
 
 ---
 
