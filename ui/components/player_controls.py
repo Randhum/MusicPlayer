@@ -15,9 +15,9 @@ class PlayerControls(Gtk.Box):
         'stop-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'next-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'prev-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'shuffle-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'seek-changed': (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         'volume-changed': (GObject.SignalFlags.RUN_FIRST, None, (float,)),
+        'shuffle-toggled': (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
     }
     
     def __init__(self):
@@ -40,7 +40,7 @@ class PlayerControls(Gtk.Box):
         )
         self.progress_scale.set_draw_value(False)
         self.progress_scale.set_hexpand(True)
-        # Touch-friendly height
+        # Touch-friendly height (slightly larger)
         self.progress_scale.set_size_request(-1, 36)
         
         # Use GTK4 gesture controllers for button events
@@ -63,17 +63,11 @@ class PlayerControls(Gtk.Box):
         self.append(progress_box)
         
         # Control buttons
-        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         controls_box.set_halign(Gtk.Align.CENTER)
         
-        # Large touch-friendly button sizes
-        button_size = 60  # Larger buttons for better touch experience
-        
-        self.shuffle_button = Gtk.Button.new_from_icon_name("media-playlist-shuffle-symbolic")
-        self.shuffle_button.set_size_request(button_size, button_size)
-        self.shuffle_button.set_tooltip_text("Shuffle Playlist")
-        self.shuffle_button.connect('clicked', lambda btn: self.emit('shuffle-clicked'))
-        controls_box.append(self.shuffle_button)
+        # Touch-friendly button sizes (slightly larger)
+        button_size = 56  # Larger buttons for touch
         
         self.prev_button = Gtk.Button.new_from_icon_name("media-skip-backward-symbolic")
         self.prev_button.set_size_request(button_size, button_size)
@@ -101,6 +95,15 @@ class PlayerControls(Gtk.Box):
         self.next_button.connect('clicked', lambda btn: self.emit('next-clicked'))
         controls_box.append(self.next_button)
         
+        # Shuffle toggle
+        self.shuffle_button = Gtk.ToggleButton()
+        shuffle_image = Gtk.Image.new_from_icon_name("media-playlist-shuffle-symbolic")
+        self.shuffle_button.set_child(shuffle_image)
+        self.shuffle_button.set_size_request(button_size, button_size)
+        self.shuffle_button.set_tooltip_text("Shuffle playlist")
+        self.shuffle_button.connect('toggled', self._on_shuffle_toggled)
+        controls_box.append(self.shuffle_button)
+        
         # Volume control
         volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         volume_box.set_halign(Gtk.Align.END)
@@ -113,7 +116,8 @@ class PlayerControls(Gtk.Box):
         )
         self.volume_scale.set_value(1.0)
         self.volume_scale.set_draw_value(False)
-        self.volume_scale.set_size_request(140, 36)  # Larger for touch
+        # Slightly larger for touch
+        self.volume_scale.set_size_request(140, 36)
         self.volume_scale.connect('value-changed', self._on_volume_changed)
         volume_box.append(self.volume_scale)
         
@@ -170,4 +174,9 @@ class PlayerControls(Gtk.Box):
         """Handle volume slider change."""
         volume = scale.get_value()
         self.emit('volume-changed', volume)
+
+    def _on_shuffle_toggled(self, button):
+        """Handle shuffle toggle button."""
+        active = button.get_active()
+        self.emit('shuffle-toggled', active)
 

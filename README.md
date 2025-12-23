@@ -162,6 +162,13 @@ python main.py
 
 You should see a window with your music library, playlist, and Bluetooth controls! 🎉
 
+### Basic Controls
+
+- **Playback controls** (bottom bar):
+  - **Play / Pause / Stop / Previous / Next**: control the current playlist.
+  - **Shuffle**: toggle to play the current playlist in **random order**; the *Next* button and automatic track advance will pick a random track instead of the next in sequence.
+  - **Seek & Volume**: larger, touch-friendly sliders for scrubbing through the track and adjusting volume.
+
 ---
 
 ## 🧠 Understanding IoT Through This Project
@@ -529,7 +536,8 @@ This is the coolest IoT feature! Let's trace through what happens:
 
 ### 1️⃣ Enable Speaker Mode
 
-When you click "Enable Speaker Mode":
+At startup, all Bluetooth functionality is **inactive and cleared** in the UI.  
+When you click **\"Enable Speaker Mode\"**, the app will:
 
 ```
 User clicks button
@@ -546,7 +554,7 @@ User clicks button
 
 ### 2️⃣ Phone Connects
 
-When your phone pairs and connects:
+When your phone pairs and connects (no manual Scan/Connect needed from the app):
 
 ```
 Phone initiates pairing

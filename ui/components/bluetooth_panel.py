@@ -34,7 +34,7 @@ class BluetoothPanel(Gtk.Box):
         
         self.append(status_box)
         
-        # Device list
+        # Device list (read-only, populated only when speaker mode is enabled)
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_size_request(-1, 150)
@@ -50,19 +50,6 @@ class BluetoothPanel(Gtk.Box):
         
         scrolled.set_child(self.device_view)
         self.append(scrolled)
-        
-        # Buttons
-        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        
-        self.scan_button = Gtk.Button(label="Scan")
-        self.scan_button.connect('clicked', self._on_scan_clicked)
-        button_box.append(self.scan_button)
-        
-        self.connect_button = Gtk.Button(label="Connect")
-        self.connect_button.connect('clicked', self._on_connect_clicked)
-        button_box.append(self.connect_button)
-        
-        self.append(button_box)
         
         # Sink mode toggle
         if self.bt_sink:
@@ -88,8 +75,8 @@ class BluetoothPanel(Gtk.Box):
         self.bt_manager.on_device_disconnected = self._on_device_disconnected
         self.bt_manager.on_device_added = self._on_device_added
         
-        self._update_status()
-        self._refresh_devices()
+        # Start with Bluetooth UI in an inactive state; it becomes active with speaker mode
+        self._set_inactive_state()
     
     def _update_status(self):
         """Update Bluetooth status display."""
@@ -124,36 +111,12 @@ class BluetoothPanel(Gtk.Box):
             self.emit('device-selected', device_path)
     
     def _on_scan_clicked(self, button):
-        """Handle scan button click."""
-        if self.bt_manager.is_powered():
-            self.bt_manager.start_discovery()
-            # Stop discovery after 10 seconds
-            GLib.timeout_add_seconds(10, lambda: self.bt_manager.stop_discovery() or False)
-            self._refresh_devices()
-        else:
-            self.bt_manager.set_powered(True)
-            self._update_status()
+        """Deprecated: scan functionality removed in favor of speaker mode toggle."""
+        pass
     
     def _on_connect_clicked(self, button):
-        """Handle connect button click."""
-        selection = self.device_view.get_selection()
-        model, tree_iter = selection.get_selected()
-        if tree_iter:
-            device_path = model.get_value(tree_iter, 0)
-            device = None
-            for d in self.bt_manager.get_devices():
-                if d.path == device_path:
-                    device = d
-                    break
-            
-            if device:
-                if device.connected:
-                    self.bt_manager.disconnect_device(device_path)
-                else:
-                    if not device.paired:
-                        self.bt_manager.pair_device(device_path)
-                    self.bt_manager.connect_device(device_path)
-                self._refresh_devices()
+        """Deprecated: direct connect/disconnect is now handled implicitly by speaker mode."""
+        pass
     
     def _on_device_connected(self, device: BluetoothDevice):
         """Handle device connection."""
@@ -194,7 +157,8 @@ class BluetoothPanel(Gtk.Box):
             self.sink_toggle.set_active(True)
         if self.sink_status:
             self.sink_status.set_text("Speaker mode: Ready for connection")
-        self._update_status()
+        # When speaker mode is enabled, update BT state and show known devices
+        self._refresh_devices()
     
     def _on_sink_disabled(self):
         """Handle sink disabled."""
@@ -202,11 +166,18 @@ class BluetoothPanel(Gtk.Box):
             self.sink_toggle.set_active(False)
         if self.sink_status:
             self.sink_status.set_text("")
-        self._update_status()
+        # When speaker mode is disabled, clear UI back to inactive state
+        self._set_inactive_state()
     
     def _on_sink_device_connected(self, device: BluetoothDevice):
         """Handle device connected in sink mode."""
         if self.sink_status:
             self.sink_status.set_text(f"Receiving audio from: {device.name}")
         self._update_status()
+
+    def _set_inactive_state(self):
+        """Put the Bluetooth UI into an inactive state until speaker mode is enabled."""
+        self.device_store.clear()
+        self.status_label.set_text("Speaker mode disabled")
+        self.status_icon.set_from_icon_name("bluetooth-disabled-symbolic")
 

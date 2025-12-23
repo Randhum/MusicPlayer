@@ -1,7 +1,6 @@
 """Playlist management for tracks."""
 
 import json
-import random
 from pathlib import Path
 from typing import List, Optional
 from core.metadata import TrackMetadata
@@ -61,23 +60,6 @@ class PlaylistManager:
         """Clear the current playlist."""
         self.current_playlist.clear()
         self.current_index = -1
-    
-    def shuffle(self):
-        """Shuffle the playlist randomly, keeping current track at position 0."""
-        if len(self.current_playlist) <= 1:
-            return
-        
-        # If there's a current track, move it to the front, then shuffle the rest
-        if 0 <= self.current_index < len(self.current_playlist):
-            current_track = self.current_playlist[self.current_index]
-            remaining = [t for i, t in enumerate(self.current_playlist) if i != self.current_index]
-            random.shuffle(remaining)
-            self.current_playlist = [current_track] + remaining
-            self.current_index = 0
-        else:
-            # No current track, shuffle everything
-            random.shuffle(self.current_playlist)
-            self.current_index = -1
     
     def get_current_track(self) -> Optional[TrackMetadata]:
         """Get the currently playing track."""
