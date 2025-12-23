@@ -65,6 +65,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.player_controls.connect('stop-clicked', lambda w: self._on_stop())
         self.player_controls.connect('next-clicked', lambda w: self._on_next())
         self.player_controls.connect('prev-clicked', lambda w: self._on_prev())
+        self.player_controls.connect('shuffle-clicked', lambda w: self._on_shuffle())
         self.player_controls.connect('seek-changed', self._on_seek)
         self.player_controls.connect('volume-changed', self._on_volume_changed)
         main_box.append(self.player_controls)
@@ -131,6 +132,11 @@ class MainWindow(Gtk.ApplicationWindow):
         track = self.application.playlist_manager.get_previous_track()
         if track:
             self.application.play_current_track()
+    
+    def _on_shuffle(self):
+        """Handle shuffle button click."""
+        self.application.playlist_manager.shuffle()
+        self.application.refresh_playlist_views()
     
     def _on_seek(self, controls, position: float):
         """Handle seek operation."""

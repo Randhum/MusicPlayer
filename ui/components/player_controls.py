@@ -15,6 +15,7 @@ class PlayerControls(Gtk.Box):
         'stop-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'next-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'prev-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        'shuffle-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
         'seek-changed': (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         'volume-changed': (GObject.SignalFlags.RUN_FIRST, None, (float,)),
     }
@@ -40,7 +41,7 @@ class PlayerControls(Gtk.Box):
         self.progress_scale.set_draw_value(False)
         self.progress_scale.set_hexpand(True)
         # Touch-friendly height
-        self.progress_scale.set_size_request(-1, 30)
+        self.progress_scale.set_size_request(-1, 36)
         
         # Use GTK4 gesture controllers for button events
         gesture_press = Gtk.GestureClick()
@@ -62,11 +63,17 @@ class PlayerControls(Gtk.Box):
         self.append(progress_box)
         
         # Control buttons
-        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        controls_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         controls_box.set_halign(Gtk.Align.CENTER)
         
-        # Touch-friendly button sizes
-        button_size = 48  # Larger buttons for touch
+        # Large touch-friendly button sizes
+        button_size = 60  # Larger buttons for better touch experience
+        
+        self.shuffle_button = Gtk.Button.new_from_icon_name("media-playlist-shuffle-symbolic")
+        self.shuffle_button.set_size_request(button_size, button_size)
+        self.shuffle_button.set_tooltip_text("Shuffle Playlist")
+        self.shuffle_button.connect('clicked', lambda btn: self.emit('shuffle-clicked'))
+        controls_box.append(self.shuffle_button)
         
         self.prev_button = Gtk.Button.new_from_icon_name("media-skip-backward-symbolic")
         self.prev_button.set_size_request(button_size, button_size)
@@ -106,7 +113,7 @@ class PlayerControls(Gtk.Box):
         )
         self.volume_scale.set_value(1.0)
         self.volume_scale.set_draw_value(False)
-        self.volume_scale.set_size_request(120, 30)  # Larger for touch
+        self.volume_scale.set_size_request(140, 36)  # Larger for touch
         self.volume_scale.connect('value-changed', self._on_volume_changed)
         volume_box.append(self.volume_scale)
         

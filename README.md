@@ -8,11 +8,12 @@ A lightweight music player built with GTK4 and Python that manages your local mu
 - **Video Support**: Video files (MP4, MKV, WebM, etc.) play with both audio and video
 - **Modular Dockable Panels**: Each panel (Library, Playlist, Now Playing, Bluetooth) can be detached as a separate window
 - **Folder-Based Library Browser**: Browse your music library using the original folder structure
-- **Touch-Friendly Interface**: Large buttons, increased row heights, and generous spacing
+- **Touch-Friendly Interface**: Extra-large player controls (60px buttons), increased row heights, and generous spacing
 - **Playlist Management**: 
   - Double-click tracks/folders to add to playlist and play
   - Right-click context menus for adding, removing, and reordering
   - Save and load custom playlists
+  - Shuffle button to randomize playlist order
 - **Bluetooth Speaker Mode**: Act as a Bluetooth audio receiver
 - **Search**: Search and filter your music collection
 - **Metadata Display**: Beautiful GTK4 interface with album art and track information
