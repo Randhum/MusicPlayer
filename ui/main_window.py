@@ -682,7 +682,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
         if self.use_moc:
             self._load_moc_playlist_from_moc()
-
+    
     def _on_playlist_clear(self, view):
         """Handle clearing playlist."""
         if self.use_moc:

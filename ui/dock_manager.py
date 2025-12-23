@@ -109,10 +109,10 @@ class DockablePanel(Gtk.Box):
         
         # Remove from detached window first
         if self.detached_window:
-            # Make sure panel is removed from window before closing
+            # Make sure panel is removed from window before destroying
             if self.detached_window.get_child() is self:
                 self.detached_window.set_child(None)
-            self.detached_window.close()
+            self.detached_window.destroy()
             self.detached_window = None
         
         # Update button
@@ -237,6 +237,6 @@ class DockManager:
         
         for panel in self.panels.values():
             if panel.is_detached and panel.detached_window:
-                panel.detached_window.close()
+                panel.detached_window.destroy()
 
 
