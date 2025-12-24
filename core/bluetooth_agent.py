@@ -1,6 +1,5 @@
 """BlueZ Agent for handling Bluetooth pairing confirmations and passkeys."""
 
-from time import sleep
 from typing import Optional, Callable
 
 import dbus

@@ -16,7 +16,6 @@ VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.wmv', '.m
 # GStreamer playbin flags
 GST_FLAG_VIDEO = 0x01
 GST_FLAG_AUDIO = 0x02
-GST_FLAG_TEXT = 0x04
 GST_FLAG_SOFT_VOLUME = 0x10
 
 # Update intervals (milliseconds)

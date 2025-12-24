@@ -1,7 +1,7 @@
 """Playlist view component - shows current queue/playlist."""
 
 from pathlib import Path
-from typing import Optional, Callable, List
+from typing import Optional, List
 
 import gi
 gi.require_version('Gtk', '4.0')

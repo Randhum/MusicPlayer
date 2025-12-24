@@ -1,6 +1,5 @@
 """Bluetooth A2DP sink management for receiving audio from mobile devices."""
 
-import os
 import subprocess
 from typing import Optional, Callable
 
