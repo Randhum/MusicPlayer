@@ -112,14 +112,6 @@ class BluetoothPanel(Gtk.Box):
             device_path = model.get_value(tree_iter, 0)
             self.emit('device-selected', device_path)
     
-    def _on_scan_clicked(self, button):
-        """Deprecated: scan functionality removed in favor of speaker mode toggle."""
-        pass
-    
-    def _on_connect_clicked(self, button):
-        """Deprecated: direct connect/disconnect is now handled implicitly by speaker mode."""
-        pass
-    
     def _on_device_connected(self, device: BluetoothDevice):
         """Handle device connection."""
         self._update_status()

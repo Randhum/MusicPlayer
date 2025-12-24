@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -30,6 +31,13 @@ class MocController:
         # Track whether we've already attempted to start the server to avoid
         # spamming `mocp --server` on every status poll.
         self._server_initialized: bool = False
+        # Status caching to reduce MOC server load
+        self._status_cache: Optional[Dict] = None
+        self._status_cache_time: float = 0.0
+        self._status_cache_ttl: float = 0.2  # Cache for 200ms to reduce calls
+        # Error tracking for backoff
+        self._last_error_time: float = 0.0
+        self._error_backoff: float = 1.0  # Start with 1 second backoff
 
     # ------------------------------------------------------------------
     # Availability / helpers
@@ -39,29 +47,61 @@ class MocController:
         return self._mocp_path is not None
 
     def _run(self, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
-        """Run `mocp` with the given arguments."""
+        """
+        Run `mocp` with the given arguments.
+        
+        Handles errors gracefully and prevents overwhelming the MOC server.
+        Silently handles "server not running" errors to avoid spam.
+        """
         if not self._mocp_path:
             # Simulate a failed process
             return subprocess.CompletedProcess(args=["mocp", *args], returncode=127, stdout="", stderr="mocp not found")
 
         cmd = [self._mocp_path, *args]
-        return subprocess.run(
-            cmd,
-            capture_output=capture_output,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=capture_output,
+                text=True,
+                check=False,
+                timeout=5.0,  # 5 second timeout to prevent hanging
+            )
+            
+            # Check for server not running errors and handle gracefully
+            if result.returncode != 0 and result.stderr:
+                stderr_lower = result.stderr.lower()
+                if "server is not running" in stderr_lower or "can't receive value" in stderr_lower:
+                    # Server not ready - reset initialization flag so we can try again
+                    self._server_initialized = False
+                    # Don't print error for server not running (too noisy)
+                    # Return a result that indicates server not ready
+                    return subprocess.CompletedProcess(args=cmd, returncode=125, stdout="", stderr="")
+            
+            # Clear status cache on successful command (except for --info and --server)
+            if "--info" not in args and "--server" not in args:
+                self._status_cache = None
+            return result
+        except subprocess.TimeoutExpired:
+            # Timeout - return error result
+            return subprocess.CompletedProcess(args=cmd, returncode=124, stdout="", stderr="Command timed out")
+        except Exception as e:
+            # Other errors - return error result
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
     def ensure_server(self):
         """Start the MOC server if it is not already running."""
         if not self.is_available():
-            return
+            return False
         if self._server_initialized:
-            return
+            return True
         # This is safe to call even if the server is already running; we just
         # avoid doing it more than once per application run.
-        self._run("--server")
-        self._server_initialized = True
+        result = self._run("--server", capture_output=True)
+        if result.returncode == 0:
+            self._server_initialized = True
+            return True
+        # If server start failed, allow retry
+        return False
 
     # ------------------------------------------------------------------
     # Playlist
@@ -112,19 +152,46 @@ class MocController:
     # ------------------------------------------------------------------
     # Status / info
     # ------------------------------------------------------------------
-    def get_status(self) -> Optional[Dict]:
+    def get_status(self, force_refresh: bool = False) -> Optional[Dict]:
         """
         Get current MOC status (state, file, position, duration, volume).
+        
+        Uses caching to reduce server load. Set force_refresh=True to bypass cache.
 
         Returns None if status can't be read.
         """
         if not self.is_available():
             return None
 
-        self.ensure_server()
+        # Check cache first (unless forced refresh)
+        current_time = time.time()
+        if not force_refresh and self._status_cache is not None:
+            if current_time - self._status_cache_time < self._status_cache_ttl:
+                return self._status_cache
+        
+        # Check if we're in error backoff period
+        if current_time - self._last_error_time < self._error_backoff:
+            # Return cached status if available, otherwise None
+            return self._status_cache
+
+        # Ensure server is running (retry if needed)
+        if not self.ensure_server():
+            # Server not ready - return cached status if available
+            return self._status_cache
+        
         result = self._run("--info", capture_output=True)
+        
+        # Handle errors with backoff
         if result.returncode != 0 or not result.stdout:
-            return None
+            self._last_error_time = current_time
+            # Exponential backoff: double the backoff time, max 5 seconds
+            self._error_backoff = min(self._error_backoff * 2, 5.0)
+            # Return cached status if available
+            return self._status_cache
+        
+        # Success - reset backoff
+        self._error_backoff = 0.2  # Reset to minimal backoff
+        self._last_error_time = 0.0
 
         info: Dict[str, str] = {}
         for line in result.stdout.splitlines():
@@ -185,7 +252,7 @@ class MocController:
         shuffle = info.get("Shuffle", "").strip().upper() == "ON"
         autonext = info.get("Autonext", "").strip().upper() == "ON"
 
-        return {
+        status = {
             "state": state,  # PLAY, PAUSE, STOP
             "file_path": file_path,
             "position": position,
@@ -194,6 +261,12 @@ class MocController:
             "shuffle": shuffle,
             "autonext": autonext,
         }
+        
+        # Update cache
+        self._status_cache = status
+        self._status_cache_time = current_time
+        
+        return status
 
     # ------------------------------------------------------------------
     # Controls

@@ -1,4 +1,14 @@
-"""GStreamer-based media player with automatic audio/video handling."""
+"""GStreamer-based media player for video files.
+
+This module provides playback for video container formats (MP4, MKV, WebM, etc.).
+For audio-only files, the application uses MOC (Music On Console) via moc_controller.py
+for better audio codec support and lower resource usage.
+
+The AudioPlayer class handles:
+- Video container playback (with audio tracks)
+- Video-specific features (video output, codec handling)
+- Position tracking and seeking for video files
+"""
 
 import os
 from typing import Optional, Callable
@@ -24,7 +34,15 @@ POSITION_UPDATE_INTERVAL = 500
 
 
 class AudioPlayer:
-    """GStreamer-based media player using playbin for automatic format handling."""
+    """
+    GStreamer-based media player for video container formats.
+    
+    Note: This player is primarily used for video files. Audio-only playback
+    is handled by MOC (Music On Console) via moc_controller.py for better
+    codec support and performance.
+    
+    Supports video containers with embedded audio tracks (MP4, MKV, WebM, etc.).
+    """
     
     def __init__(self):
         if not Gst.is_initialized():
@@ -36,6 +54,10 @@ class AudioPlayer:
         self.position: float = 0.0
         self.duration: float = 0.0
         self.is_playing: bool = False
+        
+        # Timeout callback IDs for cleanup
+        self._position_timeout_id: Optional[int] = None
+        self._duration_timeout_id: Optional[int] = None
         
         # Callbacks
         self.on_state_changed: Optional[Callable] = None
@@ -98,9 +120,16 @@ class AudioPlayer:
                 
                 if new_state == Gst.State.PLAYING:
                     self.is_playing = True
-                    GLib.timeout_add(DURATION_UPDATE_INTERVAL, self._update_duration)
+                    # Remove any existing duration timeout before adding a new one
+                    if self._duration_timeout_id is not None:
+                        GLib.source_remove(self._duration_timeout_id)
+                    self._duration_timeout_id = GLib.timeout_add(DURATION_UPDATE_INTERVAL, self._update_duration)
                 elif new_state in (Gst.State.PAUSED, Gst.State.NULL):
                     self.is_playing = False
+                    # Remove duration timeout when paused or stopped
+                    if self._duration_timeout_id is not None:
+                        GLib.source_remove(self._duration_timeout_id)
+                        self._duration_timeout_id = None
                 
                 if self.on_state_changed:
                     self.on_state_changed(self.is_playing)
@@ -196,7 +225,10 @@ class AudioPlayer:
             print("Failed to start playback")
             return False
         
-        GLib.timeout_add(POSITION_UPDATE_INTERVAL, self._update_position)
+        # Remove any existing position timeout before adding a new one
+        if self._position_timeout_id is not None:
+            GLib.source_remove(self._position_timeout_id)
+        self._position_timeout_id = GLib.timeout_add(POSITION_UPDATE_INTERVAL, self._update_position)
         return True
     
     def pause(self):
@@ -211,6 +243,14 @@ class AudioPlayer:
     
     def _stop(self):
         """Internal stop."""
+        # Remove timeout callbacks
+        if self._position_timeout_id is not None:
+            GLib.source_remove(self._position_timeout_id)
+            self._position_timeout_id = None
+        if self._duration_timeout_id is not None:
+            GLib.source_remove(self._duration_timeout_id)
+            self._duration_timeout_id = None
+        
         if self.playbin:
             self.playbin.set_state(Gst.State.NULL)
         self.position = 0.0
@@ -219,21 +259,38 @@ class AudioPlayer:
     def seek(self, position: float):
         """Seek to position in seconds."""
         if self.playbin and self.duration > 0:
-            self.playbin.seek_simple(
+            # Clamp position to valid range
+            position = max(0.0, min(position, self.duration))
+            success = self.playbin.seek_simple(
                 Gst.Format.TIME,
                 Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
                 int(position * Gst.SECOND)
             )
-            self.position = position
+            if success:
+                self.position = position
+            else:
+                print(f"Seek failed for position {position:.2f}s")
     
     def set_volume(self, volume: float):
-        """Set volume (0.0 to 1.0)."""
+        """
+        Set volume (0.0 to 1.0).
+        
+        NOTE: This method is not used in the application. System volume is
+        controlled separately via the SystemVolume class. This method is kept
+        for potential future use or API compatibility.
+        """
         self.volume = max(0.0, min(1.0, volume))
         if self.playbin:
             self.playbin.set_property("volume", self.volume)
     
     def get_volume(self) -> float:
-        """Get current volume."""
+        """
+        Get current volume.
+        
+        NOTE: This method is not used in the application. System volume is
+        controlled separately via the SystemVolume class. This method is kept
+        for potential future use or API compatibility.
+        """
         return self.volume
     
     def get_position(self) -> float:
@@ -253,6 +310,16 @@ class AudioPlayer:
     def cleanup(self):
         """Clean up resources."""
         self._stop()
+        
+        # Remove bus signal watch if playbin exists
         if self.playbin:
+            try:
+                bus = self.playbin.get_bus()
+                if bus:
+                    bus.remove_signal_watch()
+            except (AttributeError, RuntimeError):
+                # Bus may already be destroyed
+                pass
+            
             self.playbin.set_state(Gst.State.NULL)
             self.playbin = None

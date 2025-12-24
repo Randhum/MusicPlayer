@@ -42,14 +42,29 @@ class BluetoothSink:
         self.on_sink_disabled: Optional[Callable] = None
         self.on_device_connected: Optional[Callable] = None
         self.on_device_disconnected: Optional[Callable] = None
+        # Optional callbacks for audio stream events (not currently used in UI)
+        # These are called internally when A2DP audio streams start/stop
+        # Can be set for future features like notifications or status updates
         self.on_audio_stream_started: Optional[Callable] = None
         self.on_audio_stream_stopped: Optional[Callable] = None
         
-        # Register this sink instance with the BT manager so it can check sink mode state
-        if hasattr(self.bt_manager, 'register_sink_instance'):
-            self.bt_manager.register_sink_instance(self)
+        # Register sink mode checker callback with BT manager (avoids circular dependency)
+        if hasattr(self.bt_manager, 'register_sink_mode_checker'):
+            self.bt_manager.register_sink_mode_checker(lambda: self.is_sink_enabled)
         
-        # Setup BT manager callbacks
+        # Setup BT manager callbacks using callback chaining pattern
+        # 
+        # IMPORTANT: This pattern intercepts BluetoothManager callbacks to add sink-specific
+        # behavior (audio routing) while preserving the original callbacks. This allows:
+        # 1. BluetoothSink to configure audio routing when devices connect/disconnect
+        # 2. Other components (like BluetoothPanel) to still receive connection events
+        # 
+        # NOTE: This pattern requires that BluetoothSink is initialized BEFORE any other
+        # components that set callbacks on BluetoothManager. If callbacks are set after
+        # BluetoothSink initialization, those components won't receive events.
+        # 
+        # Future improvement: Consider refactoring to an event emitter pattern for better
+        # decoupling and support for multiple listeners.
         self._original_device_connected = self.bt_manager.on_device_connected
         self._original_device_disconnected = self.bt_manager.on_device_disconnected
         self.bt_manager.on_device_connected = self._on_device_connected

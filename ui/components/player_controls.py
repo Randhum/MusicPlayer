@@ -1,7 +1,5 @@
 """Player controls component - play/pause/next/prev/volume/progress."""
 
-from typing import Optional, Callable
-
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GObject
@@ -137,13 +135,32 @@ class PlayerControls(Gtk.Box):
     
     def update_progress(self, position: float, duration: float):
         """Update progress bar and time labels."""
+        # Validate inputs
+        position = max(0.0, position)
+        duration = max(0.0, duration)
+        
+        # Clamp position to duration if known
+        if duration > 0:
+            position = min(position, duration)
+        
         self._duration = duration
-        if not self._seeking and duration > 0:
-            progress = (position / duration) * 100.0 if duration > 0 else 0.0
+        
+        # Update slider only when not seeking (prevents interference during drag)
+        if not self._seeking:
+            if duration > 0:
+                progress = (position / duration) * 100.0
+                progress = max(0.0, min(100.0, progress))
+            else:
+                progress = 0.0
             self.progress_scale.set_value(progress)
         
+        # Always update time labels
         self.time_label.set_text(self._format_time(position))
         self.duration_label.set_text(self._format_time(duration))
+    
+    def reset_seeking(self):
+        """Reset seeking state - call this after a seek operation completes."""
+        self._seeking = False
     
     def set_volume(self, volume: float):
         """Set volume slider value (programmatically, without triggering signal)."""
@@ -160,19 +177,28 @@ class PlayerControls(Gtk.Box):
         return f"{minutes:02d}:{secs:02d}"
     
     def _on_progress_changed(self, scale):
-        """Handle progress bar value change."""
+        """Handle progress bar value change during seeking."""
         if self._seeking and self._duration > 0:
             value = scale.get_value()
             position = (value / 100.0) * self._duration
             self.emit('seek-changed', position)
     
     def _on_progress_press(self, gesture, n_press, x, y):
-        """Handle progress bar press (GTK4 gesture)."""
+        """Handle progress bar press - start seeking."""
         self._seeking = True
+        # Calculate position from click location and seek immediately
+        if self._duration > 0:
+            allocation = self.progress_scale.get_allocation()
+            width = allocation.width
+            if width > 0:
+                percentage = max(0.0, min(100.0, (x / width) * 100.0))
+                self.progress_scale.set_value(percentage)
     
     def _on_progress_release(self, gesture, n_press, x, y):
-        """Handle progress bar release (GTK4 gesture)."""
-        self._seeking = False
+        """Handle progress bar release - seeking state will be reset after seek completes."""
+        # Don't reset _seeking here - let the seek handler do it after the operation completes
+        # This prevents slider from jumping during the seek operation
+        pass
     
     def _on_volume_changed(self, scale):
         """Handle volume slider change."""
