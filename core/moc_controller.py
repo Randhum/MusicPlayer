@@ -325,20 +325,68 @@ class MocController:
         # Clear existing playlist
         self._run("-c")  # equivalent to --clear
 
-        # Append tracks in order
-        for track in tracks:
-            self._run("-a", track.file_path)  # equivalent to --append
+        # Validate and add tracks to MOC playlist
+        # Track which tracks were successfully added (by original index)
+        successfully_added = set()
+        for idx, track in enumerate(tracks):
+            if not track or not track.file_path:
+                continue
+            # Validate that file exists
+            file_path = Path(track.file_path)
+            if not file_path.exists() or not file_path.is_file():
+                print(f"Warning: Track file does not exist: {track.file_path}")
+                continue
+            # Use absolute path for MOC
+            abs_path = str(file_path.resolve())
+            # Append to MOC playlist
+            result = self._run("-a", abs_path, capture_output=True)
+            if result.returncode == 0:
+                successfully_added.add(idx)
+            else:
+                print(f"Warning: Failed to add track to MOC playlist: {abs_path}")
+                if result.stderr:
+                    print(f"MOC error: {result.stderr}")
 
         # Optionally start playback from the selected track
         if start_playback and 0 <= current_index < len(tracks):
-            # Play the desired track; mocp will find it in the playlist
-            self._run("--playit", tracks[current_index].file_path)
+            # Only play if the track was successfully added
+            if current_index in successfully_added:
+                track = tracks[current_index]
+                if track and track.file_path:
+                    file_path = Path(track.file_path)
+                    if file_path.exists() and file_path.is_file():
+                        abs_path = str(file_path.resolve())
+                        # Play the desired track; mocp will find it in the playlist
+                        result = self._run("--playit", abs_path, capture_output=True)
+                        if result.returncode != 0:
+                            print(f"Error: Failed to play track: {abs_path}")
+                            if result.stderr:
+                                print(f"MOC error: {result.stderr}")
+                    else:
+                        print(f"Error: Cannot play track - file does not exist: {track.file_path}")
+            else:
+                print(f"Error: Cannot play track at index {current_index} - track was not added to playlist")
 
     def play_file(self, file_path: str):
         """Play a specific file via MOC, keeping the playlist intact."""
         if not self.is_available():
             return
+        if not file_path:
+            print("Error: Cannot play file - file path is empty")
+            return
+        
+        # Validate file exists
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            print(f"Error: Cannot play file - file does not exist: {file_path}")
+            return
+        
         self.ensure_server()
-        self._run("--playit", file_path)
+        abs_path = str(path.resolve())
+        result = self._run("--playit", abs_path, capture_output=True)
+        if result.returncode != 0:
+            print(f"Error: Failed to play file: {abs_path}")
+            if result.stderr:
+                print(f"MOC error: {result.stderr}")
 
 
