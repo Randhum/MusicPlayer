@@ -1,6 +1,8 @@
 """Metadata extraction for audio files using mutagen."""
 
+import base64
 import os
+import struct
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -221,23 +223,44 @@ class TrackMetadata:
                     pass
                 
                 # Fallback: try METADATA_BLOCK_PICTURE tag directly
+                # This handles cases where the pictures property might not work
                 try:
                     if 'METADATA_BLOCK_PICTURE' in audio_file:
-                        import base64
-                        import struct
                         picture_data = audio_file['METADATA_BLOCK_PICTURE'][0]
                         # Decode base64
                         decoded = base64.b64decode(picture_data)
-                        # Skip FLAC picture block header (32 bytes)
+                        
+                        # Parse FLAC picture block header
                         # Format: picture type (4), MIME length (4), MIME, description length (4), description, 
                         # width (4), height (4), depth (4), colors (4), data length (4), data
-                        if len(decoded) > 32:
-                            # Find data start (skip header)
-                            offset = 32
-                            # Actually, let's use mutagen's built-in handling
-                            # The pictures property should work
-                            pass
-                except (KeyError, ValueError, TypeError):
+                        if len(decoded) >= 32:
+                            offset = 0
+                            # Skip picture type (4 bytes)
+                            offset += 4
+                            # Read MIME length (4 bytes, big-endian)
+                            mime_len = struct.unpack('>I', decoded[offset:offset+4])[0]
+                            offset += 4
+                            # Skip MIME string
+                            offset += mime_len
+                            # Read description length (4 bytes, big-endian)
+                            desc_len = struct.unpack('>I', decoded[offset:offset+4])[0]
+                            offset += 4
+                            # Skip description
+                            offset += desc_len
+                            # Skip width, height, depth, colors (16 bytes total)
+                            offset += 16
+                            # Read data length (4 bytes, big-endian)
+                            data_len = struct.unpack('>I', decoded[offset:offset+4])[0]
+                            offset += 4
+                            
+                            # Extract image data
+                            if offset + data_len <= len(decoded):
+                                image_data = decoded[offset:offset+data_len]
+                                art_path = self._save_album_art(image_data)
+                                if art_path:
+                                    return art_path
+                except (KeyError, ValueError, TypeError, struct.error, IndexError):
+                    # If parsing fails, continue to try other formats
                     pass
             
             # Try different tag formats for album art (MP3, MP4, etc.)

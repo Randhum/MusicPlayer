@@ -63,8 +63,8 @@ class BluetoothManager:
         self.agent_ui: Optional[BluetoothAgentUI] = None
         self.parent_window = parent_window
         
-        # Reference to BluetoothSink for checking sink mode state
-        self._sink_instance: Optional[object] = None
+        # Callback to check if sink mode is enabled (set by BluetoothSink)
+        self._sink_mode_checker: Optional[Callable[[], bool]] = None
         
         # Track signal receivers for cleanup
         self._signal_receivers = []
@@ -621,23 +621,30 @@ class BluetoothManager:
             print(f"Error in auto-connect: {e}")
             return False
     
-    def register_sink_instance(self, sink_instance):
+    def register_sink_mode_checker(self, checker: Callable[[], bool]):
         """
-        Register a BluetoothSink instance so we can check sink mode state.
+        Register a callback function to check if sink mode is enabled.
+        
+        This avoids circular dependencies by using a callback instead of
+        storing a direct reference to the BluetoothSink instance.
         
         Args:
-            sink_instance: BluetoothSink instance
+            checker: Callable that returns True if sink mode is enabled, False otherwise
         """
-        self._sink_instance = sink_instance
+        self._sink_mode_checker = checker
     
     def _is_sink_mode_enabled(self) -> bool:
         """
-        Check if sink mode is enabled.
+        Check if sink mode is enabled via registered callback.
         
-        This checks the BluetoothSink instance if available.
+        Returns False if no callback is registered.
         """
-        if self._sink_instance and hasattr(self._sink_instance, 'is_sink_enabled'):
-            return self._sink_instance.is_sink_enabled
+        if self._sink_mode_checker:
+            try:
+                return self._sink_mode_checker()
+            except Exception as e:
+                print(f"Error checking sink mode: {e}")
+                return False
         return False
     
     def _disconnect_if_sink_disabled(self, device_path: str) -> bool:

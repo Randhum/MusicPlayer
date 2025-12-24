@@ -155,14 +155,49 @@ class DockManager:
                      icon_name: str = "view-list-symbolic") -> DockablePanel:
         """Create a new dockable panel."""
         panel = DockablePanel(title, content, icon_name)
+        # Note: The reattach callback is typically overridden by the main window
+        # to call its own _reattach_panel method. This default implementation
+        # is a fallback that can be used if main window doesn't override it.
         panel.on_reattach = lambda p: self._on_panel_reattach(panel_id, p)
         self.panels[panel_id] = panel
         return panel
     
     def _on_panel_reattach(self, panel_id: str, panel: DockablePanel):
-        """Handle panel reattachment."""
-        # This will be connected to the main window's layout logic
-        pass
+        """Handle panel reattachment.
+        
+        This is a default implementation that attempts to reattach the panel
+        to its original parent container. The main window typically overrides
+        this callback to use its own _reattach_panel method which has more
+        context about the layout structure.
+        """
+        if not panel or not panel.parent_container:
+            return
+        
+        # Remove panel from current parent if any
+        current_parent = panel.get_parent()
+        if current_parent:
+            if isinstance(current_parent, Gtk.Paned):
+                if current_parent.get_start_child() is panel:
+                    current_parent.set_start_child(None)
+                elif current_parent.get_end_child() is panel:
+                    current_parent.set_end_child(None)
+            elif isinstance(current_parent, Gtk.Box):
+                current_parent.remove(panel)
+            elif isinstance(current_parent, Gtk.Window):
+                current_parent.set_child(None)
+        
+        # Reattach to original parent container
+        parent = panel.parent_container
+        if isinstance(parent, Gtk.Paned):
+            # Use stored position or default to end
+            if panel.parent_position == 'start':
+                parent.set_start_child(panel)
+            else:
+                parent.set_end_child(panel)
+        elif isinstance(parent, Gtk.Box):
+            parent.append(panel)
+        elif isinstance(parent, Gtk.Window):
+            parent.set_child(panel)
     
     def create_paned_layout(self, *panels: DockablePanel, 
                            orientation: Gtk.Orientation = Gtk.Orientation.HORIZONTAL) -> Gtk.Paned:
