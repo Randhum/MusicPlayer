@@ -87,6 +87,12 @@ class PlaylistView(Gtk.Box):
         # Add CSS class for touch-friendly styling
         self.tree_view.add_css_class("playlist-tree")
         
+        # Add single-tap gesture for touchscreen support (triggers playback)
+        single_tap_gesture = Gtk.GestureClick()
+        single_tap_gesture.set_button(1)  # Left mouse button or touch
+        single_tap_gesture.connect('pressed', self._on_single_tap)
+        self.tree_view.add_controller(single_tap_gesture)
+        
         # Add right-click gesture for context menu
         right_click_gesture = Gtk.GestureClick()
         right_click_gesture.set_button(3)  # Right mouse button
@@ -98,6 +104,10 @@ class PlaylistView(Gtk.Box):
         long_press_gesture.set_touch_only(True)  # Only for touch, not mouse
         long_press_gesture.connect('pressed', self._on_long_press)
         self.tree_view.add_controller(long_press_gesture)
+        
+        # Track tap state to distinguish single tap from double tap
+        self._tap_timeout_id = None
+        self._tap_path = None
         
         # Context menu
         self.context_menu = None
@@ -200,8 +210,52 @@ class PlaylistView(Gtk.Box):
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
     
+    def _on_single_tap(self, gesture, n_press, x, y):
+        """Handle single tap - for touchscreen support."""
+        # On first press, set up timeout for single tap
+        if n_press == 1:
+            # Cancel any pending timeout
+            if self._tap_timeout_id:
+                GLib.source_remove(self._tap_timeout_id)
+                self._tap_timeout_id = None
+            
+            # Get the path at tap position
+            path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+            if path_info:
+                path, column, cell_x, cell_y = path_info
+                self._tap_path = path
+                
+                # For single tap on touchscreen, trigger playback after a short delay
+                # This allows double-tap to cancel it if needed
+                self._tap_timeout_id = GLib.timeout_add(250, self._on_tap_timeout)
+            else:
+                self._tap_path = None
+        # On second press (double-tap), cancel the timeout
+        elif n_press == 2:
+            if self._tap_timeout_id:
+                GLib.source_remove(self._tap_timeout_id)
+                self._tap_timeout_id = None
+                self._tap_path = None
+    
+    def _on_tap_timeout(self):
+        """Handle tap timeout - trigger playback if it was a single tap."""
+        self._tap_timeout_id = None
+        if self._tap_path:
+            indices = self._tap_path.get_indices()
+            if indices:
+                index = indices[0]
+                self.emit('track-activated', index)
+            self._tap_path = None
+        return False  # Don't repeat
+    
     def _on_row_activated(self, tree_view, path, column):
-        """Handle row activation (double-click)."""
+        """Handle row activation (double-click or double-tap)."""
+        # Cancel any pending single-tap timeout
+        if self._tap_timeout_id:
+            GLib.source_remove(self._tap_timeout_id)
+            self._tap_timeout_id = None
+            self._tap_path = None
+        
         indices = path.get_indices()
         if indices:
             index = indices[0]
