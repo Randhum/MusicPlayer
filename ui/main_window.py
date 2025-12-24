@@ -93,6 +93,11 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._moc_playlist_mtime = MOC_PLAYLIST_PATH.stat().st_mtime
                 except OSError:
                     self._moc_playlist_mtime = 0.0
+            # Enable autonext (autoplay) in MOC on initialization
+            self.moc_controller.ensure_server()
+            self.moc_controller.enable_autonext()
+            # Sync shuffle state from MOC on startup
+            GLib.idle_add(self._sync_shuffle_from_moc)
             GLib.timeout_add(MOC_STATUS_UPDATE_INTERVAL, self._update_moc_status)
         
         # Initialize volume slider with current system volume
@@ -487,12 +492,25 @@ class MainWindow(Gtk.ApplicationWindow):
         """Play the current track from playlist."""
         track = self.playlist_manager.get_current_track()
         if track:
-            self.player.load_track(track)
-            self.player.play()
-            self.metadata_panel.set_track(track)
+            # If using MOC, sync playlist first and then play
+            if self._should_use_moc(track):
+                self._stop_internal_player_if_needed()
+                # Ensure autonext is enabled before playing
+                self.moc_controller.enable_autonext()
+                # Sync playlist to MOC to ensure it's up to date
+                self._sync_playlist_to_moc(start_playback=True)
+            else:
+                # Use internal player
+                self.player.load_track(track)
+                self.player.play()
+                self.metadata_panel.set_track(track)
     
     def _on_play(self):
         """Handle play button click."""
+        # Ensure autonext is enabled in MOC if using MOC
+        if self.use_moc:
+            self.moc_controller.enable_autonext()
+        
         track = self.playlist_manager.get_current_track()
         if self._should_use_moc(track):
             self._stop_internal_player_if_needed()
@@ -523,9 +541,14 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_next(self):
         """Handle next button click."""
+        # Ensure autonext is enabled in MOC if using MOC
+        if self.use_moc:
+            self.moc_controller.enable_autonext()
+        
         track = self.playlist_manager.get_current_track()
         if self._should_use_moc(track):
             self._stop_internal_player_if_needed()
+            # MOC will handle shuffle internally if enabled
             self.moc_controller.next()
         elif self.shuffle_enabled:
             self._play_random_track()
@@ -534,6 +557,10 @@ class MainWindow(Gtk.ApplicationWindow):
             if track:
                 self._update_playlist_view()
                 self._play_current_track()
+            else:
+                # No next track - check if we should loop or stop
+                # For now, just stop at end of playlist
+                pass
     
     def _on_prev(self):
         """Handle previous button click."""
@@ -578,20 +605,39 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_track_finished(self):
         """Handle track finished - auto-advance to next track."""
         # This callback is only called by the internal GStreamer player
-        # MOC handles auto-advancement internally, and we detect it via status polling
-        if self.shuffle_enabled:
-            self._play_random_track()
-        else:
-            # Auto-advance to next track in playlist
-            next_track = self.playlist_manager.get_next_track()
-            if next_track:
-                self._update_playlist_view()
-                self._play_current_track()
+        # MOC handles auto-advancement internally when autonext is enabled
+        # For internal player, we need to manually advance
+        
+        # Get the current playlist to check if there are more tracks
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
+        
+        # Check if there's a next track available
+        if current_index < len(tracks) - 1:
+            # There's a next track - advance to it
+            if self.shuffle_enabled:
+                self._play_random_track()
             else:
-                # End of playlist - stop playback
-                self.player.stop()
-                self.playlist_manager.set_current_index(-1)
-                self._update_playlist_view()
+                # Auto-advance to next track in playlist
+                next_track = self.playlist_manager.get_next_track()
+                if next_track:
+                    self._update_playlist_view()
+                    self._play_current_track()
+                else:
+                    # Shouldn't happen, but handle gracefully
+                    self.player.stop()
+                    self.playlist_manager.set_current_index(-1)
+                    self._update_playlist_view()
+        else:
+            # End of playlist reached
+            # If we're using MOC, sync the playlist state
+            if self.use_moc:
+                # Sync current state to MOC
+                self._sync_playlist_to_moc(start_playback=False)
+            # Stop playback
+            self.player.stop()
+            self.playlist_manager.set_current_index(-1)
+            self._update_playlist_view()
     
     def _update_position(self):
         """Periodically update position display."""
@@ -622,7 +668,26 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Sync basic playback UI
         self.player_controls.set_playing(state == "PLAY")
-        self.player_controls.update_progress(position, duration)
+        # Only update progress if we have valid position and duration
+        # This prevents showing incorrect values when MOC is initializing
+        if duration > 0:
+            self.player_controls.update_progress(position, duration)
+        elif position > 0:
+            # If we have position but no duration yet, still update position
+            # Duration might come later
+            self.player_controls.update_progress(position, 0.0)
+        
+        # Sync shuffle state from MOC (in case it was changed externally)
+        moc_shuffle = status.get("shuffle", False)
+        if moc_shuffle != self.shuffle_enabled:
+            self.shuffle_enabled = moc_shuffle
+            self.player_controls.shuffle_button.set_active(moc_shuffle)
+        
+        # Always ensure autonext is enabled in MOC
+        # This ensures tracks always advance automatically
+        moc_autonext = status.get("autonext", False)
+        if not moc_autonext:
+            self.moc_controller.enable_autonext()
         
         # Don't sync volume from MOC - we control system volume directly
 
@@ -663,6 +728,22 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_shuffle_toggled(self, controls, active: bool):
         """Handle shuffle toggle state changes."""
         self.shuffle_enabled = active
+        # Sync shuffle state with MOC
+        if self.use_moc:
+            if active:
+                self.moc_controller.enable_shuffle()
+            else:
+                self.moc_controller.disable_shuffle()
+
+    def _sync_shuffle_from_moc(self):
+        """Sync shuffle state from MOC to UI."""
+        if not self.use_moc:
+            return False
+        moc_shuffle = self.moc_controller.get_shuffle_state()
+        if moc_shuffle is not None:
+            self.shuffle_enabled = moc_shuffle
+            self.player_controls.shuffle_button.set_active(moc_shuffle)
+        return False
 
     def _play_random_track(self):
         """Play a random track from the current playlist."""
@@ -725,7 +806,17 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_playlist_refresh(self, view):
         """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
         if self.use_moc:
-            self._load_moc_playlist_from_moc()
+            # Force reload by checking if MOC has a playlist in memory
+            # If MOC is playing, it definitely has a playlist, so we should try to load it
+            status = self.moc_controller.get_status()
+            if status and status.get("file_path"):
+                # MOC is playing something, so it has a playlist in memory
+                # Try to load it - if the file doesn't exist, we'll preserve current playlist
+                self._load_moc_playlist_from_moc()
+            else:
+                # MOC is not playing, so try to load from file
+                # If file doesn't exist or is empty, we won't clear the current playlist
+                self._load_moc_playlist_from_moc()
     
     def _on_playlist_clear(self, view):
         """Handle clearing playlist."""
@@ -779,12 +870,28 @@ class MainWindow(Gtk.ApplicationWindow):
     def _load_moc_playlist_from_moc(self):
         """Replace current playlist with tracks from MOC's playlist file."""
         tracks, current_index = self.moc_controller.get_playlist()
-        self.playlist_manager.clear()
+        
+        # Only update playlist if we actually got tracks from MOC
+        # This prevents clearing the playlist when MOC has tracks in memory
+        # but hasn't saved them to the file yet
         if tracks:
+            self.playlist_manager.clear()
             self.playlist_manager.add_tracks(tracks)
             if current_index >= 0:
                 self.playlist_manager.set_current_index(current_index)
-        self._update_playlist_view()
+            self._update_playlist_view()
+        # If no tracks but MOC is playing, it means MOC has tracks in memory
+        # but the file doesn't exist yet - don't clear our playlist in this case
+        elif not tracks:
+            # Check if MOC is actually playing something - if so, it has a playlist in memory
+            status = self.moc_controller.get_status()
+            if status and status.get("state") in ("PLAY", "PAUSE") and status.get("file_path"):
+                # MOC is playing but we can't read the playlist file
+                # Don't clear - MOC has tracks in memory that aren't saved yet
+                pass
+            # If MOC is stopped and has no file, it's safe to assume no playlist
+            # But we still don't clear to avoid losing user's playlist unnecessarily
+        
         return False
     
     def _on_save_dialog_response(self, dialog, response, entry):
