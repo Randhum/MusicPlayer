@@ -7,7 +7,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
+from core.config import get_config
+from core.logging import get_logger
 from core.metadata import TrackMetadata
+
+logger = get_logger(__name__)
 
 
 # Supported audio file extensions (covers ~90% of common formats)
@@ -30,8 +34,8 @@ AUDIO_EXTENSIONS = {
     '.webm',          # WebM (may contain Opus/Vorbis)
 }
 
-# Index file location
-INDEX_FILE = Path.home() / '.config' / 'musicplayer' / 'library_index.json'
+# Index file location (will be overridden by config)
+INDEX_FILE = None
 
 
 class MusicLibrary:
@@ -44,12 +48,12 @@ class MusicLibrary:
         self.folder_structure: Dict[str, List[TrackMetadata]] = defaultdict(list)
         self._lock = threading.Lock()
         self._scanning = False
-        self._index_file = INDEX_FILE
+        
+        # Get config
+        config = get_config()
+        self._index_file = config.library_index_file
         self._file_cache: Dict[str, Dict] = {}  # file_path -> {mtime, hash, metadata}
         self._music_root: Optional[Path] = None  # Root music directory
-        
-        # Ensure config directory exists
-        self._index_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Load existing index
         self._load_index()
@@ -73,10 +77,14 @@ class MusicLibrary:
     
     def _do_scan(self):
         """Perform the actual scanning."""
-        music_dirs = [
-            Path.home() / 'Music',
-            Path.home() / 'Musik',
-        ]
+        config = get_config()
+        music_dirs = config.music_directories
+        # Fallback to defaults if none configured
+        if not music_dirs:
+            music_dirs = [
+                Path.home() / 'Music',
+                Path.home() / 'Musik',
+            ]
         
         # Scan directories incrementally
         tracks = []
@@ -130,9 +138,9 @@ class MusicLibrary:
                                     tracks.append(cached_metadata)
                                     folder_structure[rel_path].append(cached_metadata)
                         except Exception as e:
-                            print(f"Error processing {file_path}: {e}")
+                            logger.error("Error processing %s: %s", file_path, e, exc_info=True)
         except Exception as e:
-            print(f"Error scanning directory {directory}: {e}")
+            logger.error("Error scanning directory %s: %s", directory, e, exc_info=True)
         
         return tracks
     
@@ -176,7 +184,7 @@ class MusicLibrary:
                 if cached_data:
                     return TrackMetadata.from_dict(cached_data)
             except Exception as e:
-                print(f"Error loading cached metadata for {file_path}: {e}")
+                logger.error("Error loading cached metadata for %s: %s", file_path, e, exc_info=True)
         return None
     
     def _rebuild_index(self):
@@ -295,7 +303,7 @@ class MusicLibrary:
             temp_file.replace(self._index_file)
             
         except Exception as e:
-            print(f"Error saving library index: {e}")
+            logger.error("Error saving library index: %s", e, exc_info=True)
     
     def _load_index(self):
         """Load the library index from disk."""
@@ -335,7 +343,7 @@ class MusicLibrary:
                                 metadata = TrackMetadata.from_dict(metadata_dict)
                                 tracks.append(metadata)
                             except Exception as e:
-                                print(f"Error loading cached metadata for {file_path}: {e}")
+                                logger.error("Error loading cached metadata for %s: %s", file_path, e, exc_info=True)
                                 # Mark for rescan
                                 cache_entry['mtime'] = 0
                     else:
@@ -357,7 +365,7 @@ class MusicLibrary:
                 self._rebuild_index()
             
         except Exception as e:
-            print(f"Error loading library index: {e}")
+            logger.error("Error loading library index: %s", e, exc_info=True)
             # If loading fails, start with empty cache
             self._file_cache = {}
 

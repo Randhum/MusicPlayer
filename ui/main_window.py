@@ -24,6 +24,9 @@ from ui.components.player_controls import PlayerControls
 from ui.components.playlist_view import PlaylistView
 from ui.dock_manager import DockManager
 from ui.moc_sync import MocSyncHelper
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # Update intervals (milliseconds)
@@ -57,6 +60,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # MOC integration (Music On Console)
         self.moc_controller = MocController()
         self.use_moc = self.moc_controller.is_available()
+        
+        # MPRIS2 integration for desktop/media key support
+        self.mpris2 = MPRIS2Manager()
+        self._setup_mpris2()
         
         # Initialize dock manager
         self.dock_manager = DockManager(self)
@@ -425,6 +432,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle window close."""
         self.dock_manager.cleanup()
         self.player.cleanup()
+        # Cleanup MPRIS2
+        if hasattr(self, 'mpris2') and self.mpris2:
+            self.mpris2.cleanup()
         # Cleanup system volume monitoring
         if hasattr(self, 'system_volume'):
             self.system_volume.cleanup()
@@ -550,13 +560,13 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Validate track file exists
         if not track.file_path:
-            print("Error: Track has no file path")
+            logger.error("Track has no file path")
             return
         
         from pathlib import Path
         file_path = Path(track.file_path)
         if not file_path.exists() or not file_path.is_file():
-            print(f"Error: Track file does not exist: {track.file_path}")
+            logger.error("Track file does not exist: %s", track.file_path)
             return
         
         # Stop all currently playing tracks before starting a new one
@@ -568,6 +578,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Reset end-detection flag for new track
         if self.use_moc:
             self.moc_sync.reset_end_detection()
+        
+        # Add to recent files
+        if track.file_path:
+            self._add_to_recent_files(track.file_path)
         
         # Decide which player to use based on file type
         if self._should_use_moc(track):
@@ -594,6 +608,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.moc_sync.sync_playlist_to_moc(start_playback=False)
         
         self.metadata_panel.set_track(track)
+        
+        # Update MPRIS2 metadata
+        if self.mpris2:
+            self.mpris2.update_metadata(track)
     
     def _on_play(self):
         """Handle play button click - route to appropriate player."""
@@ -658,6 +676,13 @@ class MainWindow(Gtk.ApplicationWindow):
         if track:
             self._update_playlist_view()
             self._play_current_track()
+        
+        # Update MPRIS2
+        if self.mpris2:
+            tracks = self.playlist_manager.get_playlist()
+            current_index = self.playlist_manager.get_current_index()
+            self.mpris2.update_can_go_next(current_index < len(tracks) - 1)
+            self.mpris2.update_can_go_previous(current_index > 0)
     
     def _on_seek(self, controls, position: float):
         """Handle seek operation - route to appropriate player."""
@@ -704,6 +729,9 @@ class MainWindow(Gtk.ApplicationWindow):
         track = self.playlist_manager.get_current_track()
         if track and not self._should_use_moc(track):
             self.player_controls.set_playing(is_playing)
+            # Update MPRIS2
+            if self.mpris2:
+                self.mpris2.update_playback_status(is_playing, is_paused=False)
     
     def _on_player_position_changed(self, position: float, duration: float):
         """Handle player position change - only for internal player (video files)."""
@@ -866,28 +894,27 @@ class MainWindow(Gtk.ApplicationWindow):
                 break
         
         if not device:
-            print(f"Device not found: {device_path}")
+            logger.warning("Device not found: %s", device_path)
             return
         
         # If speaker mode is enabled, handle connection automatically
         if self.bt_sink and self.bt_sink.is_sink_enabled:
             if not device.paired:
                 # Attempt to pair with the device
-                print(f"Pairing with device: {device.name}")
+                logger.info("Pairing with device: %s", device.name)
                 self.bt_manager.pair_device(device_path)
             elif not device.connected:
                 # Attempt to connect to the paired device
-                print(f"Connecting to device: {device.name}")
+                logger.info("Connecting to device: %s", device.name)
                 self.bt_manager.connect_device(device_path)
             else:
                 # Device is already connected
-                print(f"Device {device.name} is already connected")
+                logger.info("Device %s is already connected", device.name)
         else:
             # Speaker mode not enabled - just show device info
-            print(f"Selected device: {device.name} ({device.address})")
-            print(f"  Paired: {device.paired}")
-            print(f"  Connected: {device.connected}")
-            print(f"  Note: Enable speaker mode to connect to devices")
+            logger.debug("Selected device: %s (%s)", device.name, device.address)
+            logger.debug("  Paired: %s, Connected: %s", device.paired, device.connected)
+            logger.info("Note: Enable speaker mode to connect to devices")
     
     def _on_add_track(self, browser, track: TrackMetadata):
         """Handle 'Add to Playlist' from library browser context menu."""

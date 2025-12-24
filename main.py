@@ -15,7 +15,11 @@ try:
 except ValueError:
     USE_ADW = False
 
+from core.config import get_config
+from core.logging import get_logger
 from ui.main_window import MainWindow
+
+logger = get_logger(__name__)
 
 
 class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
@@ -34,10 +38,33 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
         if not self.window:
             self.window = MainWindow(app)
         self.window.present()
+    
+    def _on_open(self, app, files, n_files, hint):
+        """Handle file open (drag-and-drop or command line)."""
+        if not self.window:
+            self.window = MainWindow(app)
+        
+        # Add files to playlist
+        for file_info in files:
+            file_path = file_info.get_path()
+            if file_path:
+                from core.metadata import TrackMetadata
+                track = TrackMetadata(file_path)
+                self.window.playlist_manager.add_track(track)
+        
+        self.window._update_playlist_view()
+        self.window.present()
 
 
 def main():
     """Main entry point."""
+    # Initialize config (creates directories, loads settings)
+    config = get_config()
+    
+    # Initialize logging (uses config for log directory)
+    from core.logging import LinuxLogger
+    LinuxLogger(log_dir=config.log_dir)
+    
     # Initialize GStreamer
     Gst.init(None)
     

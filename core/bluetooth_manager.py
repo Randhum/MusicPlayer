@@ -10,6 +10,9 @@ gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
 
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class BluetoothDevice:
@@ -93,7 +96,7 @@ class BluetoothManager:
                 adapter_obj = self.bus.get_object(self.BLUEZ_SERVICE, self.adapter_path)
                 self.adapter_proxy = dbus.Interface(adapter_obj, self.ADAPTER_INTERFACE)
         except Exception as e:
-            print(f"Error setting up Bluetooth adapter: {e}")
+            logger.error("Error setting up Bluetooth adapter: %s", e, exc_info=True)
     
     def _setup_agent(self):
         """Set up the Bluetooth Agent for handling pairing confirmations."""
@@ -114,14 +117,12 @@ class BluetoothManager:
             self.agent.on_authorization_request = self.agent_ui.show_authorization_request
             self.agent.on_pin_request = self.agent_ui.show_pin_request
             
-            print("Bluetooth pairing agent set up successfully")
+            logger.info("Bluetooth pairing agent set up successfully")
             if not self.adapter_path:
-                print("Note: Adapter path not yet available, agent registered with default path")
+                logger.warning("Adapter path not yet available, agent registered with default path")
         except Exception as e:
-            print(f"Error setting up Bluetooth agent: {e}")
-            import traceback
-            traceback.print_exc()
-            print("Pairing confirmations may not work properly")
+            logger.error("Error setting up Bluetooth agent: %s", e, exc_info=True)
+            logger.warning("Pairing confirmations may not work properly")
     
     def _handle_passkey_request(self, device_name: str) -> Optional[int]:
         """
@@ -214,7 +215,7 @@ class BluetoothManager:
             )
             self._signal_receivers.append(receiver)
         except Exception as e:
-            print(f"Error setting up Bluetooth signals: {e}")
+            logger.error("Error setting up Bluetooth signals: %s", e, exc_info=True)
     
     def _on_properties_changed(self, interface, changed, invalidated, path):
         """Handle property changes on devices."""
@@ -243,7 +244,7 @@ class BluetoothManager:
                                 # Use GLib.idle_add to avoid blocking the signal handler
                                 GLib.idle_add(self._auto_connect_after_pairing, device_path)
                             else:
-                                print(f"Device {device.name} paired but sink mode is disabled - not auto-connecting")
+                                logger.debug("Device %s paired but sink mode is disabled - not auto-connecting", device.name)
                 
                 # Update Connected state
                 if 'Connected' in changed:
@@ -254,7 +255,7 @@ class BluetoothManager:
                     # If device connected but sink mode is disabled, disconnect it
                     if new_connected and not old_connected:
                         if not self._is_sink_mode_enabled():
-                            print(f"Device {device.name} connected but sink mode is disabled - disconnecting")
+                            logger.info("Device %s connected but sink mode is disabled - disconnecting", device.name)
                             # Disconnect in the next event loop iteration to avoid blocking
                             GLib.idle_add(self._disconnect_if_sink_disabled, device_path)
                             return  # Don't process connection callbacks
@@ -339,7 +340,7 @@ class BluetoothManager:
                     if device.connected:
                         self.connected_device = device
         except Exception as e:
-            print(f"Error refreshing Bluetooth devices: {e}")
+            logger.error("Error refreshing Bluetooth devices: %s", e, exc_info=True)
     
     def is_powered(self) -> bool:
         """Check if Bluetooth adapter is powered."""
@@ -354,7 +355,7 @@ class BluetoothManager:
             powered = props.Get(self.ADAPTER_INTERFACE, 'Powered')
             return bool(powered)
         except Exception as e:
-            print(f"Error checking adapter power state: {e}")
+            logger.error("Error checking adapter power state: %s", e, exc_info=True)
             return False
     
     def set_powered(self, powered: bool) -> bool:
@@ -370,7 +371,7 @@ class BluetoothManager:
             props.Set(self.ADAPTER_INTERFACE, 'Powered', dbus.Boolean(powered))
             return True
         except Exception as e:
-            print(f"Error setting adapter power: {e}")
+            logger.error("Error setting adapter power: %s", e, exc_info=True)
             return False
     
     def start_discovery(self) -> bool:
@@ -384,10 +385,10 @@ class BluetoothManager:
         except dbus.exceptions.DBusException as e:
             # Already discovering is not an error
             if 'org.bluez.Error.InProgress' not in str(e):
-                print(f"Error starting discovery: {e}")
+                logger.warning("Error starting discovery: %s", e)
             return True
         except Exception as e:
-            print(f"Error starting discovery: {e}")
+            logger.error("Error starting discovery: %s", e, exc_info=True)
             return False
     
     def stop_discovery(self) -> bool:
@@ -399,7 +400,7 @@ class BluetoothManager:
             self.adapter_proxy.StopDiscovery()
             return True
         except Exception as e:
-            print(f"Error stopping discovery: {e}")
+            logger.error("Error stopping discovery: %s", e, exc_info=True)
             return False
     
     def get_devices(self) -> List[BluetoothDevice]:
@@ -432,19 +433,19 @@ class BluetoothManager:
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
             if 'org.bluez.Error.AlreadyExists' in error_name:
-                print(f"Device {device_path} is already paired")
+                logger.info("Device %s is already paired", device_path)
                 return True  # Already paired is not an error
             elif 'org.bluez.Error.AuthenticationCanceled' in error_name:
-                print(f"Pairing canceled by user")
+                logger.info("Pairing canceled by user")
             elif 'org.bluez.Error.AuthenticationFailed' in error_name:
-                print(f"Pairing failed: authentication error")
+                logger.warning("Pairing failed: authentication error")
             elif 'org.bluez.Error.AuthenticationTimeout' in error_name:
-                print(f"Pairing failed: timeout")
+                logger.warning("Pairing failed: timeout")
             else:
-                print(f"Error pairing device: {e}")
+                logger.error("Error pairing device: %s", e)
             return False
         except Exception as e:
-            print(f"Error pairing device: {e}")
+            logger.error("Error pairing device: %s", e, exc_info=True)
             return False
     
     def connect_device(self, device_path: str) -> bool:
@@ -462,15 +463,16 @@ class BluetoothManager:
         try:
             device = self.devices.get(device_path)
             device_name = device.name if device else "unknown"
-            print(f"Attempting to connect device: {device_name} ({device_path})")
-            print(f"  Paired: {device.paired if device else 'unknown'}")
-            print(f"  Trusted: {device.trusted if device else 'unknown'}")
-            print(f"  Currently connected: {device.connected if device else 'unknown'}")
+            logger.debug("Attempting to connect device: %s (%s)", device_name, device_path)
+            logger.debug("  Paired: %s, Trusted: %s, Connected: %s",
+                        device.paired if device else 'unknown',
+                        device.trusted if device else 'unknown',
+                        device.connected if device else 'unknown')
             
             # Check if sink mode is enabled (soft-switch behavior)
             if not self._is_sink_mode_enabled():
-                print(f"Connection rejected: Sink mode is disabled")
-                print(f"  Enable speaker mode first to allow device connections")
+                logger.warning("Connection rejected: Sink mode is disabled")
+                logger.info("Enable speaker mode first to allow device connections")
                 return False
             
             device_proxy = dbus.Interface(
@@ -478,36 +480,34 @@ class BluetoothManager:
                 self.DEVICE_INTERFACE
             )
             device_proxy.Connect()
-            print(f"Connect() call succeeded for {device_name}")
-            print("Note: Connection may take a few seconds to establish...")
+            logger.info("Connect() call succeeded for %s", device_name)
+            logger.debug("Connection may take a few seconds to establish...")
             return True
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
             error_msg = str(e)
-            print(f"DBus error connecting device: {error_name}")
-            print(f"  Error message: {error_msg}")
+            logger.error("DBus error connecting device: %s", error_name)
+            logger.debug("  Error message: %s", error_msg)
             
             if 'org.bluez.Error.AlreadyConnected' in error_name:
-                print(f"Device {device_path} is already connected")
+                logger.info("Device %s is already connected", device_path)
                 return True  # Already connected is not an error
             elif 'org.bluez.Error.Failed' in error_name:
-                print(f"Connection failed: {e}")
-                print("  This might mean:")
-                print("  - Device is not in range")
-                print("  - Device rejected the connection")
-                print("  - A2DP profile is not available")
+                logger.warning("Connection failed: %s", e)
+                logger.info("  This might mean:")
+                logger.info("  - Device is not in range")
+                logger.info("  - Device rejected the connection")
+                logger.info("  - A2DP profile is not available")
             elif 'org.bluez.Error.NotReady' in error_name:
-                print(f"Bluetooth adapter not ready")
+                logger.warning("Bluetooth adapter not ready")
             elif 'org.bluez.Error.InProgress' in error_name:
-                print(f"Connection already in progress")
+                logger.info("Connection already in progress")
                 return True  # In progress is okay
             else:
-                print(f"Unknown error connecting device: {e}")
+                logger.error("Unknown error connecting device: %s", e)
             return False
         except Exception as e:
-            print(f"Exception connecting device: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("Exception connecting device: %s", e)
             return False
     
     def disconnect_device(self, device_path: str) -> bool:
@@ -528,15 +528,15 @@ class BluetoothManager:
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
             if 'org.bluez.Error.NotConnected' in error_name:
-                print(f"Device {device_path} is not connected")
+                logger.info("Device %s is not connected", device_path)
                 return True  # Not connected is not an error for disconnect
             elif 'org.bluez.Error.Failed' in error_name:
-                print(f"Disconnection failed: {e}")
+                logger.warning("Disconnection failed: %s", e)
             else:
-                print(f"Error disconnecting device: {e}")
+                logger.error("Error disconnecting device: %s", e)
             return False
         except Exception as e:
-            print(f"Error disconnecting device: {e}")
+            logger.error("Error disconnecting device: %s", e, exc_info=True)
             return False
     
     def remove_device(self, device_path: str) -> bool:
@@ -550,12 +550,12 @@ class BluetoothManager:
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
             if 'org.bluez.Error.DoesNotExist' in error_name:
-                print(f"Device {device_path} does not exist")
+                logger.info("Device %s does not exist", device_path)
             else:
-                print(f"Error removing device: {e}")
+                logger.error("Error removing device: %s", e)
             return False
         except Exception as e:
-            print(f"Error removing device: {e}")
+            logger.error("Error removing device: %s", e, exc_info=True)
             return False
     
     def _trust_device(self, device_path: str) -> bool:
@@ -569,15 +569,15 @@ class BluetoothManager:
             device_obj = self.bus.get_object(self.BLUEZ_SERVICE, device_path)
             props = dbus.Interface(device_obj, self.PROPERTIES_INTERFACE)
             props.Set(self.DEVICE_INTERFACE, 'Trusted', dbus.Boolean(True))
-            print(f"Device {device_path} marked as trusted")
+            logger.info("Device %s marked as trusted", device_path)
             return True
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
             if 'org.bluez.Error.DoesNotExist' not in error_name:
-                print(f"Error trusting device: {e}")
+                logger.error("Error trusting device: %s", e)
             return False
         except Exception as e:
-            print(f"Error trusting device: {e}")
+            logger.error("Error trusting device: %s", e, exc_info=True)
             return False
     
     def _auto_connect_after_pairing(self, device_path: str) -> bool:
@@ -593,11 +593,11 @@ class BluetoothManager:
         try:
             device = self.devices.get(device_path)
             if device and device.paired and not device.connected:
-                print(f"Auto-connecting device {device.name} ({device.address}) after pairing...")
+                logger.info("Auto-connecting device %s (%s) after pairing...", device.name, device.address)
                 # Small delay to ensure trust is set and device is ready
                 GLib.timeout_add(500, lambda: self._do_auto_connect(device_path))
         except Exception as e:
-            print(f"Error scheduling auto-connect after pairing: {e}")
+            logger.error("Error scheduling auto-connect after pairing: %s", e, exc_info=True)
         return False  # Remove from idle queue
     
     def _do_auto_connect(self, device_path: str) -> bool:
@@ -607,18 +607,18 @@ class BluetoothManager:
             if device and device.paired and not device.connected:
                 # Double-check sink mode is still enabled before connecting
                 if not self._is_sink_mode_enabled():
-                    print(f"Sink mode disabled - not connecting {device.name}")
+                    logger.debug("Sink mode disabled - not connecting %s", device.name)
                     return False
                 
-                print(f"Connecting device {device.name}...")
+                logger.info("Connecting device %s...", device.name)
                 success = self.connect_device(device_path)
                 if success:
-                    print(f"Successfully connected {device.name}")
+                    logger.info("Successfully connected %s", device.name)
                 else:
-                    print(f"Failed to connect {device.name} - it may connect automatically later")
+                    logger.warning("Failed to connect %s - it may connect automatically later", device.name)
             return False  # Remove from timeout
         except Exception as e:
-            print(f"Error in auto-connect: {e}")
+            logger.error("Error in auto-connect: %s", e, exc_info=True)
             return False
     
     def register_sink_mode_checker(self, checker: Callable[[], bool]):
@@ -643,7 +643,7 @@ class BluetoothManager:
             try:
                 return self._sink_mode_checker()
             except Exception as e:
-                print(f"Error checking sink mode: {e}")
+                logger.error("Error checking sink mode: %s", e, exc_info=True)
                 return False
         return False
     
@@ -653,11 +653,11 @@ class BluetoothManager:
             if not self._is_sink_mode_enabled():
                 device = self.devices.get(device_path)
                 if device and device.connected:
-                    print(f"Disconnecting {device.name} - sink mode is disabled")
+                    logger.info("Disconnecting %s - sink mode is disabled", device.name)
                     self.disconnect_device(device_path)
             return False  # Remove from idle queue
         except Exception as e:
-            print(f"Error disconnecting device: {e}")
+            logger.error("Error disconnecting device: %s", e, exc_info=True)
             return False
     
     def cleanup(self):
@@ -686,7 +686,7 @@ class BluetoothManager:
             # Stop discovery if active
             self.stop_discovery()
             
-            print("Bluetooth manager cleaned up")
+            logger.info("Bluetooth manager cleaned up")
         except Exception as e:
-            print(f"Error during Bluetooth cleanup: {e}")
+            logger.error("Error during Bluetooth cleanup: %s", e, exc_info=True)
 
