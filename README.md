@@ -408,6 +408,24 @@ emerge -av media-plugins/gst-plugins-flac      # FLAC audio
 emerge -av media-plugins/gst-plugins-openh264  # H.264 video
 ```
 
+### "MOC error: No files added - no sound files on command line!"
+
+This error occurs when trying to play a track that has an invalid or missing file path. The app now validates file paths before sending them to MOC, but if you see this error:
+
+```bash
+# Check if the track file exists
+ls -l /path/to/your/track.mp3
+
+# If files were moved, reload the playlist
+# The app will automatically skip invalid tracks when syncing to MOC
+```
+
+**What was fixed:**
+- File path validation before adding tracks to MOC playlist
+- Validation before attempting playback
+- Better error messages to identify problematic tracks
+- Tracks with missing files are automatically skipped when syncing to MOC
+
 ### "Panel layout is messed up!"
 
 ```bash
