@@ -13,9 +13,10 @@ from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.oggvorbis import OggVorbis
 
+from core.config import get_config
+from core.logging import get_logger
 
-# Album art cache directory
-ALBUM_ART_CACHE_DIR = Path.home() / '.cache' / 'musicplayer' / 'art'
+logger = get_logger(__name__)
 
 
 class TrackMetadata:
@@ -128,7 +129,7 @@ class TrackMetadata:
             self.album_art_path = self._extract_album_art(audio_file)
             
         except Exception as e:
-            print(f"Error extracting metadata from {self.file_path}: {e}")
+            logger.error("Error extracting metadata from %s: %s", self.file_path, e, exc_info=True)
         finally:
             # Always ensure we at least have a sensible title, even if Mutagen
             # failed to parse tags for this file.
@@ -289,16 +290,16 @@ class TrackMetadata:
                 except (KeyError, AttributeError, TypeError):
                     continue
         except Exception as e:
-            print(f"Error extracting album art: {e}")
+            logger.error("Error extracting album art: %s", e, exc_info=True)
         
         return None
     
     def _save_album_art(self, art_data: bytes) -> Optional[str]:
         """Save album art to a temporary file."""
         try:
-            # Create cache directory
-            cache_dir = ALBUM_ART_CACHE_DIR
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Get cache directory from config
+            config = get_config()
+            cache_dir = config.album_art_cache_dir
             
             # Generate filename from track path hash
             import hashlib
@@ -312,7 +313,7 @@ class TrackMetadata:
             
             return str(art_path)
         except Exception as e:
-            print(f"Error saving album art: {e}")
+            logger.error("Error saving album art: %s", e, exc_info=True)
             return None
     
     def to_dict(self) -> Dict[str, Any]:

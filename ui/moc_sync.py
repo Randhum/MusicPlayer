@@ -12,7 +12,8 @@ gi.require_version('GLib', '2.0')
 from gi.repository import GLib
 
 from core.metadata import TrackMetadata
-from core.moc_controller import MocController, MOC_PLAYLIST_PATH
+from core.config import get_config
+from core.moc_controller import MocController
 
 
 class MocSyncHelper:
@@ -65,9 +66,11 @@ class MocSyncHelper:
         self.on_shuffle_changed: Optional[Callable[[bool], None]] = None
         
         # Initialize playlist mtime if file exists
-        if self.use_moc and MOC_PLAYLIST_PATH.exists():
+        config = get_config()
+        moc_playlist_path = config.moc_playlist_path
+        if self.use_moc and moc_playlist_path.exists():
             try:
-                self.playlist_mtime = MOC_PLAYLIST_PATH.stat().st_mtime
+                self.playlist_mtime = moc_playlist_path.stat().st_mtime
             except OSError:
                 self.playlist_mtime = 0.0
     
@@ -277,7 +280,9 @@ class MocSyncHelper:
         
         # Detect external playlist changes (e.g. from MOC UI) by watching the M3U file
         try:
-            mtime = MOC_PLAYLIST_PATH.stat().st_mtime
+            config = get_config()
+            moc_playlist_path = config.moc_playlist_path
+            mtime = moc_playlist_path.stat().st_mtime
         except OSError:
             mtime = self.playlist_mtime
         

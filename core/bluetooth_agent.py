@@ -9,6 +9,10 @@ import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib
 
+from core.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class BluetoothAgent(dbus.service.Object):
     """
@@ -67,15 +71,13 @@ class BluetoothAgent(dbus.service.Object):
             # This is the most comprehensive capability for modern pairing
             agent_manager.RegisterAgent(self.AGENT_PATH, "KeyboardDisplay")
             agent_manager.RequestDefaultAgent(self.AGENT_PATH)
-            print("Bluetooth Agent registered successfully with KeyboardDisplay capability")
+            logger.info("Bluetooth Agent registered successfully with KeyboardDisplay capability")
         except dbus.exceptions.DBusException as e:
-            print(f"Error registering Bluetooth Agent: {e}")
+            logger.error("Error registering Bluetooth Agent: %s", e)
             # Re-raise BlueZ-specific exceptions
             raise
         except Exception as e:
-            print(f"Error registering Bluetooth Agent: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error registering Bluetooth Agent: %s", e, exc_info=True)
     
     def unregister_agent(self):
         """Unregister this agent from BlueZ."""
@@ -85,17 +87,17 @@ class BluetoothAgent(dbus.service.Object):
                 self.AGENT_MANAGER_INTERFACE
             )
             agent_manager.UnregisterAgent(self.AGENT_PATH)
-            print("Bluetooth Agent unregistered successfully")
+            logger.info("Bluetooth Agent unregistered successfully")
         except dbus.exceptions.DBusException as e:
             # Agent might already be unregistered, which is fine
             if 'org.bluez.Error.DoesNotExist' not in str(e):
-                print(f"Error unregistering Bluetooth Agent: {e}")
+                logger.error("Error unregistering Bluetooth Agent: %s", e)
         except Exception as e:
-            print(f"Error unregistering Bluetooth Agent: {e}")
+            logger.error("Error unregistering Bluetooth Agent: %s", e, exc_info=True)
     
     def release(self):
         """Called when the agent is released."""
-        print("Bluetooth Agent released")
+        logger.debug("Bluetooth Agent released")
     
     @dbus.service.method(AGENT_INTERFACE, in_signature='', out_signature='')
     def Release(self):
@@ -120,7 +122,7 @@ class BluetoothAgent(dbus.service.Object):
             PIN code string (4-16 digits)
         """
         device_name = self._get_device_name(device_path)
-        print(f"PIN code requested for device: {device_name} ({device_path})")
+        logger.info("PIN code requested for device: %s (%s)", device_name, device_path)
         
         if self.on_pin_request:
             try:
@@ -139,17 +141,15 @@ class BluetoothAgent(dbus.service.Object):
                             'PIN code must be 4-16 digits'
                         )
                     self.pin_code = pin_str
-                    print(f"Returning PIN code for {device_name}")
+                    logger.debug("Returning PIN code for %s", device_name)
                     return pin_str
                 else:
-                    print(f"No PIN code provided for {device_name}")
+                    logger.warning("No PIN code provided for %s", device_name)
             except dbus.exceptions.DBusException:
                 # Re-raise D-Bus exceptions
                 raise
             except Exception as e:
-                print(f"Error in PIN request callback: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error in PIN request callback: %s", e, exc_info=True)
         
         # Default: raise exception to cancel pairing
         raise dbus.exceptions.DBusException(
@@ -175,7 +175,7 @@ class BluetoothAgent(dbus.service.Object):
             6-digit passkey as uint32 (0-999999)
         """
         device_name = self._get_device_name(device_path)
-        print(f"Passkey requested for device: {device_name} ({device_path})")
+        logger.info("Passkey requested for device: %s (%s)", device_name, device_path)
         
         if self.on_passkey_request:
             try:
@@ -202,17 +202,15 @@ class BluetoothAgent(dbus.service.Object):
                         )
                     
                     self.passkey = passkey
-                    print(f"Returning passkey {passkey:06d} for {device_name}")
+                    logger.debug("Returning passkey %06d for %s", passkey, device_name)
                     return dbus.UInt32(passkey)
                 else:
-                    print(f"No passkey provided for {device_name}")
+                    logger.warning("No passkey provided for %s", device_name)
             except dbus.exceptions.DBusException:
                 # Re-raise D-Bus exceptions
                 raise
             except Exception as e:
-                print(f"Error in passkey request callback: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error in passkey request callback: %s", e, exc_info=True)
         
         # Default: raise exception to cancel pairing
         raise dbus.exceptions.DBusException(
@@ -241,13 +239,13 @@ class BluetoothAgent(dbus.service.Object):
         entered_int = int(entered) if isinstance(entered, (dbus.UInt16, dbus.Int16)) else int(entered)
         
         device_name = self._get_device_name(device_path)
-        print(f"Display passkey for {device_name}: {passkey_int:06d} (entered: {entered_int}/6)")
+        logger.info("Display passkey for %s: %06d (entered: %d/6)", device_name, passkey_int, entered_int)
         
         if self.on_passkey_display:
             try:
                 self.on_passkey_display(device_name, passkey_int)
             except Exception as e:
-                print(f"Error in passkey display callback: {e}")
+                logger.error("Error in passkey display callback: %s", e, exc_info=True)
                 # Don't raise - this is informational only
     
     @dbus.service.method(AGENT_INTERFACE, in_signature='ou', out_signature='')
@@ -269,18 +267,18 @@ class BluetoothAgent(dbus.service.Object):
         passkey_int = int(passkey) if isinstance(passkey, (dbus.UInt32, dbus.Int32)) else int(passkey)
         
         device_name = self._get_device_name(device_path)
-        print(f"Passkey confirmation requested for {device_name}: {passkey_int:06d}")
+        logger.info("Passkey confirmation requested for %s: %06d", device_name, passkey_int)
         
         # Use passkey confirmation callback if available
         if self.on_passkey_confirm:
             try:
                 confirmed = self.on_passkey_confirm(device_name, passkey_int)
                 if confirmed:
-                    print(f"Passkey {passkey_int:06d} confirmed for {device_name}")
+                    logger.info("Passkey %06d confirmed for %s", passkey_int, device_name)
                     return  # Success - return normally
                 else:
                     # User rejected - raise exception immediately
-                    print(f"Passkey {passkey_int:06d} rejected by user for {device_name}")
+                    logger.info("Passkey %06d rejected by user for %s", passkey_int, device_name)
                     raise dbus.exceptions.DBusException(
                         'org.bluez.Error.Rejected',
                         'Passkey confirmation rejected by user'
@@ -289,9 +287,7 @@ class BluetoothAgent(dbus.service.Object):
                 # Re-raise D-Bus exceptions (including our rejection)
                 raise
             except Exception as e:
-                print(f"Error in passkey confirmation callback: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error in passkey confirmation callback: %s", e, exc_info=True)
                 # On error, reject the pairing
                 raise dbus.exceptions.DBusException(
                     'org.bluez.Error.Rejected',
@@ -307,7 +303,7 @@ class BluetoothAgent(dbus.service.Object):
                     return  # Success - return normally
                 else:
                     # User rejected - raise exception immediately
-                    print(f"Passkey {passkey_int:06d} rejected by user for {device_name}")
+                    logger.info("Passkey %06d rejected by user for %s", passkey_int, device_name)
                     raise dbus.exceptions.DBusException(
                         'org.bluez.Error.Rejected',
                         'Passkey confirmation rejected by user'
@@ -316,9 +312,7 @@ class BluetoothAgent(dbus.service.Object):
                 # Re-raise D-Bus exceptions (including our rejection)
                 raise
             except Exception as e:
-                print(f"Error in authorization callback: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error in authorization callback: %s", e, exc_info=True)
                 # On error, reject the pairing
                 raise dbus.exceptions.DBusException(
                     'org.bluez.Error.Rejected',
@@ -326,7 +320,7 @@ class BluetoothAgent(dbus.service.Object):
                 )
         
         # Default: reject (raise exception) - no callback available
-        print(f"Passkey {passkey_int:06d} rejected: no confirmation callback available")
+        logger.warning("Passkey %06d rejected: no confirmation callback available", passkey_int)
         raise dbus.exceptions.DBusException(
             'org.bluez.Error.Rejected',
             'Passkey confirmation rejected: no callback available'
@@ -346,7 +340,7 @@ class BluetoothAgent(dbus.service.Object):
             device_path: D-Bus path of the device (object path)
         """
         device_name = self._get_device_name(device_path)
-        print(f"Authorization requested for device: {device_name} ({device_path})")
+        logger.info("Authorization requested for device: %s (%s)", device_name, device_path)
         
         if self.on_authorization_request:
             try:
@@ -357,9 +351,7 @@ class BluetoothAgent(dbus.service.Object):
                 # Re-raise D-Bus exceptions
                 raise
             except Exception as e:
-                print(f"Error in authorization callback: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error in authorization callback: %s", e, exc_info=True)
         
         # Default: reject
         raise dbus.exceptions.DBusException(
@@ -370,7 +362,7 @@ class BluetoothAgent(dbus.service.Object):
     @dbus.service.method(AGENT_INTERFACE, in_signature='', out_signature='')
     def Cancel(self):
         """Cancel the current pairing request."""
-        print("Pairing request cancelled")
+        logger.info("Pairing request cancelled")
     
     def _get_device_name(self, device_path: str) -> str:
         """Get device name from D-Bus path."""
@@ -508,7 +500,7 @@ class BluetoothAgentUI:
         def on_response(dialog, response_id):
             # Only process if we haven't already received a response
             if response_received['value'] is None:
-                print(f"Dialog response received: {response_id}")
+                logger.debug("Dialog response received: %s", response_id)
                 response_received['value'] = response_id
                 # Quit the main loop - dialog will be destroyed after
                 main_loop.quit()
@@ -517,7 +509,7 @@ class BluetoothAgentUI:
             # Handle window close (X button) - treat as rejection
             # Only handle if we haven't received a response yet
             if response_received['value'] is None:
-                print("Dialog closed by user (X button), treating as rejection")
+                logger.debug("Dialog closed by user (X button), treating as rejection")
                 response_received['value'] = Gtk.ResponseType.NO
                 main_loop.quit()
             # Always allow close - we've handled it
@@ -535,7 +527,7 @@ class BluetoothAgentUI:
         while GLib.MainContext.default().pending():
             GLib.MainContext.default().iteration(False)
         
-        print("Waiting for user response...")
+        logger.debug("Waiting for user response...")
         # Run main loop until response is received
         # This will process GTK events in the default context
         main_loop.run()
@@ -553,10 +545,10 @@ class BluetoothAgentUI:
             result = False
         else:
             # Any other response (shouldn't happen, but be safe)
-            print(f"Warning: Unexpected dialog response: {response}, treating as rejection")
+            logger.warning("Unexpected dialog response: %s, treating as rejection", response)
             result = False
         
-        print(f"Final result: response={response}, confirmed={result}")
+        logger.debug("Final result: response=%s, confirmed=%s", response, result)
         return result
     
     def show_pin_request(self, device_name: str) -> Optional[str]:

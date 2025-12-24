@@ -15,11 +15,11 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from core.config import get_config
+from core.logging import get_logger
 from core.metadata import TrackMetadata
 
-
-# MOC playlist file path
-MOC_PLAYLIST_PATH = Path.home() / ".moc" / "playlist.m3u"
+logger = get_logger(__name__)
 
 
 class MocController:
@@ -27,7 +27,9 @@ class MocController:
 
     def __init__(self):
         self._mocp_path: Optional[str] = shutil.which("mocp")
-        self._playlist_path: Path = MOC_PLAYLIST_PATH
+        # Get playlist path from config
+        config = get_config()
+        self._playlist_path: Path = config.moc_playlist_path
         # Track whether we've already attempted to start the server to avoid
         # spamming `mocp --server` on every status poll.
         self._server_initialized: bool = False
@@ -141,7 +143,7 @@ class MocController:
                         current_index = idx
                         break
         except Exception as e:
-            print(f"Error reading MOC playlist: {e}")
+            logger.error("Error reading MOC playlist: %s", e, exc_info=True)
 
         return tracks, current_index
 
@@ -404,7 +406,7 @@ class MocController:
             # Validate that file exists
             file_path = Path(track.file_path)
             if not file_path.exists() or not file_path.is_file():
-                print(f"Warning: Track file does not exist: {track.file_path}")
+                logger.warning("Track file does not exist: %s", track.file_path)
                 continue
             # Use absolute path for MOC
             abs_path = str(file_path.resolve())
@@ -414,9 +416,9 @@ class MocController:
                 successfully_added[idx] = moc_playlist_index
                 moc_playlist_index += 1
             else:
-                print(f"Warning: Failed to add track to MOC playlist: {abs_path}")
+                logger.warning("Failed to add track to MOC playlist: %s", abs_path)
                 if result.stderr:
-                    print(f"MOC error: {result.stderr}")
+                    logger.debug("MOC error: %s", result.stderr)
 
         # Optionally start playback from the selected track
         if start_playback and 0 <= current_index < len(tracks):
@@ -439,21 +441,21 @@ class MocController:
         if not self.is_available():
             return
         if not file_path:
-            print("Error: Cannot play file - file path is empty")
+            logger.error("Cannot play file - file path is empty")
             return
         
         # Validate file exists
         path = Path(file_path)
         if not path.exists() or not path.is_file():
-            print(f"Error: Cannot play file - file does not exist: {file_path}")
+            logger.error("Cannot play file - file does not exist: %s", file_path)
             return
         
         self.ensure_server()
         abs_path = str(path.resolve())
         result = self._run("--playit", abs_path, capture_output=True)
         if result.returncode != 0:
-            print(f"Error: Failed to play file: {abs_path}")
+            logger.error("Failed to play file: %s", abs_path)
             if result.stderr:
-                print(f"MOC error: {result.stderr}")
+                logger.debug("MOC error: %s", result.stderr)
 
 

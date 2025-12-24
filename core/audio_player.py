@@ -17,7 +17,10 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
+from core.logging import get_logger
 from core.metadata import TrackMetadata
+
+logger = get_logger(__name__)
 
 
 # Video container extensions - these get video+audio playback
@@ -101,10 +104,10 @@ class AudioPlayer:
         
         if msg_type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print(f"Playback error: {err.message}")
+            logger.error("Playback error: %s", err.message)
             if debug:
-                print(f"Debug: {debug}")
-            self._print_codec_help(err.message, debug or "")
+                logger.debug("GStreamer debug: %s", debug)
+            self._log_codec_help(err.message, debug or "")
             self._stop()
             
         elif msg_type == Gst.MessageType.EOS:
@@ -139,16 +142,16 @@ class AudioPlayer:
         
         return True
     
-    def _print_codec_help(self, error: str, debug: str):
-        """Print helpful messages for missing codecs."""
+    def _log_codec_help(self, error: str, debug: str):
+        """Log helpful messages for missing codecs."""
         combined = (error + debug).lower()
         
         if 'flac' in combined:
-            print("Missing FLAC support: emerge -av media-plugins/gst-plugins-flac")
+            logger.warning("Missing FLAC support: emerge -av media-plugins/gst-plugins-flac")
         elif 'h264' in combined or 'avc' in combined:
-            print("Missing H.264 support: emerge -av media-plugins/gst-plugins-openh264")
+            logger.warning("Missing H.264 support: emerge -av media-plugins/gst-plugins-openh264")
         elif 'missing' in combined or 'decoder' in combined:
-            print("Missing codec: emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad")
+            logger.warning("Missing codec: emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad")
     
     def _update_duration(self) -> bool:
         """Update track duration."""
@@ -175,7 +178,7 @@ class AudioPlayer:
             return False
         
         if not os.path.exists(track.file_path):
-            print(f"File not found: {track.file_path}")
+            logger.error("File not found: %s", track.file_path)
             return False
         
         # Stop current playback
@@ -207,7 +210,7 @@ class AudioPlayer:
         # Prepare playback
         ret = self.playbin.set_state(Gst.State.PAUSED)
         if ret == Gst.StateChangeReturn.FAILURE:
-            print("Failed to load track")
+            logger.error("Failed to load track: %s", track.file_path)
             return False
         
         if self.on_track_loaded:
@@ -222,7 +225,7 @@ class AudioPlayer:
         
         ret = self.playbin.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
-            print("Failed to start playback")
+            logger.error("Failed to start playback")
             return False
         
         # Remove any existing position timeout before adding a new one
@@ -269,7 +272,7 @@ class AudioPlayer:
             if success:
                 self.position = position
             else:
-                print(f"Seek failed for position {position:.2f}s")
+                logger.warning("Seek failed for position %.2fs", position)
     
     def set_volume(self, volume: float):
         """

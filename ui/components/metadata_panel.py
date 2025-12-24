@@ -5,6 +5,9 @@ gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
 
 from core.metadata import TrackMetadata
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MetadataPanel(Gtk.Box):
@@ -73,7 +76,7 @@ class MetadataPanel(Gtk.Box):
             try:
                 self.art_image.set_filename(track.album_art_path)
             except Exception as e:
-                print(f"Error loading album art: {e}")
+                logger.error("Error loading album art: %s", e, exc_info=True)
                 self.art_image.set_filename(None)
         else:
             self.art_image.set_filename(None)

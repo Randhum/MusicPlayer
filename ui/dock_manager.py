@@ -9,13 +9,15 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
 
+from core.config import get_config
+from core.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 # Default detached window size
 DEFAULT_DETACHED_WIDTH = 400
 DEFAULT_DETACHED_HEIGHT = 500
-
-# Layout config file path
-LAYOUT_CONFIG_PATH = os.path.expanduser("~/.config/musicplayer/layout.json")
 
 
 class DockablePanel(Gtk.Box):
@@ -146,10 +148,9 @@ class DockManager:
         self.main_window = main_window
         self.panels: Dict[str, DockablePanel] = {}
         self.layout_config: Dict = {}
-        self.config_path = LAYOUT_CONFIG_PATH
-        
-        # Ensure config directory exists
-        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        # Get layout file from config
+        config = get_config()
+        self.config_path = str(config.layout_file)
     
     def create_panel(self, panel_id: str, title: str, content: Gtk.Widget, 
                      icon_name: str = "view-list-symbolic") -> DockablePanel:
@@ -249,7 +250,7 @@ class DockManager:
             with open(self.config_path, 'w') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
-            print(f"Failed to save layout: {e}")
+            logger.error("Failed to save layout: %s", e, exc_info=True)
     
     def load_layout(self):
         """Load layout configuration."""
@@ -273,7 +274,7 @@ class DockManager:
                                     pos.get("height", DEFAULT_DETACHED_HEIGHT)
                                 )
         except Exception as e:
-            print(f"Failed to load layout: {e}")
+            logger.error("Failed to load layout: %s", e, exc_info=True)
     
     def cleanup(self):
         """Clean up all panels and save layout."""

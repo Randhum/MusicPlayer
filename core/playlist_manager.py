@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from core.metadata import TrackMetadata
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class PlaylistManager:
@@ -102,7 +105,7 @@ class PlaylistManager:
             
             return True
         except Exception as e:
-            print(f"Error saving playlist: {e}")
+            logger.error("Error saving playlist: %s", e, exc_info=True)
             return False
     
     def load_playlist(self, name: str) -> bool:
@@ -124,7 +127,7 @@ class PlaylistManager:
             
             return True
         except Exception as e:
-            print(f"Error loading playlist: {e}")
+            logger.error("Error loading playlist: %s", e, exc_info=True)
             return False
     
     def list_playlists(self) -> List[str]:
@@ -143,7 +146,7 @@ class PlaylistManager:
                 return True
             return False
         except Exception as e:
-            print(f"Error deleting playlist: {e}")
+            logger.error("Error deleting playlist: %s", e, exc_info=True)
             return False
     
     def get_playlist(self) -> List[TrackMetadata]:
