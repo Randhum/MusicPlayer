@@ -556,12 +556,8 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_player_state_changed(self, is_playing: bool):
         """Handle player state change."""
-        # Only update UI if internal player is controlling (not MOC independently)
-        if not self._moc_playing_independently:
-            self.player_controls.set_playing(is_playing)
-        # Track internal player state
-        if not is_playing:
-            self._internal_player_track = None
+        # Always update UI since internal player is the master
+        self.player_controls.set_playing(is_playing)
     
     def _on_player_position_changed(self, position: float, duration: float):
         """Handle player position change."""
@@ -665,8 +661,8 @@ class MainWindow(Gtk.ApplicationWindow):
             mtime = self._moc_playlist_mtime
         if mtime != self._moc_playlist_mtime:
             self._moc_playlist_mtime = mtime
-            # Only reload if MOC is playing independently
-            if self._moc_playing_independently:
+            # Only reload if MOC sync is disabled (MOC is playing independently)
+            if not self._moc_sync_enabled:
                 self._load_moc_playlist_from_moc()
         
         return True
