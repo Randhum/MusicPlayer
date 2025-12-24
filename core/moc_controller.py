@@ -144,8 +144,31 @@ class MocController:
             except ValueError:
                 return 0.0
 
+        # MOC outputs position and duration in seconds
+        # Try both "CurrentSec" and "CurrentTime" (in case format varies)
         position = _parse_float(info.get("CurrentSec"))
+        if position == 0.0:
+            # Fallback: try parsing from "CurrentTime" format (MM:SS)
+            current_time_str = info.get("CurrentTime", "")
+            if current_time_str and ":" in current_time_str:
+                try:
+                    parts = current_time_str.split(":")
+                    if len(parts) == 2:
+                        position = float(parts[0]) * 60 + float(parts[1])
+                except (ValueError, IndexError):
+                    pass
+        
         duration = _parse_float(info.get("TotalSec"))
+        if duration == 0.0:
+            # Fallback: try parsing from "TotalTime" format (MM:SS)
+            total_time_str = info.get("TotalTime", "")
+            if total_time_str and ":" in total_time_str:
+                try:
+                    parts = total_time_str.split(":")
+                    if len(parts) == 2:
+                        duration = float(parts[0]) * 60 + float(parts[1])
+                except (ValueError, IndexError):
+                    pass
 
         # Volume comes as e.g. "75%"
         vol_str = info.get("Volume", "").strip()
@@ -158,12 +181,18 @@ class MocController:
         except ValueError:
             pass
 
+        # Parse shuffle and autonext state from info
+        shuffle = info.get("Shuffle", "").strip().upper() == "ON"
+        autonext = info.get("Autonext", "").strip().upper() == "ON"
+
         return {
             "state": state,  # PLAY, PAUSE, STOP
             "file_path": file_path,
             "position": position,
             "duration": duration,
             "volume": volume,
+            "shuffle": shuffle,
+            "autonext": autonext,
         }
 
     # ------------------------------------------------------------------
@@ -234,6 +263,48 @@ class MocController:
             return
         self.ensure_server()
         self._run("--seek", str(seconds))
+
+    def enable_autonext(self):
+        """Enable autonext (autoplay) in MOC."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--on=autonext")
+
+    def disable_autonext(self):
+        """Disable autonext (autoplay) in MOC."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--off=autonext")
+
+    def enable_shuffle(self):
+        """Enable shuffle mode in MOC."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--on=shuffle")
+
+    def disable_shuffle(self):
+        """Disable shuffle mode in MOC."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--off=shuffle")
+
+    def get_shuffle_state(self) -> Optional[bool]:
+        """Get current shuffle state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("shuffle", False)
+        return None
+
+    def get_autonext_state(self) -> Optional[bool]:
+        """Get current autonext state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("autonext", False)
+        return None
 
     # ------------------------------------------------------------------
     # Playlist write helpers

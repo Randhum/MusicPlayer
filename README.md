@@ -179,6 +179,8 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
   - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood.
   - The **volume slider** controls MOC's volume.
   - The **current track / time** display follows whatever MOC is playing.
+  - **Autoplay (autonext)** is automatically enabled when the app starts, ensuring tracks automatically advance to the next song.
+  - **Shuffle** toggle is fully synchronized with MOC - when you toggle shuffle in the UI, it also toggles MOC's shuffle mode, and vice versa (changes made in MOC's UI are reflected in the GTK app).
 - The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
 
 #### File type handling with MOC vs internal player
