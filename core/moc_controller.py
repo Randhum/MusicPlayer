@@ -67,14 +67,12 @@ class MocController:
                 timeout=5.0,  # 5 second timeout to prevent hanging
             )
             
-            # Check for server not running errors and handle gracefully
+            # Check for server connection errors and handle gracefully
             if result.returncode != 0 and result.stderr:
                 stderr_lower = result.stderr.lower()
-                if "server is not running" in stderr_lower or "can't receive value" in stderr_lower:
-                    # Server not ready - reset initialization flag so we can try again
+                if "server is not running" in stderr_lower or "can't receive value" in stderr_lower or "can't connect" in stderr_lower:
                     self._server_initialized = False
-                    # Don't print error for server not running (too noisy)
-                    # Return a result that indicates server not ready
+                    self._status_cache = None
                     return subprocess.CompletedProcess(args=cmd, returncode=125, stdout="", stderr="")
             
             # Clear status cache on successful command (except for --info and --server)
@@ -94,13 +92,11 @@ class MocController:
             return False
         if self._server_initialized:
             return True
-        # This is safe to call even if the server is already running; we just
-        # avoid doing it more than once per application run.
         result = self._run("--server", capture_output=True)
         if result.returncode == 0:
+            time.sleep(0.1)
             self._server_initialized = True
             return True
-        # If server start failed, allow retry
         return False
 
     # ------------------------------------------------------------------
@@ -174,20 +170,18 @@ class MocController:
             # Return cached status if available, otherwise None
             return self._status_cache
 
-        # Ensure server is running (retry if needed)
         if not self.ensure_server():
-            # Server not ready - return cached status if available
-            return self._status_cache
+            self._status_cache = None
+            return None
         
         result = self._run("--info", capture_output=True)
         
         # Handle errors with backoff
         if result.returncode != 0 or not result.stdout:
             self._last_error_time = current_time
-            # Exponential backoff: double the backoff time, max 5 seconds
             self._error_backoff = min(self._error_backoff * 2, 5.0)
-            # Return cached status if available
-            return self._status_cache
+            self._status_cache = None
+            return None
         
         # Success - reset backoff
         self._error_backoff = 0.2  # Reset to minimal backoff
@@ -400,7 +394,10 @@ class MocController:
 
         # Validate and add tracks to MOC playlist
         # Track which tracks were successfully added (by original index)
-        successfully_added = set()
+        # We need to map original indices to MOC playlist indices since some tracks might fail to add
+        successfully_added = {}  # Maps original index -> MOC playlist index
+        moc_playlist_index = 0
+        
         for idx, track in enumerate(tracks):
             if not track or not track.file_path:
                 continue
@@ -414,7 +411,8 @@ class MocController:
             # Append to MOC playlist
             result = self._run("-a", abs_path, capture_output=True)
             if result.returncode == 0:
-                successfully_added.add(idx)
+                successfully_added[idx] = moc_playlist_index
+                moc_playlist_index += 1
             else:
                 print(f"Warning: Failed to add track to MOC playlist: {abs_path}")
                 if result.stderr:
@@ -422,23 +420,19 @@ class MocController:
 
         # Optionally start playback from the selected track
         if start_playback and 0 <= current_index < len(tracks):
-            # Only play if the track was successfully added
             if current_index in successfully_added:
                 track = tracks[current_index]
                 if track and track.file_path:
                     file_path = Path(track.file_path)
                     if file_path.exists() and file_path.is_file():
                         abs_path = str(file_path.resolve())
-                        # Play the desired track; mocp will find it in the playlist
+                        # Use --playit to play the specific file (works even if it's in playlist)
                         result = self._run("--playit", abs_path, capture_output=True)
                         if result.returncode != 0:
-                            print(f"Error: Failed to play track: {abs_path}")
-                            if result.stderr:
-                                print(f"MOC error: {result.stderr}")
-                    else:
-                        print(f"Error: Cannot play track - file does not exist: {track.file_path}")
-            else:
-                print(f"Error: Cannot play track at index {current_index} - track was not added to playlist")
+                            # Fallback: use jump with 0-based index
+                            moc_index = successfully_added[current_index]
+                            self._run("-j", str(moc_index), capture_output=False)
+                            self._run("-p", capture_output=False)
 
     def play_file(self, file_path: str):
         """Play a specific file via MOC, keeping the playlist intact."""
