@@ -189,6 +189,29 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app integrates wi
 - **File type handling**: MOC handles audio files; video containers (MP4, MKV, WebM, etc.) use the internal GStreamer player
 - **Automatic server management**: MOC server is started automatically and shut down when the app closes
 
+### 🎨 Automatic Metadata Fetching
+
+The player automatically searches and downloads missing metadata (especially album art) from online sources:
+
+- **Smart detection**: When a track is missing cover art or metadata, the player automatically searches online
+- **Multiple sources**: Uses MusicBrainz, Cover Art Archive, and iTunes Search API for maximum coverage
+- **Beautiful placeholder**: When no cover art is available, displays a modern gradient placeholder with a music icon instead of a gray box
+- **Background fetching**: Metadata is fetched asynchronously so the UI remains responsive
+- **Intelligent caching**: Downloaded metadata and album art are cached locally to avoid repeated requests
+- **Rate limiting**: Respects API rate limits (e.g., MusicBrainz's 1 request/second limit)
+
+**How it works:**
+1. When a track is loaded, the player checks if album art exists
+2. If missing, it searches online using the track's title, artist, and album information
+3. The best match is selected based on title/artist similarity and duration matching
+4. Album art is downloaded and cached in `~/.cache/musicplayer/art/`
+5. The UI updates automatically when metadata is found
+
+**Sources used:**
+- **MusicBrainz**: Open music encyclopedia with comprehensive metadata
+- **Cover Art Archive**: High-quality album art (part of MusicBrainz)
+- **iTunes Search API**: Fast fallback for popular tracks
+
 ---
 
 <details>
@@ -208,6 +231,7 @@ MusicPlayer/
 │   ├── bluetooth_manager.py      # Device discovery & connection
 │   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
 │   ├── metadata.py               # Reading ID3 tags, album art
+│   ├── metadata_fetcher.py      # Automatic online metadata fetching
 │   ├── moc_controller.py         # MOC (Music On Console) integration
 │   ├── mpris2.py                 # MPRIS2 desktop integration
 │   ├── music_library.py          # Scanning folders for music
@@ -219,6 +243,7 @@ MusicPlayer/
 │   └── components/               # Reusable UI pieces
 │       ├── bluetooth_panel.py    # Bluetooth controls
 │       ├── library_browser.py    # File browser
+│       ├── metadata_panel.py     # Now playing info & album art
 │       ├── player_controls.py    # Play/pause/seek
 │       └── playlist_view.py      # Queue display
 │

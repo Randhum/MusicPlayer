@@ -352,6 +352,58 @@ class TrackMetadata:
         for key, value in data.items():
             setattr(metadata, key, value)
         return metadata
+    
+    def fetch_missing_metadata(self, auto_fetch: bool = True) -> bool:
+        """
+        Fetch missing metadata (especially album art) from online sources.
+        
+        Args:
+            auto_fetch: If True, automatically fetch when metadata is missing
+            
+        Returns:
+            True if metadata was fetched and updated, False otherwise
+        """
+        if not auto_fetch:
+            return False
+        
+        # Only fetch if we're missing album art or critical metadata
+        if self.album_art_path:
+            return False  # Already have art
+        
+        try:
+            from core.metadata_fetcher import MetadataFetcher
+            fetcher = MetadataFetcher()
+            
+            # Fetch metadata
+            metadata = fetcher.fetch_metadata(
+                title=self.title,
+                artist=self.artist,
+                album=self.album,
+                duration=self.duration
+            )
+            
+            if metadata:
+                # Update missing fields
+                if metadata.get('album_art_path') and not self.album_art_path:
+                    self.album_art_path = metadata['album_art_path']
+                    logger.info("Fetched album art for %s - %s", self.artist, self.title)
+                
+                if metadata.get('title') and not self.title:
+                    self.title = metadata['title']
+                
+                if metadata.get('artist') and not self.artist:
+                    self.artist = metadata['artist']
+                
+                if metadata.get('album') and not self.album:
+                    self.album = metadata['album']
+                
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug("Failed to fetch metadata: %s", e)
+            return False
 
 
 def get_metadata(file_path: str) -> TrackMetadata:
