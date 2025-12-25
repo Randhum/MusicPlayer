@@ -1,6 +1,6 @@
 """Bluetooth device management using D-Bus and BlueZ."""
 
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Any
 
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
@@ -10,6 +10,7 @@ gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GLib
 
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
+from core.bluetooth_advanced import BluetoothAdvanced
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -18,8 +19,15 @@ logger = get_logger(__name__)
 class BluetoothDevice:
     """Represents a Bluetooth device."""
     
-    def __init__(self, path: str, properties: Dict):
-        self.path = path
+    def __init__(self, path: str, properties: Dict[str, Any]) -> None:
+        """
+        Initialize Bluetooth device.
+        
+        Args:
+            path: D-Bus object path of the device
+            properties: Dictionary of device properties from BlueZ
+        """
+        self.path: str = path
         self.address = properties.get('Address', '')
         self.name = properties.get('Name', 'Unknown Device')
         self.connected = properties.get('Connected', False)
@@ -28,7 +36,13 @@ class BluetoothDevice:
         self.icon = properties.get('Icon', '')
         self.properties = properties
     
-    def __repr__(self):
+    def __repr__(self) -> str:
+        """
+        String representation of the device.
+        
+        Returns:
+            Human-readable device description
+        """
         return f"BluetoothDevice(name={self.name}, address={self.address}, connected={self.connected})"
 
 
@@ -41,7 +55,7 @@ class BluetoothManager:
     DEVICE_INTERFACE = 'org.bluez.Device1'
     PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties'
     
-    def __init__(self, parent_window=None):
+    def __init__(self, parent_window: Optional[Gtk.Window] = None) -> None:
         """
         Initialize Bluetooth Manager.
         
@@ -56,10 +70,10 @@ class BluetoothManager:
         self.connected_device: Optional[BluetoothDevice] = None
         
         # Callbacks
-        self.on_device_connected: Optional[Callable] = None
-        self.on_device_disconnected: Optional[Callable] = None
-        self.on_device_added: Optional[Callable] = None
-        self.on_device_removed: Optional[Callable] = None
+        self.on_device_connected: Optional[Callable[[BluetoothDevice], None]] = None
+        self.on_device_disconnected: Optional[Callable[[BluetoothDevice], None]] = None
+        self.on_device_added: Optional[Callable[[BluetoothDevice], None]] = None
+        self.on_device_removed: Optional[Callable[[BluetoothDevice], None]] = None
         
         # Setup agent for pairing confirmations
         self.agent: Optional[BluetoothAgent] = None
@@ -72,13 +86,31 @@ class BluetoothManager:
         # Track signal receivers for cleanup
         self._signal_receivers = []
         
+        # Advanced features
+        self.advanced: Optional[BluetoothAdvanced] = None
+        
+        # D-Bus connection monitoring
+        self._dbus_monitor = DBusConnectionMonitor(self.bus)
+        
         self._setup_adapter()
         self._setup_agent()
         self._setup_signals()
         self._refresh_devices()
+        
+        # Initialize advanced features if adapter is available
+        if self.adapter_path:
+            try:
+                self.advanced = BluetoothAdvanced(self.bus, self.adapter_path)
+            except Exception as e:
+                logger.warning("Bluetooth: Advanced features not available: %s", e)
     
-    def _setup_adapter(self):
-        """Set up the Bluetooth adapter."""
+    @dbus_retry(max_retries=3, backoff=0.5)
+    def _setup_adapter(self) -> None:
+        """
+        Set up the Bluetooth adapter.
+        
+        Finds and initializes the default Bluetooth adapter via D-Bus.
+        """
         try:
             # Get the default adapter
             manager = dbus.Interface(
@@ -97,6 +129,9 @@ class BluetoothManager:
                 self.adapter_proxy = dbus.Interface(adapter_obj, self.ADAPTER_INTERFACE)
         except Exception as e:
             logger.error("Error setting up Bluetooth adapter: %s", e, exc_info=True)
+            # Check connection health
+            if not self._dbus_monitor.check_connection():
+                logger.error("D-Bus connection appears to be lost")
     
     def _setup_agent(self):
         """Set up the Bluetooth Agent for handling pairing confirmations."""
@@ -188,8 +223,12 @@ class BluetoothManager:
                 return None
         return None
     
-    def _setup_signals(self):
-        """Set up D-Bus signals for device changes."""
+    def _setup_signals(self) -> None:
+        """
+        Set up D-Bus signals for device changes.
+        
+        Registers signal handlers for device discovery, connection, and property changes.
+        """
         try:
             # Set up properties changed signal
             receiver = self.bus.add_signal_receiver(
@@ -685,6 +724,10 @@ class BluetoothManager:
             
             # Stop discovery if active
             self.stop_discovery()
+            
+            # Cleanup advanced features
+            if self.advanced:
+                self.advanced.cleanup()
             
             logger.info("Bluetooth manager cleaned up")
         except Exception as e:

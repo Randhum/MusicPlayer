@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from core.metadata import TrackMetadata
 from core.logging import get_logger
+from core.security import SecurityValidator
 
 logger = get_logger(__name__)
 
@@ -13,32 +14,58 @@ logger = get_logger(__name__)
 class PlaylistManager:
     """Manages playlists - in-memory and persistent storage."""
     
-    def __init__(self, playlists_dir: Optional[Path] = None):
+    def __init__(self, playlists_dir: Optional[Path] = None) -> None:
+        """
+        Initialize playlist manager.
+        
+        Args:
+            playlists_dir: Directory for storing saved playlists.
+                          If None, uses config default.
+        """
         if playlists_dir is None:
-            playlists_dir = Path(__file__).parent.parent / 'data' / 'playlists'
+            from core.config import get_config
+            config = get_config()
+            playlists_dir = config.playlists_dir
         self.playlists_dir = Path(playlists_dir)
         self.playlists_dir.mkdir(parents=True, exist_ok=True)
         
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
     
-    def add_track(self, track: TrackMetadata, position: Optional[int] = None):
-        """Add a track to the current playlist."""
+    def add_track(self, track: TrackMetadata, position: Optional[int] = None) -> None:
+        """
+        Add a track to the current playlist.
+        
+        Args:
+            track: Track metadata to add
+            position: Insert position (None appends to end)
+        """
         if position is None:
             self.current_playlist.append(track)
         else:
             self.current_playlist.insert(position, track)
     
-    def add_tracks(self, tracks: List[TrackMetadata], position: Optional[int] = None):
-        """Add multiple tracks to the current playlist."""
+    def add_tracks(self, tracks: List[TrackMetadata], position: Optional[int] = None) -> None:
+        """
+        Add multiple tracks to the current playlist.
+        
+        Args:
+            tracks: List of track metadata to add
+            position: Insert position (None appends to end)
+        """
         if position is None:
             self.current_playlist.extend(tracks)
         else:
             for i, track in enumerate(tracks):
                 self.current_playlist.insert(position + i, track)
     
-    def remove_track(self, index: int):
-        """Remove a track from the current playlist."""
+    def remove_track(self, index: int) -> None:
+        """
+        Remove a track from the current playlist.
+        
+        Args:
+            index: Index of track to remove
+        """
         if 0 <= index < len(self.current_playlist):
             self.current_playlist.pop(index)
             # Adjust current index if needed
@@ -47,8 +74,14 @@ class PlaylistManager:
             elif index == self.current_index:
                 self.current_index = -1
     
-    def move_track(self, from_index: int, to_index: int):
-        """Move a track from one position to another."""
+    def move_track(self, from_index: int, to_index: int) -> None:
+        """
+        Move a track from one position to another.
+        
+        Args:
+            from_index: Source position
+            to_index: Destination position
+        """
         if 0 <= from_index < len(self.current_playlist) and 0 <= to_index < len(self.current_playlist):
             track = self.current_playlist.pop(from_index)
             self.current_playlist.insert(to_index, track)
@@ -60,8 +93,8 @@ class PlaylistManager:
             elif to_index <= self.current_index < from_index:
                 self.current_index += 1
     
-    def clear(self):
-        """Clear the current playlist."""
+    def clear(self) -> None:
+        """Clear the current playlist and reset index."""
         self.current_playlist.clear()
         self.current_index = -1
     
@@ -71,8 +104,13 @@ class PlaylistManager:
             return self.current_playlist[self.current_index]
         return None
     
-    def set_current_index(self, index: int):
-        """Set the current playing index."""
+    def set_current_index(self, index: int) -> None:
+        """
+        Set the current playing index.
+        
+        Args:
+            index: New current index (must be valid)
+        """
         if 0 <= index < len(self.current_playlist):
             self.current_index = index
     
@@ -93,7 +131,13 @@ class PlaylistManager:
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist to a file."""
         try:
-            playlist_file = self.playlists_dir / f"{name}.json"
+            # Security: Validate playlist name
+            sanitized_name = SecurityValidator.validate_playlist_name(name)
+            if not sanitized_name:
+                logger.error("Invalid playlist name: %s", name)
+                return False
+            
+            playlist_file = self.playlists_dir / f"{sanitized_name}.json"
             
             playlist_data = {
                 'name': name,
@@ -111,7 +155,13 @@ class PlaylistManager:
     def load_playlist(self, name: str) -> bool:
         """Load a playlist from a file."""
         try:
-            playlist_file = self.playlists_dir / f"{name}.json"
+            # Security: Validate playlist name
+            sanitized_name = SecurityValidator.validate_playlist_name(name)
+            if not sanitized_name:
+                logger.error("Invalid playlist name: %s", name)
+                return False
+            
+            playlist_file = self.playlists_dir / f"{sanitized_name}.json"
             
             if not playlist_file.exists():
                 return False
@@ -140,7 +190,13 @@ class PlaylistManager:
     def delete_playlist(self, name: str) -> bool:
         """Delete a saved playlist."""
         try:
-            playlist_file = self.playlists_dir / f"{name}.json"
+            # Security: Validate playlist name
+            sanitized_name = SecurityValidator.validate_playlist_name(name)
+            if not sanitized_name:
+                logger.error("Invalid playlist name: %s", name)
+                return False
+            
+            playlist_file = self.playlists_dir / f"{sanitized_name}.json"
             if playlist_file.exists():
                 playlist_file.unlink()
                 return True

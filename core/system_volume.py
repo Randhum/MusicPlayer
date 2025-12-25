@@ -1,4 +1,4 @@
-"""System volume control using PulseAudio or ALSA."""
+"""System volume control using PipeWire, PulseAudio, or ALSA."""
 
 import subprocess
 import shutil
@@ -12,34 +12,75 @@ try:
 except ImportError:
     GLIB_AVAILABLE = False
 
+# Try to use native PipeWire integration
+try:
+    from core.pipewire_volume import PipeWireVolume
+    PIPEWIRE_AVAILABLE = True
+except ImportError:
+    PIPEWIRE_AVAILABLE = False
+
 
 class SystemVolume:
-    """Controls system volume via PulseAudio or ALSA."""
+    """Controls system volume via PipeWire, PulseAudio, or ALSA."""
     
     def __init__(self, on_volume_changed: Optional[Callable[[float], None]] = None):
+        self.on_volume_changed = on_volume_changed
+        self._pipewire: Optional[PipeWireVolume] = None
         self._pactl_path: Optional[str] = shutil.which("pactl")
         self._amixer_path: Optional[str] = shutil.which("amixer")
+        self._use_pipewire = False
         self._use_pulseaudio = self._pactl_path is not None
-        self.on_volume_changed = on_volume_changed
         self._last_volume: Optional[float] = None
         self._monitoring_timeout_id = None
         
-        # Start monitoring for volume changes
-        if GLIB_AVAILABLE and self.on_volume_changed:
+        # Try PipeWire native integration first
+        if PIPEWIRE_AVAILABLE:
+            try:
+                self._pipewire = PipeWireVolume(on_volume_changed=on_volume_changed)
+                # Check if PipeWire is actually available (pactl works with PipeWire too)
+                if self._pactl_path:
+                    # Test if we're using PipeWire by checking pactl info
+                    try:
+                        result = subprocess.run(
+                            [self._pactl_path, "info"],
+                            capture_output=True,
+                            text=True,
+                            timeout=1
+                        )
+                        if result.returncode == 0 and 'PipeWire' in result.stdout:
+                            self._use_pipewire = True
+                    except Exception:
+                        pass
+            except Exception as e:
+                from core.logging import get_logger
+                logger = get_logger(__name__)
+                logger.debug("PipeWire integration not available: %s", e)
+        
+        # Fallback to subprocess monitoring if PipeWire not available
+        if not self._use_pipewire and GLIB_AVAILABLE and self.on_volume_changed:
             self._start_monitoring()
     
     def get_volume(self) -> float:
         """Get current system volume (0.0 to 1.0)."""
-        if self._use_pulseaudio:
+        if self._use_pipewire and self._pipewire:
+            return self._pipewire.get_volume()
+        elif self._use_pulseaudio:
             return self._get_pulseaudio_volume()
         elif self._amixer_path:
             return self._get_alsa_volume()
         return 1.0  # Default if neither available
     
-    def set_volume(self, volume: float):
-        """Set system volume (0.0 to 1.0)."""
+    def set_volume(self, volume: float) -> None:
+        """
+        Set system volume (0.0 to 1.0).
+        
+        Args:
+            volume: Volume level from 0.0 to 1.0 (will be clamped)
+        """
         volume = max(0.0, min(1.0, volume))
-        if self._use_pulseaudio:
+        if self._use_pipewire and self._pipewire:
+            self._pipewire.set_volume(volume)
+        elif self._use_pulseaudio:
             self._set_pulseaudio_volume(volume)
         elif self._amixer_path:
             self._set_alsa_volume(volume)
@@ -72,8 +113,13 @@ class SystemVolume:
             pass
         return 1.0
     
-    def _set_pulseaudio_volume(self, volume: float):
-        """Set volume in PulseAudio."""
+    def _set_pulseaudio_volume(self, volume: float) -> None:
+        """
+        Set volume in PulseAudio.
+        
+        Args:
+            volume: Volume level from 0.0 to 1.0
+        """
         vol_percent = int(volume * 100)
         try:
             subprocess.run(
@@ -112,8 +158,13 @@ class SystemVolume:
             pass
         return 1.0
     
-    def _set_alsa_volume(self, volume: float):
-        """Set volume in ALSA."""
+    def _set_alsa_volume(self, volume: float) -> None:
+        """
+        Set volume in ALSA.
+        
+        Args:
+            volume: Volume level from 0.0 to 1.0
+        """
         vol_percent = int(volume * 100)
         try:
             subprocess.run(
@@ -125,7 +176,7 @@ class SystemVolume:
         except (OSError, subprocess.SubprocessError, FileNotFoundError):
             pass
     
-    def _start_monitoring(self):
+    def _start_monitoring(self) -> None:
         """Start monitoring for volume changes via periodic polling."""
         if not GLIB_AVAILABLE:
             return
@@ -145,8 +196,31 @@ class SystemVolume:
         
         self._monitoring_timeout_id = GLib.timeout_add(500, check_volume)
     
-    def cleanup(self):
-        """Stop monitoring for volume changes."""
+    def get_sinks(self) -> list:
+        """
+        Get list of available audio sinks.
+        
+        Returns:
+            List of sink dictionaries with name, description, etc.
+        """
+        if self._use_pipewire and self._pipewire:
+            return self._pipewire.get_sinks()
+        return []
+    
+    def set_sink(self, sink_name: str) -> bool:
+        """Set the default audio sink."""
+        if self._use_pipewire and self._pipewire:
+            return self._pipewire.set_sink(sink_name)
+        return False
+    
+    def cleanup(self) -> None:
+        """
+        Stop monitoring for volume changes and clean up resources.
+        
+        Should be called when the volume controller is no longer needed.
+        """
+        if self._pipewire:
+            self._pipewire.cleanup()
         if self._monitoring_timeout_id and GLIB_AVAILABLE:
             GLib.source_remove(self._monitoring_timeout_id)
             self._monitoring_timeout_id = None

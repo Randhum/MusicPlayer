@@ -113,8 +113,13 @@ class LinuxLogger:
             return cls._instance.logger.getChild(name)
     
     @classmethod
-    def set_level(cls, level: int):
-        """Set logging level for the root logger."""
+    def set_level(cls, level: int) -> None:
+        """
+        Set logging level for the root logger.
+        
+        Args:
+            level: Logging level (logging.DEBUG, logging.INFO, etc.)
+        """
         if cls._instance is None:
             cls._instance = cls()
         cls._instance.logger.setLevel(level)

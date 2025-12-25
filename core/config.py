@@ -23,8 +23,12 @@ class Config:
     
     _instance: Optional['Config'] = None
     
-    def __init__(self):
-        """Initialize configuration manager."""
+    def __init__(self) -> None:
+        """
+        Initialize configuration manager.
+        
+        Sets up XDG Base Directory paths and loads or creates configuration.
+        """
         if Config._instance is not None:
             return
         
@@ -63,15 +67,15 @@ class Config:
             cls._instance = cls()
         return cls._instance
     
-    def _load_config(self):
+    def _load_config(self) -> None:
         """Load configuration from file or create defaults."""
         if self.config_file.exists():
             self.config.read(self.config_file)
         else:
             self._create_default_config()
     
-    def _create_default_config(self):
-        """Create default configuration."""
+    def _create_default_config(self) -> None:
+        """Create default configuration with sensible defaults."""
         # Library settings
         self.config['library'] = {
             'music_dirs': str(Path.home() / 'Music') + ':' + str(Path.home() / 'Musik'),
@@ -107,8 +111,12 @@ class Config:
         # Save defaults
         self.save()
     
-    def _migrate_old_configs(self):
-        """Migrate old configuration files to new XDG locations."""
+    def _migrate_old_configs(self) -> None:
+        """
+        Migrate old configuration files to new XDG locations.
+        
+        Handles migration from legacy config locations to XDG-compliant paths.
+        """
         old_config_paths = [
             Path.home() / '.config' / 'musicplayer' / 'library_index.json',
             Path.home() / '.cache' / 'musicplayer' / 'art',
@@ -135,8 +143,12 @@ class Config:
             except Exception:
                 pass  # Migration failed, continue with defaults
     
-    def save(self):
-        """Save configuration to file."""
+    def save(self) -> None:
+        """
+        Save configuration to file.
+        
+        Writes current configuration state to the config file.
+        """
         try:
             with open(self.config_file, 'w') as f:
                 self.config.write(f)
@@ -149,8 +161,15 @@ class Config:
         """Get a configuration value."""
         return self.config.get(section, key, fallback=fallback)
     
-    def set(self, section: str, key: str, value: str):
-        """Set a configuration value."""
+    def set(self, section: str, key: str, value: str) -> None:
+        """
+        Set a configuration value.
+        
+        Args:
+            section: Configuration section name
+            key: Configuration key name
+            value: Value to set (will be converted to string)
+        """
         if section not in self.config:
             self.config.add_section(section)
         self.config.set(section, key, value)
@@ -175,8 +194,19 @@ class Config:
             return Path(value)
         return fallback
     
-    def get_list(self, section: str, key: str, separator: str = ':', fallback: Optional[list] = None) -> list:
-        """Get a list configuration value (colon or semicolon separated)."""
+    def get_list(self, section: str, key: str, separator: str = ':', fallback: Optional[list[str]] = None) -> list[str]:
+        """
+        Get a list configuration value (colon or semicolon separated).
+        
+        Args:
+            section: Configuration section name
+            key: Configuration key name
+            separator: Separator character (default: ':')
+            fallback: Default value if not found
+            
+        Returns:
+            List of strings
+        """
         value = self.get(section, key)
         if value:
             return [item.strip() for item in value.split(separator) if item.strip()]

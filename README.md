@@ -26,6 +26,28 @@ But more importantly, this project is designed to teach you **IoT (Internet of T
 | 🖼️ **GTK** | Building graphical user interfaces | `ui/` folder |
 | 🐍 **Python** | The language powering it all | Everywhere! |
 
+---
+
+## 📋 Table of Contents
+
+<details>
+<summary><strong>Click to expand navigation</strong></summary>
+
+- [System Requirements](#-system-requirements-gentoo-linux)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [Configuration](#-configuration)
+- [Features](#-features)
+- [Usage Guide](#-usage-guide)
+- [Troubleshooting](#-troubleshooting)
+- [Learning Resources](#-learning-resources--challenges)
+- [Technical Documentation](#-technical-documentation)
+- [Contributing](#-contributing)
+
+</details>
+
+---
+
 ## 🐧 System Requirements (Gentoo Linux)
 
 This project runs on **Gentoo Linux** — and that's actually AMAZING for learning!
@@ -47,7 +69,7 @@ Gentoo is a "build from source" Linux distribution. Unlike Ubuntu or Fedora wher
 
 > 📖 **New to Gentoo?** Follow the [Gentoo AMD64 Handbook (Full Installation)](https://wiki.gentoo.org/wiki/Handbook:AMD64/Full/Installation) — we recommend the **full manual approach**. Yes, it takes longer, but you'll learn SO much more than clicking "Next" 50 times!
 
-### Installing Dependencies
+### System Packages Required
 
 Open a terminal and install these packages. Don't just copy-paste — read what each one does!
 
@@ -66,7 +88,7 @@ emerge -av \
   media-libs/gst-plugins-ugly \
   media-plugins/gst-plugins-mpg123 \
   media-plugins/gst-plugins-faac \
-  media-plugins/gst-plugins-flac \ 
+  media-plugins/gst-plugins-flac \
   media-plugins/gst-plugins-faad \
   media-plugins/gst-plugins-openh264 \
   media-plugins/gst-plugins-bluez
@@ -87,13 +109,14 @@ emerge -av dev-python/pygobject dev-python/mutagen dev-python/dbus-python
 
 # Optional: FFmpeg for extra format support
 emerge -av media-video/ffmpeg
+
+# Optional: MOC (Music On Console) for audio playback
+emerge -av media-sound/moc
 ```
 
 > 🧪 **Challenge:** After installing, try `gst-inspect-1.0 | wc -l` to see how many GStreamer plugins you have. The more plugins, the more formats you can play!
 
-### 🧪 Bonus Challenge: Kernel Configuration
-
-**Difficulty:** ⭐⭐⭐⭐⭐ (Advanced!)
+### Kernel Configuration
 
 If you followed the [Gentoo Handbook](https://wiki.gentoo.org/wiki/Handbook:AMD64/Full/Installation) manual kernel configuration, make sure you enabled Bluetooth support:
 
@@ -109,7 +132,7 @@ Device Drivers --->
 
 **Why this matters for IoT:** In embedded systems (Raspberry Pi, ESP32, etc.), you often configure your own kernel. Knowing how to enable specific hardware support is a real skill!
 
-### 🔧 Enable Bluetooth Service
+### Enable Bluetooth Service
 
 ```bash
 # Start Bluetooth daemon
@@ -132,16 +155,16 @@ rc-service bluetooth status
 
 ---
 
-## 🚀 Quick Start (Get It Running!)
+## 🚀 Installation
 
-### Step 1: Clone and Enter the Project
+### Step 1: Clone the Repository
 
 ```bash
 git clone <your-repo-url>
 cd MusicPlayer
 ```
 
-### Step 2: Set Up Your Environment
+### Step 2: Set Up Python Environment
 
 ```bash
 # Create a virtual environment (keeps things clean!)
@@ -152,9 +175,41 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 3: Run It!
+**Python Dependencies:**
+- `PyGObject>=3.42.0` - GTK4 and GStreamer bindings
+- `mutagen>=1.47.0` - Audio metadata extraction
+- `dbus-python>=1.2.0` - D-Bus integration
+- `watchdog>=3.0.0` - File system monitoring (optional but recommended)
+
+**Development Dependencies (optional):**
+```bash
+pip install pytest pytest-mock pytest-asyncio
+```
+
+### Step 3: Verify Installation
 
 ```bash
+# Test GStreamer
+gst-launch-1.0 audiotestsrc ! autoaudiosink
+
+# Test Bluetooth
+bluetoothctl --version
+
+# Test Python bindings
+python -c "import gi; gi.require_version('Gtk', '4.0'); print('GTK4 OK')"
+```
+
+---
+
+## 🎯 Quick Start
+
+### Run the Application
+
+```bash
+# Activate virtual environment (if not already active)
+source venv/bin/activate
+
+# Run the music player
 python main.py
 ```
 
@@ -163,112 +218,170 @@ You should see a window with your music library, playlist, and Bluetooth control
 ### Basic Controls
 
 - **Playback controls** (bottom bar):
-  - **Play / Pause / Stop / Previous / Next**: control the current playlist.
-  - **Shuffle**: toggle to play the current playlist in **random order**; the *Next* button and automatic track advance will pick a random track instead of the next in sequence.
-  - **Seek & Volume**: larger, touch-friendly sliders for scrubbing through the track and adjusting volume.
+  - **Play / Pause / Stop / Previous / Next**: Control the current playlist
+  - **Shuffle**: Toggle to play the current playlist in **random order**
+  - **Seek & Volume**: Touch-friendly sliders for scrubbing through tracks and adjusting volume
 
-### MOC Integration (Music On Console, Gentoo)
+---
+
+## ⚙️ Configuration
+
+The application follows the **XDG Base Directory Specification** for Linux standards compliance.
+
+### Configuration Locations
+
+- **Config**: `~/.config/musicplayer/settings.json`
+- **Cache**: `~/.cache/musicplayer/` (includes album art cache)
+- **Data**: `~/.local/share/musicplayer/` (includes playlists)
+- **Logs**: `~/.cache/musicplayer/logs/`
+
+### Environment Variables
+
+- `MUSICPLAYER_DEBUG=1` - Enable debug logging
+- `XDG_CONFIG_HOME` - Override config directory
+- `XDG_CACHE_HOME` - Override cache directory
+- `XDG_DATA_HOME` - Override data directory
+
+### Service Installation (Optional)
+
+**Systemd (user service):**
+```bash
+cp data/musicplayer.service ~/.config/systemd/user/
+# Edit the ExecStart path in the service file to match your installation
+systemctl --user enable musicplayer.service
+systemctl --user start musicplayer.service
+```
+
+**OpenRC:**
+```bash
+sudo cp data/musicplayer.init /etc/init.d/musicplayer
+# Edit paths in the init script to match your installation
+sudo rc-update add musicplayer default
+sudo /etc/init.d/musicplayer start
+```
+
+---
+
+## ✨ Features
+
+### Core Features
+
+- **Music Library Management** - Scan and organize your music collection
+- **Playlist Support** - Create, save, and load playlists
+- **Bluetooth Speaker Mode** - Turn your computer into a Bluetooth speaker
+- **MOC Integration** - Seamless integration with Music On Console
+- **Video Playback** - Support for video container formats
+
+### Linux Enhancements
+
+<details>
+<summary><strong>Click to expand feature details</strong></summary>
+
+#### Logging System
+- **Structured logging** with rotating file handlers
+- Log files in `~/.cache/musicplayer/logs/`
+- Environment variable `MUSICPLAYER_DEBUG=1` for debug mode
+- All `print()` statements replaced with proper logging
+
+#### Configuration Management
+- **XDG Base Directory** compliance
+- Configurable settings via JSON config file
+- Automatic directory creation
+- Environment variable support
+
+#### MPRIS2 Integration
+- **Desktop media key support** (PlayPause, Next, Previous)
+- Integration with desktop environments (GNOME, KDE, etc.)
+- Remote control via D-Bus
+- System tray notifications support
+
+#### Desktop Integration
+- **Desktop entry file** for application launcher
+- GTK RecentManager integration
+- Drag-and-drop file support
+- Service files for systemd/OpenRC
+
+#### PipeWire Native Support
+- **Event-based volume monitoring** (no polling)
+- Native D-Bus integration with fallback to subprocess
+- Multiple audio device support
+- Device switching functionality
+
+#### Audio Effects
+- **10-band equalizer** via GStreamer
+- ReplayGain support
+- Crossfade between tracks
+- Equalizer presets (bass boost, treble boost, vocal boost, etc.)
+
+#### Advanced Bluetooth Features
+- **Codec selection** (SBC, AAC, aptX if available)
+- Battery level monitoring for connected devices
+- Connection quality indicators (RSSI, link quality)
+- Multiple device support
+
+#### Security Hardening
+- **Path validation** to prevent path traversal attacks
+- Input sanitization for all user-provided data
+- D-Bus security checks
+- File permission validation
+
+#### Performance Optimizations
+- **File system monitoring** (inotify/watchdog) for incremental library updates
+- Lazy loading of album art (only when visible)
+- Incremental library scanning (only changed files)
+- Memory-efficient metadata caching
+
+#### Enhanced D-Bus Handling
+- **Retry logic** with exponential backoff
+- Connection state monitoring
+- Graceful error recovery
+- Better error messages with actionable suggestions
+
+</details>
+
+---
+
+## 📖 Usage Guide
+
+### MOC Integration (Music On Console)
 
 If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
 
-- **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel.
-- **Write back changes** you make in the GTK playlist (add/remove/move/clear/search-based queues) into MOC's internal playlist so both stay aligned.
+- **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel
+- **Write back changes** you make in the GTK playlist into MOC's internal playlist
 - **Sync player controls** with MOC:
-  - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood.
-  - The **volume slider** controls MOC's volume.
-  - The **current track / time** display follows whatever MOC is playing.
-  - **Autoplay (autonext)** is automatically enabled when the app starts, ensuring tracks automatically advance to the next song.
-  - **Shuffle** toggle is fully synchronized with MOC - when you toggle shuffle in the UI, it also toggles MOC's shuffle mode, and vice versa (changes made in MOC's UI are reflected in the GTK app).
-- The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
+  - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood
+  - The **volume slider** controls MOC's volume
+  - The **current track / time** display follows whatever MOC is playing
+  - **Autoplay (autonext)** is automatically enabled when the app starts
+  - **Shuffle** toggle is fully synchronized with MOC
 
-#### File type handling with MOC vs internal player
+#### File Type Handling
 
-- MOC is primarily an **audio player**; our internal GStreamer-based player supports both **audio and video containers** (e.g. MP4, MKV, WebM).
+- MOC is primarily an **audio player**; our internal GStreamer-based player supports both **audio and video containers**
 - When `mocp` is available, the app will:
-  - Use **MOC for pure audio files** (MP3, FLAC, OGG, etc.).
-  - Automatically **prefer the internal player for video containers** (`.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.flv`, `.wmv`, `.m4v`), even if MOC is installed.
-    - This avoids handing formats to MOC that it may not support as reliably.
-    - Playback, seeking and volume for these video files are handled entirely by GStreamer, just like when MOC is not available.
-  - Cleanly **shut down the MOC server** (`mocp --exit`) when you close the GTK app window, so there are no stray `mocp` servers left running from this UI.
+  - Use **MOC for pure audio files** (MP3, FLAC, OGG, etc.)
+  - Automatically **prefer the internal player for video containers** (`.mp4`, `.mkv`, `.webm`, etc.)
+  - Cleanly **shut down the MOC server** when you close the GTK app window
 
-In all cases, when we hand playback responsibility from one backend to the other (for example, from a video file played via GStreamer to an audio-only playlist in MOC), any active GStreamer pipeline is stopped first, ensuring that previous video streams are not left running in the background.
+#### Playlist Sync Behavior
 
-#### How playlist sync behaves with external `mocp` changes
+When you edit the playlist directly in MOC:
 
-When you edit the playlist directly in MOC (e.g. via the `mocp` ncurses UI or CLI):
-
-- The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes.
-- Additionally, whenever MOC reports that the **current track changed**, the app reloads the full playlist from `~/.moc/playlist.m3u` and updates the selection to follow the current MOC track.
-
-**Important limitation:** MOC keeps its playlist in memory and only saves to `~/.moc/playlist.m3u` at certain times (e.g., when MOC exits, or when you press `S` in the MOC UI to save). This means:
-
-- If you modify the playlist in MOC's UI **without changing tracks or saving**, the app will still show the old playlist until you either:
-  - Skip to another track in MOC (triggers automatic reload).
-  - Press `S` in MOC's ncurses UI to save the playlist.
-  - Click the **Refresh** button (🔄) in this app's playlist panel.
-
-This means:
-
+- The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes
+- Whenever MOC reports that the **current track changed**, the app reloads the full playlist
 - **Changes are reflected** when:
-  - You skip to another track in MOC (automatic reload on every track change).
-  - MOC saves its playlist (press `S` in MOC, or when MOC exits).
-  - You click the **Refresh** button in the playlist panel.
-- There may be a **small delay (up to ~0.5s)** because status and playlist are polled periodically.
-- If `~/.moc/playlist.m3u` is moved or disabled, the GTK playlist will no longer auto-sync until it becomes available again.
+  - You skip to another track in MOC (automatic reload on every track change)
+  - MOC saves its playlist (press `S` in MOC, or when MOC exits)
+  - You click the **Refresh** button in the playlist panel
 
----
+### Bluetooth Speaker Mode
 
 <details>
-<summary><h2>📚 Technical Documentation</h2></summary>
+<summary><strong>How Bluetooth Speaker Mode Works</strong></summary>
 
----
+#### 1️⃣ Enable Speaker Mode
 
-## 🏗️ Project Structure Explained
-
-```
-MusicPlayer/
-│
-├── 🚀 main.py                    # The starting point - run this!
-│
-├── 📦 core/                      # The "brain" - logic without UI
-│   ├── audio_player.py           # GStreamer playback
-│   ├── bluetooth_manager.py      # Device discovery & connection
-│   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
-│   ├── metadata.py               # Reading ID3 tags, album art
-│   ├── music_library.py          # Scanning folders for music
-│   └── playlist_manager.py       # Queue management
-│
-├── 🎨 ui/                        # The "face" - what users see
-│   ├── main_window.py            # Main application window
-│   ├── dock_manager.py           # Detachable panels
-│   └── components/               # Reusable UI pieces
-│       ├── bluetooth_panel.py    # Bluetooth controls
-│       ├── library_browser.py    # File browser
-│       ├── player_controls.py    # Play/pause/seek
-│       └── playlist_view.py      # Queue display
-│
-├── 📋 requirements.txt           # Python packages needed
-└── 📄 README.md                  # You're reading it!
-```
-
-### The MVC Pattern (Sort Of)
-
-We follow a pattern where:
-- **Model** = `core/` (data and logic)
-- **View** = `ui/` (what users see)
-- **Controller** = callbacks connecting them
-
-This separation makes code easier to understand and modify!
-
----
-
-## 🔧 How the Bluetooth Speaker Mode Works
-
-This is the coolest IoT feature! Let's trace through what happens:
-
-### 1️⃣ Enable Speaker Mode
-
-At startup, all Bluetooth functionality is **inactive and cleared** in the UI.  
 When you click **"Enable Speaker Mode"**, the app will:
 
 ```
@@ -284,9 +397,9 @@ User clicks button
 └─────────────────────────────────┘
 ```
 
-### 2️⃣ Phone Connects
+#### 2️⃣ Phone Connects
 
-When your phone pairs and connects (no manual Scan/Connect needed from the app):
+When your phone pairs and connects:
 
 ```
 Phone initiates pairing
@@ -314,7 +427,7 @@ Phone sends A2DP audio stream
 🔊 Music plays!
 ```
 
-### 3️⃣ Audio Flows
+#### 3️⃣ Audio Flow
 
 The actual audio routing is handled by **PipeWire** (or **PulseAudio**), not our code! We just set up the Bluetooth connection, and the audio system handles the rest.
 
@@ -336,6 +449,8 @@ Phone                    Computer
   │                    │   🔊      │
   │                    └───────────┘
 ```
+
+</details>
 
 ---
 
@@ -386,9 +501,9 @@ emerge -av media-plugins/gst-plugins-flac      # FLAC audio
 emerge -av media-plugins/gst-plugins-openh264  # H.264 video
 ```
 
-### "MOC error: No files added - no sound files on command line!"
+### "MOC error: No files added!"
 
-This error occurs when trying to play a track that has an invalid or missing file path. The app now validates file paths before sending them to MOC, but if you see this error:
+This error occurs when trying to play a track that has an invalid or missing file path. The app now validates file paths before sending them to MOC.
 
 ```bash
 # Check if the track file exists
@@ -424,31 +539,10 @@ echo "gtk-icon-theme-name=Adwaita" >> ~/.config/gtk-4.0/settings.ini
 
 ---
 
-## 🤝 Contributing
-
-Found a bug? Have an idea? Want to share your learning journey?
-
-1. Fork this repository
-2. Create a branch for your feature
-3. Make your changes
-4. Open a Pull Request
-
-Remember: The best way to learn is by doing — and the second-best way is by teaching others!
-
----
-
-## 📜 License
-
-This project is open source and available for personal and educational use.
-
-</details>
-
----
+## 🧠 Learning Resources & Challenges
 
 <details>
-<summary><h2>🧠 Learning Resources & Challenges</h2></summary>
-
-## 🧠 Understanding IoT Through This Project
+<summary><strong>Understanding IoT Through This Project</strong></summary>
 
 ### What Even IS IoT?
 
@@ -479,13 +573,16 @@ In our project, we're doing IoT **locally** — your phone talks directly to you
 2. **Processing** — Logic that does something with the data (GStreamer decoding audio)
 3. **Actuators/Outputs** — Things that take action (speakers playing sound!)
 
----
+</details>
 
-## 🔵 Deep Dive: Bluetooth (The Wireless Magic)
+### 🔵 Deep Dive: Bluetooth
 
-Bluetooth is the wireless protocol that lets devices talk to each other within short range (~10 meters). Let's see how it works in our code!
+<details>
+<summary><strong>How Bluetooth Works in Our Code</strong></summary>
 
-### How Devices Find Each Other
+Bluetooth is the wireless protocol that lets devices talk to each other within short range (~10 meters).
+
+#### How Devices Find Each Other
 
 Open `core/bluetooth_manager.py` and look at this function:
 
@@ -499,7 +596,7 @@ def start_discovery(self) -> bool:
         self.adapter_proxy.StartDiscovery()  # <-- Magic happens here!
         return True
     except Exception as e:
-        print(f"Error starting discovery: {e}")
+        logger.error(f"Error starting discovery: {e}")
         return False
 ```
 
@@ -509,7 +606,7 @@ def start_discovery(self) -> bool:
 3. Nearby devices respond with their names and addresses
 4. Our code collects these responses
 
-### The Bluetooth Stack
+#### The Bluetooth Stack
 
 ```
 ┌─────────────────────────────────┐
@@ -525,9 +622,7 @@ def start_discovery(self) -> bool:
 └─────────────────────────────────┘
 ```
 
-### 🧪 Challenge #1: Bluetooth Explorer
-
-**Difficulty:** ⭐⭐☆☆☆
+#### Challenge: Bluetooth Explorer
 
 Try running this in a Python shell:
 
@@ -551,7 +646,7 @@ for path, interfaces in manager.GetManagedObjects().items():
         print(f"Found: {device.get('Name', 'Unknown')} - {device.get('Address')}")
 ```
 
-**🎯 Your Mission:** 
+**Your Mission:**
 - How many Bluetooth devices are remembered by your computer?
 - Can you find your phone in the list?
 - What other properties does each device have?
@@ -582,13 +677,16 @@ for path, interfaces in manager.GetManagedObjects().items():
 
 > **📚 Learn More:** [BlueZ D-Bus API Documentation](https://git.kernel.org/pub/scm/bluetooth/bluez.git/tree/doc/device-api.txt)
 
----
+</details>
 
-## 🔌 Deep Dive: D-Bus (The System's Nervous System)
+### 🔌 Deep Dive: D-Bus
+
+<details>
+<summary><strong>The System's Nervous System</strong></summary>
 
 D-Bus is like the nervous system of your Linux computer. Different programs send messages to each other through D-Bus, just like neurons sending signals!
 
-### Why D-Bus?
+#### Why D-Bus?
 
 Instead of each program talking directly to Bluetooth hardware (chaos!), they all go through BlueZ via D-Bus:
 
@@ -609,7 +707,7 @@ Instead of each program talking directly to Bluetooth hardware (chaos!), they al
          └─────────────┘
 ```
 
-### Signals: Events You Can Listen To!
+#### Signals: Events You Can Listen To!
 
 In our code, we listen for Bluetooth events using **signals**:
 
@@ -626,9 +724,7 @@ def _setup_signals(self):
 
 When a phone connects, BlueZ sends a `PropertiesChanged` signal, and our function gets called!
 
-### 🧪 Challenge #2: D-Bus Detective
-
-**Difficulty:** ⭐⭐⭐☆☆
+#### Challenge: D-Bus Detective
 
 Use the `dbus-monitor` command to spy on D-Bus messages:
 
@@ -642,7 +738,7 @@ Now try:
 2. Pair a device
 3. Connect/disconnect a device
 
-**🎯 Your Mission:**
+**Your Mission:**
 - What messages appear when you toggle Bluetooth?
 - Can you spot the `PropertyChanged` signal when a device connects?
 - What other signals does BlueZ send?
@@ -672,13 +768,16 @@ signal time=1234567890.123 sender=:1.23 -> destination=(null destination) serial
 
 > **📚 Learn More:** [D-Bus Tutorial](https://dbus.freedesktop.org/doc/dbus-tutorial.html)
 
----
+</details>
 
-## 🎼 Deep Dive: GStreamer (The Audio Pipeline)
+### 🎼 Deep Dive: GStreamer
+
+<details>
+<summary><strong>The Audio Pipeline</strong></summary>
 
 GStreamer is like a factory assembly line, but for media! Audio goes in one end, gets processed through different stages, and comes out the speakers.
 
-### The Pipeline Concept
+#### The Pipeline Concept
 
 ```
 ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
@@ -690,7 +789,7 @@ GStreamer is like a factory assembly line, but for media! Audio goes in one end,
 
 Each box is called an **element**, and they connect via **pads**.
 
-### Our Audio Player (Simplified)
+#### Our Audio Player (Simplified)
 
 Look at `core/audio_player.py`:
 
@@ -712,9 +811,7 @@ def _setup_pipeline(self):
 
 `playbin` is like a smart pipeline — you give it a file, and it figures out which decoder to use automatically!
 
-### 🧪 Challenge #3: Build Your Own Pipeline
-
-**Difficulty:** ⭐⭐⭐⭐☆
+#### Challenge: Build Your Own Pipeline
 
 Try running this in terminal to play a test tone:
 
@@ -736,7 +833,7 @@ gst-launch-1.0 audiotestsrc wave=2 freq=300 ! autoaudiosink
 gst-launch-1.0 playbin uri=file:///path/to/your/song.mp3
 ```
 
-**🎯 Your Mission:**
+**Your Mission:**
 - What happens if you change `freq=440` to `freq=880`?
 - Can you figure out how to add volume control to the pipeline?
   (Hint: try adding `volume volume=0.5` between elements)
@@ -756,13 +853,6 @@ Here's a pipeline with volume control:
 gst-launch-1.0 audiotestsrc freq=440 ! audioconvert ! volume volume=0.5 ! autoaudiosink
 ```
 
-To make it interactive (adjust volume while playing):
-```bash
-gst-launch-1.0 audiotestsrc freq=440 ! audioconvert ! volume volume=0.5 ! autoaudiosink
-# Then in another terminal:
-gst-launch-1.0 -e audiotestsrc freq=440 ! audioconvert ! volume volume=0.3 ! autoaudiosink
-```
-
 For a more complex example with multiple effects:
 ```bash
 gst-launch-1.0 audiotestsrc wave=sine freq=440 ! audioconvert ! volume volume=0.7 ! autoaudiosink
@@ -772,13 +862,16 @@ gst-launch-1.0 audiotestsrc wave=sine freq=440 ! audioconvert ! volume volume=0.
 
 > **📚 Learn More:** [GStreamer Application Development Manual](https://gstreamer.freedesktop.org/documentation/application-development/index.html)
 
----
+</details>
 
-## 🖼️ Deep Dive: GTK (Making It Look Good)
+### 🖼️ Deep Dive: GTK
+
+<details>
+<summary><strong>Making It Look Good</strong></summary>
 
 GTK is the toolkit we use to create the graphical interface. Buttons, windows, lists — all GTK!
 
-### The Widget Tree
+#### The Widget Tree
 
 GTK apps are built like a tree:
 
@@ -802,7 +895,7 @@ Window
             └── Volume Slider
 ```
 
-### Creating a Button
+#### Creating a Button
 
 ```python
 import gi
@@ -816,9 +909,7 @@ button = Gtk.Button(label="Click Me!")
 button.connect("clicked", lambda btn: print("Button was clicked!"))
 ```
 
-### 🧪 Challenge #4: Add a Feature
-
-**Difficulty:** ⭐⭐⭐⭐⭐
+#### Challenge: Add a Feature
 
 Try adding a "Now Playing" notification that shows when a new song starts!
 
@@ -879,25 +970,17 @@ def on_track_loaded(self, metadata):
         self._send_now_playing_notification(title, artist)
 ```
 
-**Alternative: Using GLib.idle_add for thread safety:**
-```python
-from gi.repository import GLib
-
-def _send_notification_safe(self, title: str, artist: str):
-    GLib.idle_add(self._send_now_playing_notification, title, artist)
-```
-
 </details>
 
 > **📚 Learn More:** [GTK4 Python Tutorial](https://pygobject.readthedocs.io/en/latest/)
 
----
+</details>
 
-## 💡 IoT Project Ideas (What's Next?)
+### 💡 IoT Project Ideas
 
 Now that you understand the basics, here are some projects to try:
 
-### Beginner Projects
+#### Beginner Projects
 
 1. **🌡️ Temperature Display**
    - Connect a Bluetooth temperature sensor
@@ -909,7 +992,7 @@ Now that you understand the basics, here are some projects to try:
    - Create color presets
    - Schedule on/off times
 
-### Intermediate Projects
+#### Intermediate Projects
 
 3. **🎮 Bluetooth Game Controller**
    - Read gamepad inputs via Bluetooth
@@ -920,7 +1003,7 @@ Now that you understand the basics, here are some projects to try:
    - Discover and manage multiple BLE devices
    - Create "scenes" (e.g., "Movie Mode" dims lights, starts music)
 
-### Advanced Projects
+#### Advanced Projects
 
 5. **📊 IoT Dashboard**
    - Collect data from multiple sensors
@@ -936,9 +1019,9 @@ Now that you understand the basics, here are some projects to try:
 
 ## 📚 Resources to Learn More
 
-### 🐧 Gentoo Linux (Your Operating System!)
+### 🐧 Gentoo Linux
 
-- 📖 [**Gentoo Handbook (Full Installation)**](https://wiki.gentoo.org/wiki/Handbook:AMD64/Full/Installation) - The complete guide to building your system from scratch. We **strongly recommend** the full manual approach — you'll understand Linux at a level most people never reach!
+- 📖 [**Gentoo Handbook (Full Installation)**](https://wiki.gentoo.org/wiki/Handbook:AMD64/Full/Installation) - The complete guide to building your system from scratch
 - 📖 [Gentoo Wiki](https://wiki.gentoo.org/wiki/Main_Page) - Incredible documentation for everything
 - 📖 [Portage (Package Manager)](https://wiki.gentoo.org/wiki/Portage) - Learn how `emerge` works
 - 💬 [Gentoo Forums](https://forums.gentoo.org/) - Friendly community for questions
@@ -971,6 +1054,112 @@ Now that you understand the basics, here are some projects to try:
 
 ---
 
+## 🏗️ Technical Documentation
+
+<details>
+<summary><strong>Project Structure & Architecture</strong></summary>
+
+### Project Structure Explained
+
+```
+MusicPlayer/
+│
+├── 🚀 main.py                    # The starting point - run this!
+│
+├── 📦 core/                      # The "brain" - logic without UI
+│   ├── audio_player.py           # GStreamer playback
+│   ├── audio_effects.py           # Equalizer, ReplayGain, crossfade
+│   ├── bluetooth_manager.py      # Device discovery & connection
+│   ├── bluetooth_agent.py         # Pairing confirmations
+│   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
+│   ├── bluetooth_advanced.py     # Codec selection, battery monitoring
+│   ├── config.py                 # XDG-based configuration
+│   ├── dbus_utils.py             # D-Bus error handling
+│   ├── logging.py                # Structured logging system
+│   ├── metadata.py               # Reading ID3 tags, album art
+│   ├── moc_controller.py         # MOC integration
+│   ├── music_library.py          # Scanning folders for music
+│   ├── mpris2.py                 # MPRIS2 D-Bus interface
+│   ├── pipewire_volume.py        # PipeWire volume control
+│   ├── playlist_manager.py       # Queue management
+│   ├── security.py               # Path validation, input sanitization
+│   └── system_volume.py          # System volume control
+│
+├── 🎨 ui/                        # The "face" - what users see
+│   ├── main_window.py            # Main application window
+│   ├── dock_manager.py           # Detachable panels
+│   ├── moc_sync.py               # MOC synchronization helper
+│   └── components/               # Reusable UI pieces
+│       ├── bluetooth_panel.py    # Bluetooth controls
+│       ├── library_browser.py    # File browser
+│       ├── metadata_panel.py     # Track info & album art
+│       ├── player_controls.py    # Play/pause/seek
+│       └── playlist_view.py      # Queue display
+│
+├── 📋 requirements.txt           # Python packages needed
+├── 📄 README.md                  # You're reading it!
+├── 📄 pytest.ini                 # Test configuration
+├── 📁 tests/                     # Test suite
+│   ├── test_audio_player.py
+│   ├── test_config.py
+│   ├── test_moc_controller.py
+│   └── test_security.py
+└── 📁 data/                      # Service files and desktop entry
+    ├── musicplayer.desktop
+    ├── musicplayer.service
+    └── musicplayer.init
+```
+
+### The MVC Pattern (Sort Of)
+
+We follow a pattern where:
+- **Model** = `core/` (data and logic)
+- **View** = `ui/` (what users see)
+- **Controller** = callbacks connecting them
+
+This separation makes code easier to understand and modify!
+
+### Development
+
+#### Code Quality
+
+The codebase follows Linux best practices:
+- **Type hints** throughout (compatible with mypy)
+- **Structured logging** instead of print statements
+- **XDG Base Directory** compliance
+- **Security validation** for all user inputs
+- **D-Bus integration** following specifications
+
+#### Testing
+
+Run the test suite:
+```bash
+pytest tests/ -v
+```
+
+Run specific test file:
+```bash
+pytest tests/test_audio_player.py -v
+```
+
+Run with coverage:
+```bash
+pytest tests/ --cov=core --cov=ui --cov-report=html
+```
+
+#### Adding New Features
+
+1. Follow existing code patterns
+2. Use logging instead of print statements
+3. Validate all user inputs via `SecurityValidator`
+4. Use config system for paths and settings
+5. Add tests for new functionality
+6. Update README.md
+
+</details>
+
+---
+
 ## 🏆 Achievement Checklist
 
 Track your learning progress!
@@ -992,7 +1181,24 @@ Track your learning progress!
 - [ ] 🛠️ Modified the code (any small change counts!)
 - [ ] 🚀 Created your own IoT project idea
 
-</details>
+---
+
+## 🤝 Contributing
+
+Found a bug? Have an idea? Want to share your learning journey?
+
+1. Fork this repository
+2. Create a branch for your feature
+3. Make your changes
+4. Open a Pull Request
+
+Remember: The best way to learn is by doing — and the second-best way is by teaching others!
+
+---
+
+## 📜 License
+
+This project is open source and available for personal and educational use.
 
 ---
 

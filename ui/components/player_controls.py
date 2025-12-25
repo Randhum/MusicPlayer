@@ -6,7 +6,11 @@ from gi.repository import Gtk, GObject
 
 
 class PlayerControls(Gtk.Box):
-    """Component for player controls (play/pause, volume, progress)."""
+    """
+    Component for player controls (play/pause, volume, progress).
+    
+    Provides touch-friendly controls for playback, seeking, and volume.
+    """
     
     __gsignals__ = {
         'play-clicked': (GObject.SignalFlags.RUN_FIRST, None, ()),
@@ -19,7 +23,13 @@ class PlayerControls(Gtk.Box):
         'shuffle-toggled': (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
     }
     
-    def __init__(self):
+    def __init__(self) -> None:
+        """
+        Initialize player controls component.
+        
+        Creates all UI elements including play/pause buttons, progress slider,
+        volume control, and shuffle toggle.
+        """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15)
         # Touch-friendly margins
         self.set_margin_top(15)
@@ -133,8 +143,14 @@ class PlayerControls(Gtk.Box):
         self.play_button.set_visible(not playing)
         self.pause_button.set_visible(playing)
     
-    def update_progress(self, position: float, duration: float):
-        """Update progress bar and time labels."""
+    def update_progress(self, position: float, duration: float) -> None:
+        """
+        Update progress bar and time labels.
+        
+        Args:
+            position: Current playback position in seconds
+            duration: Total track duration in seconds
+        """
         # Validate inputs
         position = max(0.0, position)
         duration = max(0.0, duration)
@@ -158,12 +174,21 @@ class PlayerControls(Gtk.Box):
         self.time_label.set_text(self._format_time(position))
         self.duration_label.set_text(self._format_time(duration))
     
-    def reset_seeking(self):
-        """Reset seeking state - call this after a seek operation completes."""
+    def reset_seeking(self) -> None:
+        """
+        Reset seeking state - call this after a seek operation completes.
+        
+        Allows the progress slider to resume automatic updates.
+        """
         self._seeking = False
     
-    def set_volume(self, volume: float):
-        """Set volume slider value (programmatically, without triggering signal)."""
+    def set_volume(self, volume: float) -> None:
+        """
+        Set volume slider value (programmatically, without triggering signal).
+        
+        Args:
+            volume: Volume level from 0.0 to 1.0
+        """
         self._updating_volume = True
         self.volume_scale.set_value(volume)
         self._updating_volume = False

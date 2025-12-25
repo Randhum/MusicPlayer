@@ -1,3 +1,9 @@
 PyGObject>=3.42.0
 mutagen>=1.47.0
 dbus-python>=1.2.0
+watchdog>=3.0.0
+
+# Development dependencies
+pytest>=7.0.0
+pytest-mock>=3.10.0
+pytest-asyncio>=0.21.0

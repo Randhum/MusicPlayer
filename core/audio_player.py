@@ -11,12 +11,13 @@ The AudioPlayer class handles:
 """
 
 import os
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 
+from core.audio_effects import AudioEffects
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 
@@ -63,10 +64,13 @@ class AudioPlayer:
         self._duration_timeout_id: Optional[int] = None
         
         # Callbacks
-        self.on_state_changed: Optional[Callable] = None
-        self.on_position_changed: Optional[Callable] = None
-        self.on_track_finished: Optional[Callable] = None
-        self.on_track_loaded: Optional[Callable] = None
+        self.on_state_changed: Optional[Callable[[bool], None]] = None
+        self.on_position_changed: Optional[Callable[[float, float], None]] = None
+        self.on_track_finished: Optional[Callable[[], None]] = None
+        self.on_track_loaded: Optional[Callable[[], None]] = None
+        
+        # Audio effects
+        self.audio_effects = AudioEffects()
         
         self._setup_pipeline()
     
@@ -76,9 +80,34 @@ class AudioPlayer:
         if not self.playbin:
             raise RuntimeError("Failed to create GStreamer playbin")
         
-        # Use autoaudiosink - handles all audio formats automatically
+        # Create audio effects pipeline
+        # Build: source -> equalizer -> replaygain -> sink
+        audio_pipeline = Gst.Bin.new("audio_effects")
+        
+        # Create equalizer if available
+        equalizer = self.audio_effects.create_equalizer()
+        replaygain = self.audio_effects.create_replaygain()
+        
+        # Create audio sink
         audio_sink = Gst.ElementFactory.make("autoaudiosink", "audiosink")
-        if audio_sink:
+        
+        if equalizer and replaygain and audio_sink:
+            # Chain: equalizer -> replaygain -> sink
+            audio_pipeline.add(equalizer)
+            audio_pipeline.add(replaygain)
+            audio_pipeline.add(audio_sink)
+            
+            # Link elements
+            equalizer.link(replaygain)
+            replaygain.link(audio_sink)
+            
+            # Add ghost pads
+            audio_pipeline.add_pad(Gst.GhostPad.new("sink", equalizer.get_static_pad("sink")))
+            
+            self.playbin.set_property("audio-sink", audio_pipeline)
+            logger.debug("Audio player: Audio effects pipeline created")
+        elif audio_sink:
+            # Fallback: just use audio sink without effects
             self.playbin.set_property("audio-sink", audio_sink)
         
         # Use autovideosink for video output
@@ -98,8 +127,17 @@ class AudioPlayer:
         """Check if file is a video container based on extension."""
         return os.path.splitext(file_path)[1].lower() in VIDEO_EXTENSIONS
     
-    def _on_message(self, bus, message):
-        """Handle GStreamer bus messages."""
+    def _on_message(self, bus: Gst.Bus, message: Gst.Message) -> bool:
+        """
+        Handle GStreamer bus messages.
+        
+        Args:
+            bus: GStreamer message bus
+            message: GStreamer message
+            
+        Returns:
+            True to continue receiving messages
+        """
         msg_type = message.type
         
         if msg_type == Gst.MessageType.ERROR:
@@ -142,8 +180,14 @@ class AudioPlayer:
         
         return True
     
-    def _log_codec_help(self, error: str, debug: str):
-        """Log helpful messages for missing codecs."""
+    def _log_codec_help(self, error: str, debug: str) -> None:
+        """
+        Log helpful messages for missing codecs.
+        
+        Args:
+            error: Error message from GStreamer
+            debug: Debug information from GStreamer
+        """
         combined = (error + debug).lower()
         
         if 'flac' in combined:
@@ -234,13 +278,13 @@ class AudioPlayer:
         self._position_timeout_id = GLib.timeout_add(POSITION_UPDATE_INTERVAL, self._update_position)
         return True
     
-    def pause(self):
+    def pause(self) -> None:
         """Pause playback."""
         if self.playbin:
             self.playbin.set_state(Gst.State.PAUSED)
             self.is_playing = False
     
-    def stop(self):
+    def stop(self) -> None:
         """Stop playback."""
         self._stop()
     
@@ -259,8 +303,13 @@ class AudioPlayer:
         self.position = 0.0
         self.is_playing = False
     
-    def seek(self, position: float):
-        """Seek to position in seconds."""
+    def seek(self, position: float) -> None:
+        """
+        Seek to position in seconds.
+        
+        Args:
+            position: Position in seconds (will be clamped to valid range)
+        """
         if self.playbin and self.duration > 0:
             # Clamp position to valid range
             position = max(0.0, min(position, self.duration))
@@ -274,13 +323,16 @@ class AudioPlayer:
             else:
                 logger.warning("Seek failed for position %.2fs", position)
     
-    def set_volume(self, volume: float):
+    def set_volume(self, volume: float) -> None:
         """
         Set volume (0.0 to 1.0).
         
         NOTE: This method is not used in the application. System volume is
         controlled separately via the SystemVolume class. This method is kept
         for potential future use or API compatibility.
+        
+        Args:
+            volume: Volume level from 0.0 to 1.0 (will be clamped)
         """
         self.volume = max(0.0, min(1.0, volume))
         if self.playbin:
@@ -310,9 +362,21 @@ class AudioPlayer:
             return self.current_track.duration
         return self.duration
     
-    def cleanup(self):
-        """Clean up resources."""
+    def get_equalizer(self) -> AudioEffects:
+        """Get audio effects controller."""
+        return self.audio_effects
+    
+    def cleanup(self) -> None:
+        """
+        Clean up resources.
+        
+        Stops playback, removes signal watches, and releases GStreamer elements.
+        Should be called when the player is no longer needed.
+        """
         self._stop()
+        
+        # Clean up audio effects
+        self.audio_effects.cleanup()
         
         # Remove bus signal watch if playbin exists
         if self.playbin:

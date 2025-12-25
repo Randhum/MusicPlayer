@@ -11,7 +11,7 @@ from gi.repository import Gst
 from core.bluetooth_manager import BluetoothManager
 from core.logging import get_logger
 
-logger = get_logger(__name__), BluetoothDevice
+logger = get_logger(__name__)
 
 
 class BluetoothSink:
@@ -41,15 +41,15 @@ class BluetoothSink:
         self._check_gst_bluez_plugin()
         
         # Callbacks
-        self.on_sink_enabled: Optional[Callable] = None
-        self.on_sink_disabled: Optional[Callable] = None
-        self.on_device_connected: Optional[Callable] = None
-        self.on_device_disconnected: Optional[Callable] = None
+        self.on_sink_enabled: Optional[Callable[[], None]] = None
+        self.on_sink_disabled: Optional[Callable[[], None]] = None
+        self.on_device_connected: Optional[Callable[[BluetoothDevice], None]] = None
+        self.on_device_disconnected: Optional[Callable[[BluetoothDevice], None]] = None
         # Optional callbacks for audio stream events (not currently used in UI)
         # These are called internally when A2DP audio streams start/stop
         # Can be set for future features like notifications or status updates
-        self.on_audio_stream_started: Optional[Callable] = None
-        self.on_audio_stream_stopped: Optional[Callable] = None
+        self.on_audio_stream_started: Optional[Callable[[], None]] = None
+        self.on_audio_stream_stopped: Optional[Callable[[], None]] = None
         
         # Register sink mode checker callback with BT manager (avoids circular dependency)
         if hasattr(self.bt_manager, 'register_sink_mode_checker'):
@@ -73,8 +73,13 @@ class BluetoothSink:
         self.bt_manager.on_device_connected = self._on_device_connected
         self.bt_manager.on_device_disconnected = self._on_device_disconnected
     
-    def _check_gst_bluez_plugin(self):
-        """Check if GStreamer BlueZ plugin is available."""
+    def _check_gst_bluez_plugin(self) -> None:
+        """
+        Check if GStreamer BlueZ plugin is available.
+        
+        Verifies that the GStreamer BlueZ plugin is installed and can be used
+        for A2DP audio streaming.
+        """
         try:
             # Initialize GStreamer if not already done
             if not Gst.is_initialized():

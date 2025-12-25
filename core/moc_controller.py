@@ -88,8 +88,13 @@ class MocController:
             # Other errors - return error result
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
-    def ensure_server(self):
-        """Start the MOC server if it is not already running."""
+    def ensure_server(self) -> bool:
+        """
+        Start the MOC server if it is not already running.
+        
+        Returns:
+            True if server is available, False otherwise
+        """
         if not self.is_available():
             return False
         if self._server_initialized:

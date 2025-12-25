@@ -14,6 +14,7 @@ from pathlib import Path
 
 from core.logging import get_logger
 from core.metadata import TrackMetadata
+from core.security import SecurityValidator
 
 logger = get_logger(__name__)
 
@@ -186,8 +187,13 @@ class MPRIS2Player(dbus.service.Object):
         # Convert file:// URI to path
         if uri.startswith('file://'):
             file_path = uri[7:]  # Remove 'file://' prefix
-            if hasattr(self, 'on_open_uri'):
-                self.on_open_uri(file_path)
+            # Security: Validate path
+            validated_path = SecurityValidator.validate_path(file_path)
+            if validated_path and SecurityValidator.validate_file_extension(str(validated_path)):
+                if hasattr(self, 'on_open_uri'):
+                    self.on_open_uri(str(validated_path))
+            else:
+                logger.warning("MPRIS2: Invalid or unsafe URI: %s", uri)
     
     @dbus.service.signal(MPRIS2_PLAYER_INTERFACE, signature='x')
     def Seeked(self, position: int):

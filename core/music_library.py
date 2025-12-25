@@ -10,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Set
 from core.config import get_config
 from core.logging import get_logger
 from core.metadata import TrackMetadata
+from core.security import SecurityValidator
 
 logger = get_logger(__name__)
 
@@ -38,10 +39,61 @@ AUDIO_EXTENSIONS = {
 INDEX_FILE = None
 
 
+class LibraryWatcher(FileSystemEventHandler if WATCHDOG_AVAILABLE else object):
+    """File system watcher for incremental library updates."""
+    
+    def __init__(self, library: 'MusicLibrary') -> None:
+        """
+        Initialize library watcher.
+        
+        Args:
+            library: MusicLibrary instance to notify of changes
+        """
+        if WATCHDOG_AVAILABLE:
+            super().__init__()
+        self.library = library
+    
+    def on_created(self, event) -> None:
+        """
+        Handle file creation.
+        
+        Args:
+            event: File system event from watchdog
+        """
+        if not event.is_directory and event.src_path:
+            self.library._handle_file_change(event.src_path, 'created')
+    
+    def on_modified(self, event) -> None:
+        """
+        Handle file modification.
+        
+        Args:
+            event: File system event from watchdog
+        """
+        if not event.is_directory and event.src_path:
+            self.library._handle_file_change(event.src_path, 'modified')
+    
+    def on_deleted(self, event) -> None:
+        """
+        Handle file deletion.
+        
+        Args:
+            event: File system event from watchdog
+        """
+        if not event.is_directory and event.src_path:
+            self.library._handle_file_change(event.src_path, 'deleted')
+
+
 class MusicLibrary:
     """Manages the music library, scanning and indexing tracks."""
     
-    def __init__(self):
+    def __init__(self) -> None:
+        """
+        Initialize music library manager.
+        
+        Sets up file system monitoring, loads existing index, and prepares
+        for incremental scanning.
+        """
         self.tracks: List[TrackMetadata] = []
         self.artists: Dict[str, Dict[str, List[TrackMetadata]]] = defaultdict(lambda: defaultdict(list))
         # Folder structure: path -> List[TrackMetadata]
@@ -55,11 +107,24 @@ class MusicLibrary:
         self._file_cache: Dict[str, Dict] = {}  # file_path -> {mtime, hash, metadata}
         self._music_root: Optional[Path] = None  # Root music directory
         
+        # File system watcher for incremental updates
+        self._observer: Optional[Observer] = None
+        self._watcher: Optional[LibraryWatcher] = None
+        
         # Load existing index
         self._load_index()
+        
+        # Start file system monitoring if available
+        if WATCHDOG_AVAILABLE:
+            self._start_watching()
     
-    def scan_library(self, callback: Optional[Callable] = None) -> None:
-        """Scan music directories asynchronously."""
+    def scan_library(self, callback: Optional[Callable[[], None]] = None) -> None:
+        """
+        Scan music directories asynchronously.
+        
+        Args:
+            callback: Optional callback to call when scanning completes
+        """
         if self._scanning:
             return
         

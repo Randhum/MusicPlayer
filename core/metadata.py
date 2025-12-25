@@ -22,8 +22,14 @@ logger = get_logger(__name__)
 class TrackMetadata:
     """Represents metadata for a single audio track."""
     
-    def __init__(self, file_path: str):
-        self.file_path = file_path
+    def __init__(self, file_path: str) -> None:
+        """
+        Initialize track metadata from a file.
+        
+        Args:
+            file_path: Path to the audio file
+        """
+        self.file_path: str = file_path
         self.title: Optional[str] = None
         self.artist: Optional[str] = None
         self.album: Optional[str] = None
@@ -36,8 +42,14 @@ class TrackMetadata:
         
         self._extract_metadata()
     
-    def _extract_metadata(self):
-        """Extract metadata from the audio file using a generic approach."""
+    def _extract_metadata(self) -> None:
+        """
+        Extract metadata from the audio file using a generic approach.
+        
+        Supports multiple audio formats (MP3, FLAC, MP4, OGG) and extracts
+        common metadata fields including title, artist, album, track number,
+        duration, and album art.
+        """
         try:
             audio_file = File(self.file_path)
             if audio_file is None:
@@ -136,8 +148,17 @@ class TrackMetadata:
             if not self.title:
                 self.title = Path(self.file_path).stem
     
-    def _get_tag_generic(self, audio_file, tag_keys: list) -> Optional[str]:
-        """Get a tag value trying multiple possible keys - works for all formats."""
+    def _get_tag_generic(self, audio_file: File, tag_keys: list[str]) -> Optional[str]:
+        """
+        Get a tag value trying multiple possible keys - works for all formats.
+        
+        Args:
+            audio_file: Mutagen File object
+            tag_keys: List of possible tag key names to try
+            
+        Returns:
+            Tag value as string, or None if not found
+        """
         for key in tag_keys:
             try:
                 value = None
@@ -204,8 +225,16 @@ class TrackMetadata:
                 continue
         return None
     
-    def _extract_album_art(self, audio_file) -> Optional[str]:
-        """Extract album art from the audio file."""
+    def _extract_album_art(self, audio_file: File) -> Optional[str]:
+        """
+        Extract album art from the audio file.
+        
+        Args:
+            audio_file: Mutagen File object
+            
+        Returns:
+            Path to saved album art file, or None if not found
+        """
         try:
             is_flac = isinstance(audio_file, FLAC)
             
@@ -295,7 +324,15 @@ class TrackMetadata:
         return None
     
     def _save_album_art(self, art_data: bytes) -> Optional[str]:
-        """Save album art to a temporary file."""
+        """
+        Save album art to a cache file.
+        
+        Args:
+            art_data: Raw image data bytes
+            
+        Returns:
+            Path to saved album art file, or None on error
+        """
         try:
             # Get cache directory from config
             config = get_config()

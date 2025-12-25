@@ -448,6 +448,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Cleanup Bluetooth resources
         if hasattr(self, 'bt_manager'):
             self.bt_manager.cleanup()
+        
+        # Cleanup library watcher
+        if hasattr(self, 'library') and hasattr(self.library, 'stop_watching'):
+            self.library.stop_watching()
+        
         return False  # Allow close to proceed
     
     def _on_library_scan_complete(self):

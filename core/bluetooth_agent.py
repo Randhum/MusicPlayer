@@ -56,8 +56,15 @@ class BluetoothAgent(dbus.service.Object):
         # Register with BlueZ AgentManager
         self._register_agent()
     
-    def _register_agent(self):
-        """Register this agent with BlueZ."""
+    def _register_agent(self) -> None:
+        """
+        Register this agent with BlueZ.
+        
+        Registers the agent with the BlueZ AgentManager and requests it as the default agent.
+        
+        Raises:
+            dbus.exceptions.DBusException: If registration fails
+        """
         try:
             agent_manager = dbus.Interface(
                 self.bus.get_object('org.bluez', self.AGENT_MANAGER_PATH),

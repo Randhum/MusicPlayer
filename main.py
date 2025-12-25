@@ -15,6 +15,8 @@ try:
 except ValueError:
     USE_ADW = False
 
+from typing import Optional
+
 from core.config import get_config
 from core.logging import get_logger
 from ui.main_window import MainWindow
@@ -25,22 +27,41 @@ logger = get_logger(__name__)
 class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
     """Main application class."""
     
-    def __init__(self):
+    def __init__(self) -> None:
+        """
+        Initialize the music player application.
+        
+        Sets up GTK application with file open support for drag-and-drop.
+        """
         super().__init__(
             application_id='com.musicplayer.app',
             flags=0
         )
         self.connect('activate', self._on_activate)
-        self.window = None
+        self.connect('open', self._on_open)
+        self.window: Optional[MainWindow] = None
     
-    def _on_activate(self, app):
-        """Handle application activation."""
+    def _on_activate(self, app: Gtk.Application) -> None:
+        """
+        Handle application activation.
+        
+        Args:
+            app: GTK application instance
+        """
         if not self.window:
             self.window = MainWindow(app)
         self.window.present()
     
-    def _on_open(self, app, files, n_files, hint):
-        """Handle file open (drag-and-drop or command line)."""
+    def _on_open(self, app: Gtk.Application, files: Any, n_files: int, hint: str) -> None:
+        """
+        Handle file open (drag-and-drop or command line).
+        
+        Args:
+            app: GTK application instance
+            files: List of Gio.File objects
+            n_files: Number of files
+            hint: Hint string (usually empty)
+        """
         if not self.window:
             self.window = MainWindow(app)
         
@@ -56,8 +77,13 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
         self.window.present()
 
 
-def main():
-    """Main entry point."""
+def main() -> int:
+    """
+    Main entry point.
+    
+    Returns:
+        Exit code (0 for success)
+    """
     # Initialize config (creates directories, loads settings)
     config = get_config()
     
