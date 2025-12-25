@@ -404,6 +404,19 @@ ls -l /path/to/your/track.mp3
 - Better error messages to identify problematic tracks
 - Tracks with missing files are automatically skipped when syncing to MOC
 
+### "Songs don't automatically advance to the next track!"
+
+If playback stops when a song finishes instead of automatically playing the next song:
+
+**What was fixed:**
+- Improved end-of-track detection in MOC synchronization
+- Automatic next track advancement when a track finishes
+- Autonext is now always enabled when starting playback
+- Shuffle mode now works correctly with automatic track advancement
+- Better handling of track completion for both sequential and shuffled playback
+
+The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. When shuffle is enabled, the app works with MOC's shuffle feature to play tracks in random order.
+
 ### "Panel layout is messed up!"
 
 ```bash
