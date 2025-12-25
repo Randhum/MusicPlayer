@@ -25,6 +25,7 @@ MPRIS2_ROOT_INTERFACE = 'org.mpris.MediaPlayer2'
 MPRIS2_PLAYER_INTERFACE = 'org.mpris.MediaPlayer2.Player'
 MPRIS2_TRACKLIST_INTERFACE = 'org.mpris.MediaPlayer2.TrackList'
 MPRIS2_PLAYLISTS_INTERFACE = 'org.mpris.MediaPlayer2.Playlists'
+PROPERTIES_INTERFACE = 'org.freedesktop.DBus.Properties'
 
 
 class MPRIS2Root(dbus.service.Object):
@@ -57,41 +58,173 @@ class MPRIS2Root(dbus.service.Object):
         if hasattr(self, 'on_raise'):
             self.on_raise()
     
-    @dbus.service.property(MPRIS2_ROOT_INTERFACE, signature='b')
-    def CanQuit(self):
-        """Whether the application can be quit."""
-        return self._can_quit
+    # Properties interface implementation (overrides parent to handle both interfaces)
+    @dbus.service.method(PROPERTIES_INTERFACE, in_signature='ss', out_signature='v')
+    def Get(self, interface_name: str, property_name: str):
+        """Get a property value."""
+        # Handle root interface properties
+        if interface_name == MPRIS2_ROOT_INTERFACE:
+            if property_name == 'CanQuit':
+                return dbus.Boolean(self._can_quit)
+            elif property_name == 'CanRaise':
+                return dbus.Boolean(self._can_raise)
+            elif property_name == 'HasTrackList':
+                return dbus.Boolean(self._has_track_list)
+            elif property_name == 'Identity':
+                return dbus.String(self._identity)
+            elif property_name == 'SupportedUriSchemes':
+                return dbus.Array([dbus.String(s) for s in self._supported_uri_schemes], signature='s')
+            elif property_name == 'SupportedMimeTypes':
+                return dbus.Array([dbus.String(s) for s in self._supported_mime_types], signature='s')
+            else:
+                raise dbus.exceptions.DBusException(
+                    PROPERTIES_INTERFACE + '.UnknownProperty',
+                    f'Unknown property: {property_name}'
+                )
+        # Handle player interface properties
+        elif interface_name == MPRIS2_PLAYER_INTERFACE:
+            return self._get_player_property(property_name)
+        else:
+            raise dbus.exceptions.DBusException(
+                PROPERTIES_INTERFACE + '.UnknownInterface',
+                f'Unknown interface: {interface_name}'
+            )
     
-    @dbus.service.property(MPRIS2_ROOT_INTERFACE, signature='b')
-    def CanRaise(self):
-        """Whether the application window can be raised."""
-        return self._can_raise
+    def _get_player_property(self, property_name: str):
+        """Get a player interface property value."""
+        if property_name == 'PlaybackStatus':
+            return dbus.String(self._playback_status)
+        elif property_name == 'Rate':
+            return dbus.Double(self._rate)
+        elif property_name == 'Metadata':
+            # Convert metadata dict to dbus.Dictionary
+            metadata_dict = {}
+            for key, value in self._metadata.items():
+                if isinstance(value, dbus.ObjectPath):
+                    metadata_dict[key] = value
+                elif isinstance(value, dbus.Int64):
+                    metadata_dict[key] = value
+                elif isinstance(value, str):
+                    metadata_dict[key] = dbus.String(value)
+                elif isinstance(value, list):
+                    metadata_dict[key] = dbus.Array([dbus.String(v) for v in value], signature='s')
+                else:
+                    metadata_dict[key] = dbus.String(str(value))
+            return dbus.Dictionary(metadata_dict, signature='sv')
+        elif property_name == 'Volume':
+            return dbus.Double(self._volume)
+        elif property_name == 'Position':
+            return dbus.Int64(int(self._position * 1_000_000))
+        elif property_name == 'MinimumRate':
+            return dbus.Double(self._minimum_rate)
+        elif property_name == 'MaximumRate':
+            return dbus.Double(self._maximum_rate)
+        elif property_name == 'CanGoNext':
+            return dbus.Boolean(self._can_go_next)
+        elif property_name == 'CanGoPrevious':
+            return dbus.Boolean(self._can_go_previous)
+        elif property_name == 'CanPlay':
+            return dbus.Boolean(self._can_play)
+        elif property_name == 'CanPause':
+            return dbus.Boolean(self._can_pause)
+        elif property_name == 'CanSeek':
+            return dbus.Boolean(self._can_seek)
+        elif property_name == 'CanControl':
+            return dbus.Boolean(self._can_control)
+        else:
+            raise dbus.exceptions.DBusException(
+                PROPERTIES_INTERFACE + '.UnknownProperty',
+                f'Unknown property: {property_name}'
+            )
     
-    @dbus.service.property(MPRIS2_ROOT_INTERFACE, signature='b')
-    def HasTrackList(self):
-        """Whether the application has a track list."""
-        return self._has_track_list
+    @dbus.service.method(PROPERTIES_INTERFACE, in_signature='s', out_signature='a{sv}')
+    def GetAll(self, interface_name: str):
+        """Get all properties for an interface."""
+        if interface_name == MPRIS2_ROOT_INTERFACE:
+            return {
+                'CanQuit': dbus.Boolean(self._can_quit),
+                'CanRaise': dbus.Boolean(self._can_raise),
+                'HasTrackList': dbus.Boolean(self._has_track_list),
+                'Identity': dbus.String(self._identity),
+                'SupportedUriSchemes': dbus.Array([dbus.String(s) for s in self._supported_uri_schemes], signature='s'),
+                'SupportedMimeTypes': dbus.Array([dbus.String(s) for s in self._supported_mime_types], signature='s'),
+            }
+        elif interface_name == MPRIS2_PLAYER_INTERFACE:
+            # Convert metadata dict to dbus.Dictionary
+            metadata_dict = {}
+            for key, value in self._metadata.items():
+                if isinstance(value, (dbus.ObjectPath, dbus.Int64)):
+                    metadata_dict[key] = value
+                elif isinstance(value, str):
+                    metadata_dict[key] = dbus.String(value)
+                elif isinstance(value, list):
+                    metadata_dict[key] = dbus.Array([dbus.String(v) for v in value], signature='s')
+                else:
+                    metadata_dict[key] = dbus.String(str(value))
+            
+            return {
+                'PlaybackStatus': dbus.String(self._playback_status),
+                'Rate': dbus.Double(self._rate),
+                'Metadata': dbus.Dictionary(metadata_dict, signature='sv'),
+                'Volume': dbus.Double(self._volume),
+                'Position': dbus.Int64(int(self._position * 1_000_000)),
+                'MinimumRate': dbus.Double(self._minimum_rate),
+                'MaximumRate': dbus.Double(self._maximum_rate),
+                'CanGoNext': dbus.Boolean(self._can_go_next),
+                'CanGoPrevious': dbus.Boolean(self._can_go_previous),
+                'CanPlay': dbus.Boolean(self._can_play),
+                'CanPause': dbus.Boolean(self._can_pause),
+                'CanSeek': dbus.Boolean(self._can_seek),
+                'CanControl': dbus.Boolean(self._can_control),
+            }
+        else:
+            raise dbus.exceptions.DBusException(
+                PROPERTIES_INTERFACE + '.UnknownInterface',
+                f'Unknown interface: {interface_name}'
+            )
     
-    @dbus.service.property(MPRIS2_ROOT_INTERFACE, signature='s')
-    def Identity(self):
-        """Application identity."""
-        return self._identity
-    
-    @dbus.service.property(MPRIS2_ROOT_INTERFACE, signature='as')
-    def SupportedUriSchemes(self):
-        """Supported URI schemes."""
-        return self._supported_uri_schemes
-    
-    @dbus.service.property(MPRIS2_ROOT_INTERFACE, signature='as')
-    def SupportedMimeTypes(self):
-        """Supported MIME types."""
-        return self._supported_mime_types
+    @dbus.service.method(PROPERTIES_INTERFACE, in_signature='ssv')
+    def Set(self, interface_name: str, property_name: str, value):
+        """Set a property value."""
+        if interface_name == MPRIS2_ROOT_INTERFACE:
+            # MPRIS2 root properties are read-only
+            raise dbus.exceptions.DBusException(
+                PROPERTIES_INTERFACE + '.PropertyReadOnly',
+                f'Property {property_name} is read-only'
+            )
+        elif interface_name == MPRIS2_PLAYER_INTERFACE:
+            if property_name == 'Volume':
+                # Convert dbus value to float
+                if isinstance(value, dbus.Double):
+                    new_volume = float(value)
+                else:
+                    new_volume = float(value)
+                
+                if abs(self._volume - new_volume) > 0.01:
+                    self._volume = max(0.0, min(1.0, new_volume))
+                    self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'Volume': dbus.Double(self._volume)}, [])
+                    if self.on_set_volume:
+                        self.on_set_volume(self._volume)
+            else:
+                raise dbus.exceptions.DBusException(
+                    PROPERTIES_INTERFACE + '.PropertyReadOnly',
+                    f'Property {property_name} is read-only'
+                )
+        else:
+            raise dbus.exceptions.DBusException(
+                PROPERTIES_INTERFACE + '.UnknownInterface',
+                f'Unknown interface: {interface_name}'
+            )
 
 
-class MPRIS2Player(dbus.service.Object):
-    """MPRIS2 Player interface (org.mpris.MediaPlayer2.Player)."""
+class MPRIS2Player(MPRIS2Root):
+    """MPRIS2 Player interface (org.mpris.MediaPlayer2.Player).
+    
+    Inherits from MPRIS2Root so both interfaces are on the same object path.
+    """
     
     def __init__(self, bus, object_path):
+        # Initialize root interface first
         super().__init__(bus, object_path)
         self._playback_status = 'Stopped'  # Playing, Paused, Stopped
         self._rate = 1.0
@@ -194,117 +327,52 @@ class MPRIS2Player(dbus.service.Object):
         """Signal emitted when position changes via SetPosition."""
         pass
     
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='s', emits_change_signal=True)
-    def PlaybackStatus(self):
-        """Current playback status: Playing, Paused, Stopped."""
-        return self._playback_status
-    
-    @PlaybackStatus.setter
-    def PlaybackStatus(self, value: str):
-        if self._playback_status != value:
-            self._playback_status = value
-            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'PlaybackStatus': value}, [])
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='d', emits_change_signal=True)
-    def Rate(self):
-        """Playback rate (1.0 = normal)."""
-        return self._rate
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='a{sv}', emits_change_signal=True)
-    def Metadata(self):
-        """Current track metadata."""
-        return self._metadata
-    
-    @Metadata.setter
-    def Metadata(self, value: Dict[str, Any]):
-        if self._metadata != value:
-            self._metadata = value
-            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'Metadata': value}, [])
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='d', emits_change_signal=True)
-    def Volume(self):
-        """Volume (0.0 to 1.0)."""
-        return self._volume
-    
-    @Volume.setter
-    def Volume(self, value: float):
-        if abs(self._volume - value) > 0.01:
-            self._volume = max(0.0, min(1.0, value))
-            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'Volume': dbus.Double(self._volume)}, [])
-            if self.on_set_volume:
-                self.on_set_volume(self._volume)
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='x')
-    def Position(self):
-        """Current position in microseconds."""
-        return int(self._position * 1_000_000)
-    
-    @Position.setter
-    def Position(self, value: float):
-        """Set position in seconds (internal use)."""
-        self._position = value
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='d')
-    def MinimumRate(self):
-        """Minimum playback rate."""
-        return self._minimum_rate
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='d')
-    def MaximumRate(self):
-        """Maximum playback rate."""
-        return self._maximum_rate
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='b')
-    def CanGoNext(self):
-        """Whether Next() is available."""
-        return self._can_go_next
-    
-    @CanGoNext.setter
-    def CanGoNext(self, value: bool):
-        if self._can_go_next != value:
-            self._can_go_next = value
-            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'CanGoNext': value}, [])
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='b')
-    def CanGoPrevious(self):
-        """Whether Previous() is available."""
-        return self._can_go_previous
-    
-    @CanGoPrevious.setter
-    def CanGoPrevious(self, value: bool):
-        if self._can_go_previous != value:
-            self._can_go_previous = value
-            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'CanGoPrevious': value}, [])
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='b')
-    def CanPlay(self):
-        """Whether Play() is available."""
-        return self._can_play
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='b')
-    def CanPause(self):
-        """Whether Pause() is available."""
-        return self._can_pause
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='b')
-    def CanSeek(self):
-        """Whether seeking is available."""
-        return self._can_seek
-    
-    @dbus.service.property(MPRIS2_PLAYER_INTERFACE, signature='b')
-    def CanControl(self):
-        """Whether playback control is available."""
-        return self._can_control
     
     @dbus.service.signal(dbus.PROPERTIES_IFACE, signature='sa{sv}as')
     def PropertiesChanged(self, interface: str, changed: Dict[str, Any], invalidated: List[str]):
         """Signal emitted when properties change."""
         pass
     
+    # Property setters for internal use
+    def _set_playback_status(self, value: str):
+        """Set playback status (internal use)."""
+        if self._playback_status != value:
+            self._playback_status = value
+            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'PlaybackStatus': dbus.String(value)}, [])
+    
+    def _set_metadata(self, value: Dict[str, Any]):
+        """Set metadata (internal use)."""
+        if self._metadata != value:
+            self._metadata = value
+            # Convert to dbus types for signal
+            metadata_dict = {}
+            for key, val in value.items():
+                if isinstance(val, (dbus.ObjectPath, dbus.Int64)):
+                    metadata_dict[key] = val
+                elif isinstance(val, str):
+                    metadata_dict[key] = dbus.String(val)
+                elif isinstance(val, list):
+                    metadata_dict[key] = dbus.Array([dbus.String(v) for v in val], signature='s')
+                else:
+                    metadata_dict[key] = dbus.String(str(val))
+            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'Metadata': dbus.Dictionary(metadata_dict, signature='sv')}, [])
+    
+    def _set_can_go_next(self, value: bool):
+        """Set CanGoNext (internal use)."""
+        if self._can_go_next != value:
+            self._can_go_next = value
+            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'CanGoNext': dbus.Boolean(value)}, [])
+    
+    def _set_can_go_previous(self, value: bool):
+        """Set CanGoPrevious (internal use)."""
+        if self._can_go_previous != value:
+            self._can_go_previous = value
+            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {'CanGoPrevious': dbus.Boolean(value)}, [])
+    
     def update_metadata(self, track: Optional[TrackMetadata]):
         """Update metadata from track."""
         if not track:
-            self.Metadata = {}
+            self._set_metadata({})
             return
         
         # Build MPRIS2 metadata dict
@@ -345,7 +413,7 @@ class MPRIS2Player(dbus.service.Object):
             art_path = Path(track.album_art_path).resolve()
             metadata['mpris:artUrl'] = f"file://{art_path}"
         
-        self.Metadata = metadata
+        self._set_metadata(metadata)
     
     def update_position(self, position: float):
         """Update playback position in seconds."""
@@ -359,7 +427,7 @@ class MPRIS2Player(dbus.service.Object):
             status = 'Paused'
         else:
             status = 'Stopped'
-        self.PlaybackStatus = status
+        self._set_playback_status(status)
 
 
 class MPRIS2Manager:
@@ -390,11 +458,10 @@ class MPRIS2Manager:
     def _setup_interfaces(self):
         """Set up MPRIS2 interfaces."""
         try:
-            # Create root interface
-            self.root = MPRIS2Root(self.bus, MPRIS2_OBJECT_PATH)
-            
-            # Create player interface
+            # Create combined object (player inherits from root, so both interfaces are on same path)
             self.player = MPRIS2Player(self.bus, MPRIS2_OBJECT_PATH)
+            # Keep reference to root for callbacks (it's the same object)
+            self.root = self.player
             
             logger.info("MPRIS2: Interfaces registered successfully")
         except Exception as e:
@@ -438,17 +505,18 @@ class MPRIS2Manager:
     def update_volume(self, volume: float):
         """Update volume."""
         if self.player:
-            self.player.Volume = volume
+            # Use Set method to update volume (triggers callback if needed)
+            self.player.Set(MPRIS2_PLAYER_INTERFACE, 'Volume', dbus.Double(volume))
     
     def update_can_go_next(self, can_go: bool):
         """Update whether Next() is available."""
         if self.player:
-            self.player.CanGoNext = can_go
+            self.player._set_can_go_next(can_go)
     
     def update_can_go_previous(self, can_go: bool):
         """Update whether Previous() is available."""
         if self.player:
-            self.player.CanGoPrevious = can_go
+            self.player._set_can_go_previous(can_go)
     
     def cleanup(self):
         """Clean up MPRIS2 resources."""

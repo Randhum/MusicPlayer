@@ -13,7 +13,8 @@ from core.audio_player import AudioPlayer, VIDEO_EXTENSIONS
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.metadata import TrackMetadata
-from core.moc_controller import MocController, MOC_PLAYLIST_PATH
+from core.moc_controller import MocController
+from core.mpris2 import MPRIS2Manager
 from core.music_library import MusicLibrary
 from core.playlist_manager import PlaylistManager
 from core.system_volume import SystemVolume
@@ -63,7 +64,6 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # MPRIS2 integration for desktop/media key support
         self.mpris2 = MPRIS2Manager()
-        self._setup_mpris2()
         
         # Initialize dock manager
         self.dock_manager = DockManager(self)
@@ -73,6 +73,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.player.on_position_changed = self._on_player_position_changed
         self.player.on_track_finished = self._on_track_finished
         self.player.on_track_loaded = self._on_track_loaded
+        
+        # Setup MPRIS2 callbacks (after player callbacks are set)
+        self._setup_mpris2()
         
         # Setup playlist manager
         self.playlist_manager.current_playlist = []
@@ -575,6 +578,43 @@ class MainWindow(Gtk.ApplicationWindow):
         # Update MPRIS2 metadata
         if self.mpris2:
             self.mpris2.update_metadata(track)
+    
+    def _setup_mpris2(self):
+        """Set up MPRIS2 callbacks for media key support."""
+        if not self.mpris2 or not self.mpris2.player:
+            return
+        
+        # Set playback control callbacks
+        def on_seek(offset_microseconds: int):
+            """Handle seek from MPRIS2 (offset in microseconds)."""
+            # Get current position and add offset
+            track = self.playlist_manager.get_current_track()
+            if self._should_use_moc(track):
+                # For MOC, get position from moc_sync
+                current_pos = self.moc_sync.get_position() if hasattr(self.moc_sync, 'get_position') else 0.0
+            else:
+                # For internal player, get from player
+                current_pos = self.player.position if hasattr(self.player, 'position') else 0.0
+            
+            offset_seconds = offset_microseconds / 1_000_000.0
+            new_position = max(0.0, current_pos + offset_seconds)
+            self._on_seek(self.player_controls, new_position)
+        
+        self.mpris2.set_playback_callbacks(
+            on_play=self._on_play,
+            on_pause=self._on_pause,
+            on_stop=self._on_stop,
+            on_next=self._on_next,
+            on_previous=self._on_prev,
+            on_seek=on_seek,
+            on_set_volume=lambda volume: self._on_volume_changed(self.player_controls, volume)
+        )
+        
+        # Set window control callbacks
+        self.mpris2.set_window_callbacks(
+            on_quit=lambda: self.close(),
+            on_raise=lambda: self.present()
+        )
     
     def _on_play(self):
         """Handle play button click - route to appropriate player."""

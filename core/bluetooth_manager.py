@@ -72,13 +72,41 @@ class BluetoothManager:
         # Track signal receivers for cleanup
         self._signal_receivers = []
         
-        self._setup_adapter()
-        self._setup_agent()
-        self._setup_signals()
-        self._refresh_devices()
+        # Check if BlueZ is available before initializing
+        self._bluez_available = self._check_bluez_available()
+        
+        if self._bluez_available:
+            self._setup_adapter()
+            self._setup_agent()
+            self._setup_signals()
+            self._refresh_devices()
+        else:
+            logger.warning("BlueZ service not available. Bluetooth features will be disabled.")
+            logger.info("To enable Bluetooth, start the BlueZ service: rc-service bluetooth start")
+    
+    def _check_bluez_available(self) -> bool:
+        """Check if BlueZ service is available on D-Bus."""
+        try:
+            # Try to get the name owner - if BlueZ is running, this will succeed
+            name_owner = self.bus.get_name_owner(self.BLUEZ_SERVICE)
+            return name_owner is not None
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                return False
+            # Other errors might be transient, log but don't fail
+            logger.debug("Error checking BlueZ availability: %s", e)
+            return False
+        except Exception as e:
+            logger.debug("Unexpected error checking BlueZ availability: %s", e)
+            return False
     
     def _setup_adapter(self):
         """Set up the Bluetooth adapter."""
+        if not self._bluez_available:
+            logger.debug("Skipping adapter setup - BlueZ not available")
+            return
+        
         try:
             # Get the default adapter
             manager = dbus.Interface(
@@ -95,11 +123,25 @@ class BluetoothManager:
             if self.adapter_path:
                 adapter_obj = self.bus.get_object(self.BLUEZ_SERVICE, self.adapter_path)
                 self.adapter_proxy = dbus.Interface(adapter_obj, self.ADAPTER_INTERFACE)
+                logger.info("Bluetooth adapter found: %s", self.adapter_path)
+            else:
+                logger.warning("No Bluetooth adapter found")
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'ServiceUnknown' in error_name or 'NameHasNoOwner' in error_name:
+                logger.warning("BlueZ service not available: %s", e)
+                self._bluez_available = False
+            else:
+                logger.error("Error setting up Bluetooth adapter: %s", e, exc_info=True)
         except Exception as e:
             logger.error("Error setting up Bluetooth adapter: %s", e, exc_info=True)
     
     def _setup_agent(self):
         """Set up the Bluetooth Agent for handling pairing confirmations."""
+        if not self._bluez_available:
+            logger.debug("Skipping agent setup - BlueZ not available")
+            return
+        
         try:
             # Create UI handler for pairing dialogs first
             self.agent_ui = BluetoothAgentUI(self.parent_window)
@@ -120,6 +162,14 @@ class BluetoothManager:
             logger.info("Bluetooth pairing agent set up successfully")
             if not self.adapter_path:
                 logger.warning("Adapter path not yet available, agent registered with default path")
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'ServiceUnknown' in error_name or 'NameHasNoOwner' in error_name:
+                logger.warning("BlueZ service not available for agent setup: %s", e)
+                self._bluez_available = False
+            else:
+                logger.error("Error setting up Bluetooth agent: %s", e, exc_info=True)
+                logger.warning("Pairing confirmations may not work properly")
         except Exception as e:
             logger.error("Error setting up Bluetooth agent: %s", e, exc_info=True)
             logger.warning("Pairing confirmations may not work properly")
@@ -190,6 +240,10 @@ class BluetoothManager:
     
     def _setup_signals(self):
         """Set up D-Bus signals for device changes."""
+        if not self._bluez_available:
+            logger.debug("Skipping signal setup - BlueZ not available")
+            return
+        
         try:
             # Set up properties changed signal
             receiver = self.bus.add_signal_receiver(
@@ -317,6 +371,10 @@ class BluetoothManager:
     
     def _refresh_devices(self):
         """Refresh the list of Bluetooth devices."""
+        if not self._bluez_available:
+            logger.debug("Skipping device refresh - BlueZ not available")
+            return
+        
         try:
             manager = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, '/'),
@@ -339,12 +397,23 @@ class BluetoothManager:
                     
                     if device.connected:
                         self.connected_device = device
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'ServiceUnknown' in error_name or 'NameHasNoOwner' in error_name:
+                logger.debug("BlueZ service not available for device refresh: %s", e)
+                self._bluez_available = False
+            else:
+                logger.error("Error refreshing Bluetooth devices: %s", e, exc_info=True)
         except Exception as e:
             logger.error("Error refreshing Bluetooth devices: %s", e, exc_info=True)
     
+    def is_available(self) -> bool:
+        """Check if BlueZ service is available."""
+        return self._bluez_available
+    
     def is_powered(self) -> bool:
         """Check if Bluetooth adapter is powered."""
-        if not self.adapter_path:
+        if not self._bluez_available or not self.adapter_path:
             return False
         
         try:
@@ -359,6 +428,10 @@ class BluetoothManager:
             return False
     
     def set_powered(self, powered: bool) -> bool:
+        """Set Bluetooth adapter power state."""
+        if not self._bluez_available:
+            logger.warning("Cannot set power state - BlueZ not available")
+            return False
         """Set Bluetooth adapter power state."""
         if not self.adapter_path:
             return False
@@ -404,6 +477,9 @@ class BluetoothManager:
             return False
     
     def get_devices(self) -> List[BluetoothDevice]:
+        """Get list of known Bluetooth devices."""
+        if not self._bluez_available:
+            return []
         """Get list of all known Bluetooth devices."""
         return list(self.devices.values())
     
@@ -412,6 +488,10 @@ class BluetoothManager:
         return self.connected_device
     
     def pair_device(self, device_path: str) -> bool:
+        """Pair with a Bluetooth device."""
+        if not self._bluez_available:
+            logger.warning("Cannot pair device - BlueZ not available")
+            return False
         """
         Pair with a Bluetooth device.
         
@@ -449,6 +529,10 @@ class BluetoothManager:
             return False
     
     def connect_device(self, device_path: str) -> bool:
+        """Connect to a Bluetooth device."""
+        if not self._bluez_available:
+            logger.warning("Cannot connect device - BlueZ not available")
+            return False
         """
         Connect to a Bluetooth device.
         
@@ -511,6 +595,10 @@ class BluetoothManager:
             return False
     
     def disconnect_device(self, device_path: str) -> bool:
+        """Disconnect a Bluetooth device."""
+        if not self._bluez_available:
+            logger.warning("Cannot disconnect device - BlueZ not available")
+            return False
         """
         Disconnect from a Bluetooth device.
         
