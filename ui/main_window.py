@@ -309,6 +309,30 @@ class MainWindow(Gtk.ApplicationWindow):
             scale trough {
                 min-height: 8px;
             }
+            
+            /* Album art placeholder styling */
+            .album-art-placeholder {
+                background: #667eea;
+                border-radius: 12px;
+                opacity: 0.85;
+            }
+            
+            .placeholder-icon {
+                opacity: 0.7;
+                color: white;
+            }
+            
+            .placeholder-text {
+                color: white;
+                font-size: 12px;
+                font-weight: 500;
+                opacity: 0.95;
+            }
+            
+            .album-art {
+                border-radius: 12px;
+                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            }
         """)
         
         display = self.get_display()
