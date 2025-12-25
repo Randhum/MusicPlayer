@@ -31,13 +31,13 @@ class MocController:
         # Get playlist path from config
         config = get_config()
         self._playlist_path: Path = config.moc_playlist_path
-        # Track whether we've already attempted to start the server to avoid
-        # spamming `mocp --server` on every status poll.
-        self._server_initialized: bool = False
+        # Track whether server is available (we know it's running or we started it)
+        # This avoids spamming `mocp --server` on every status poll.
+        self._server_available: bool = False
         # Status caching to reduce MOC server load
         self._status_cache: Optional[Dict] = None
         self._status_cache_time: float = 0.0
-        self._status_cache_ttl: float = 0.2  # Cache for 200ms to reduce calls
+        self._status_cache_ttl: float = 0.4  # Cache for 400ms (matches polling interval better)
         # Error tracking for backoff
         self._last_error_time: float = 0.0
         self._error_backoff: float = 1.0  # Start with 1 second backoff
@@ -71,16 +71,29 @@ class MocController:
             )
             
             # Check for server connection errors and handle gracefully
+            # Reset server availability flag on connection failures
             if result.returncode != 0 and result.stderr:
                 stderr_lower = result.stderr.lower()
-                if "server is not running" in stderr_lower or "can't receive value" in stderr_lower or "can't connect" in stderr_lower:
-                    self._server_initialized = False
-                    self._status_cache = None
+                # Check for server connection errors (be specific to avoid false positives)
+                server_errors = [
+                    "server is not running",
+                    "can't receive value",
+                    "can't connect",
+                    "connection refused",
+                ]
+                if any(err in stderr_lower for err in server_errors):
+                    # Only reset if this isn't a --server command (we handle those separately)
+                    if "--server" not in args:
+                        self._server_available = False
+                        self._status_cache = None
                     return subprocess.CompletedProcess(args=cmd, returncode=125, stdout="", stderr="")
             
             # Clear status cache on successful command (except for --info and --server)
+            # This ensures UI reflects changes immediately after control commands
             if "--info" not in args and "--server" not in args:
                 self._status_cache = None
+                # Also reset cache time to force refresh on next get_status() call
+                self._status_cache_time = 0.0
             return result
         except subprocess.TimeoutExpired:
             # Timeout - return error result
@@ -89,27 +102,57 @@ class MocController:
             # Other errors - return error result
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
-    def ensure_server(self):
-        """Start the MOC server if it is not already running."""
+    def ensure_server(self) -> Tuple[bool, bool]:
+        """Ensure MOC server is running.
+        
+        Since `mocp --server` is idempotent (starts if not running, no-op if running),
+        we can just call it directly without checking first. This simplifies the logic
+        and avoids race conditions.
+        
+        Returns:
+            tuple: (success: bool, was_already_running: bool)
+                - success: True if server is now available, False otherwise
+                - was_already_running: True if server was already running before this call
+        """
         if not self.is_available():
-            return False
-        if self._server_initialized:
-            return True
+            return False, False
+        
+        # If we already know server is available, return early (most common case)
+        if self._server_available:
+            return True, True
+        
+        # Call --server directly (idempotent - starts if needed, no-op if running)
         result = self._run("--server", capture_output=True)
+        
         if result.returncode == 0:
-            time.sleep(0.1)
-            self._server_initialized = True
-            return True
-        return False
+            # Server is now available - try a quick status check to see if it was already running
+            # We use a lightweight check: if --info works immediately, server was likely already running
+            # This avoids the overhead of a separate is_server_running() call
+            status_result = self._run("--info", capture_output=True)
+            was_already_running = status_result.returncode == 0 and bool(status_result.stdout)
+            
+            # Give server a moment to fully start if we just started it
+            if not was_already_running:
+                time.sleep(0.1)
+            
+            self._server_available = True
+            return True, was_already_running
+        
+        # Failed to start server
+        return False, False
 
     # ------------------------------------------------------------------
     # Playlist
     # ------------------------------------------------------------------
-    def get_playlist(self) -> Tuple[List[TrackMetadata], int]:
+    def get_playlist(self, current_file: Optional[str] = None) -> Tuple[List[TrackMetadata], int]:
         """
         Read MOC's current playlist and return (tracks, current_index).
 
         current_index is -1 if there is no active track.
+        
+        Args:
+            current_file: Optional file path of current track. If not provided,
+                         will be fetched from status. Pass this to avoid redundant status call.
         """
         tracks: List[TrackMetadata] = []
         current_index = -1
@@ -117,9 +160,11 @@ class MocController:
         if not self._playlist_path.exists():
             return tracks, current_index
 
-        # Get current track path from status so we can align indices
-        status = self.get_status()
-        current_file = status.get("file_path") if status else None
+        # Get current track path from status if not provided
+        # This allows callers to pass it to avoid redundant status calls
+        if current_file is None:
+            status = self.get_status()
+            current_file = status.get("file_path") if status else None
 
         try:
             with self._playlist_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -173,9 +218,13 @@ class MocController:
             # Return cached status if available, otherwise None
             return self._status_cache
 
-        if not self.ensure_server():
-            self._status_cache = None
-            return None
+        # Only check server if we don't know it's available
+        # This avoids redundant ensure_server() calls when server is already known to be running
+        if not self._server_available:
+            success, _ = self.ensure_server()
+            if not success:
+                self._status_cache = None
+                return None
         
         result = self._run("--info", capture_output=True)
         
@@ -296,7 +345,7 @@ class MocController:
         # We don't call ensure_server() here on purpose – if the server is not
         # running, there is nothing to shut down.
         self._run("--exit")
-        self._server_initialized = False
+        self._server_available = False
 
     def next(self):
         """Skip to next track."""
@@ -390,10 +439,31 @@ class MocController:
         """
         if not self.is_available():
             return
-        self.ensure_server()
+        
+        # Ensure server is running and ready
+        success, was_already_running = self.ensure_server()
+        if not success:
+            logger.warning("Cannot set playlist - MOC server not available")
+            return
+        
+        # If server was just started, wait a bit and verify it's ready
+        if not was_already_running:
+            time.sleep(0.2)  # Give server time to fully initialize
+            # Verify server is ready by checking status
+            verify_status = self.get_status(force_refresh=True)
+            if not verify_status:
+                logger.warning("MOC server started but not ready for playlist operations")
+                # Try one more time after a longer wait
+                time.sleep(0.3)
+                verify_status = self.get_status(force_refresh=True)
+                if not verify_status:
+                    logger.error("MOC server not responding after initialization")
+                    return
 
         # Clear existing playlist
-        self._run("-c")  # equivalent to --clear
+        clear_result = self._run("-c", capture_output=True)  # equivalent to --clear
+        if clear_result.returncode != 0:
+            logger.warning("Failed to clear MOC playlist: %s", clear_result.stderr)
 
         # Validate and add tracks to MOC playlist
         # Track which tracks were successfully added (by original index)
@@ -425,17 +495,29 @@ class MocController:
                     error_msg += f" - Output: {result.stdout.strip()}"
                 logger.warning(error_msg)
                 
-                # Check if MOC server is running
+                # Check if MOC server is still responsive
                 status = self.get_status(force_refresh=False)
                 if not status:
-                    logger.warning("MOC server may not be running - attempting to start it")
-                    self.ensure_server()
-                    # Retry once after ensuring server is running
-                    retry_result = self._run("-a", abs_path, capture_output=True)
-                    if retry_result.returncode == 0:
-                        successfully_added[idx] = moc_playlist_index
-                        moc_playlist_index += 1
-                        logger.debug("Successfully added track after server restart: %s", abs_path)
+                    logger.warning("MOC server may have stopped - attempting to restart")
+                    # Reset server availability flag to force restart
+                    self._server_available = False
+                    success, _ = self.ensure_server()
+                    if success:
+                        time.sleep(0.2)  # Wait for server to be ready
+                        # Retry once after ensuring server is running
+                        retry_result = self._run("-a", abs_path, capture_output=True)
+                        if retry_result.returncode == 0:
+                            successfully_added[idx] = moc_playlist_index
+                            moc_playlist_index += 1
+                            logger.debug("Successfully added track after server restart: %s", abs_path)
+                        else:
+                            logger.warning("Retry failed for track: %s", abs_path)
+                    else:
+                        logger.error("Could not restart MOC server")
+                else:
+                    # Server is running but track add failed - might be a file issue
+                    # Don't retry in this case, just log and continue
+                    logger.debug("Server is running but track add failed - likely file format issue")
 
         # Optionally start playback from the selected track
         if start_playback and 0 <= current_index < len(tracks):
