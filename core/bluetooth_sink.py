@@ -8,10 +8,10 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
-from core.bluetooth_manager import BluetoothManager
+from core.bluetooth_manager import BluetoothManager, BluetoothDevice
 from core.logging import get_logger
 
-logger = get_logger(__name__), BluetoothDevice
+logger = get_logger(__name__)
 
 
 class BluetoothSink:
@@ -142,6 +142,12 @@ class BluetoothSink:
         - Sets adapter to discoverable and pairable
         - Configures audio routing for A2DP streams
         """
+        # Check if BlueZ is available
+        if not self.bt_manager.is_available():
+            logger.warning("Cannot enable sink mode - BlueZ service not available")
+            logger.info("Start the BlueZ service: rc-service bluetooth start")
+            return False
+        
         try:
             # Ensure Bluetooth is powered on
             if not self.bt_manager.is_powered():
