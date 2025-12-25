@@ -166,6 +166,8 @@ You should see a window with your music library, playlist, and Bluetooth control
   - **Play / Pause / Stop / Previous / Next**: control the current playlist.
   - **Shuffle**: toggle to play the current playlist in **random order**; the *Next* button and automatic track advance will pick a random track instead of the next in sequence.
   - **Seek & Volume**: larger, touch-friendly sliders for scrubbing through the track and adjusting volume.
+    - **Progress slider**: Click or drag to seek to any position in the track. The slider can reach the full end of the song (100% position). Time labels update in real-time during seeking for immediate feedback.
+    - **Time display**: Shows current position (left), total duration (right), and time remaining (below duration) for easy tracking of playback progress.
 
 ### Desktop Integration (MPRIS2)
 
@@ -177,65 +179,15 @@ The player supports **MPRIS2** (Media Player Remote Interfacing Specification) f
 - **Metadata sync**: Track information (title, artist, album, artwork) is automatically synchronized with the desktop environment
 - **Position tracking**: Playback position is continuously updated for accurate progress display
 
-All MPRIS2 features work seamlessly with both MOC (for audio files) and the internal GStreamer player (for video files).
+### MOC Integration (Optional)
 
-### MOC Integration (Music On Console, Gentoo)
+If `mocp` is installed (Gentoo package `media-sound/moc`), the app integrates with MOC (Music On Console):
 
-If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
-
-- **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel.
-- **Write back changes** you make in the GTK playlist (add/remove/move/clear/search-based queues) into MOC's internal playlist so both stay aligned.
-- **Sync player controls** with MOC:
-  - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood.
-  - The **volume slider** controls MOC's volume.
-  - The **current track / time** display follows whatever MOC is playing.
-  - **Autoplay (autonext)** is automatically enabled when the app starts, ensuring tracks automatically advance to the next song.
-  - **Shuffle** toggle is fully synchronized with MOC - when you toggle shuffle in the UI, it also toggles MOC's shuffle mode, and vice versa (changes made in MOC's UI are reflected in the GTK app).
-- The MOC server is started automatically via `mocp --server` when needed, so you can keep using MOC in the terminal and the GTK UI side by side.
-
-#### File type handling with MOC vs internal player
-
-- MOC is primarily an **audio player**; our internal GStreamer-based player supports both **audio and video containers** (e.g. MP4, MKV, WebM).
-- When `mocp` is available, the app will:
-  - Use **MOC for pure audio files** (MP3, FLAC, OGG, etc.).
-  - Automatically **prefer the internal player for video containers** (`.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.flv`, `.wmv`, `.m4v`), even if MOC is installed.
-    - This avoids handing formats to MOC that it may not support as reliably.
-    - Playback, seeking and volume for these video files are handled entirely by GStreamer, just like when MOC is not available.
-  - Cleanly **shut down the MOC server** (`mocp --exit`) when you close the GTK app window, so there are no stray `mocp` servers left running from this UI.
-
-In all cases, when we hand playback responsibility from one backend to the other (for example, from a video file played via GStreamer to an audio-only playlist in MOC), any active GStreamer pipeline is stopped first, ensuring that previous video streams are not left running in the background.
-
-#### How playlist sync behaves with external `mocp` changes
-
-The app provides **bidirectional synchronization** between the GTK interface and MOC:
-
-**App → MOC (Your changes in the GTK app):**
-- All playlist modifications (add, remove, reorder tracks) automatically sync to MOC
-- Playback controls (play, pause, stop, next, previous) are sent to MOC
-- Volume changes sync to MOC
-- Shuffle state syncs to MOC
-
-**MOC → App (External changes via `mocp` CLI or UI):**
-- The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes
-- Whenever MOC reports that the **current track changed**, the app automatically reloads the full playlist from `~/.moc/playlist.m3u` and updates the selection to follow the current MOC track
-- If MOC starts playing a different track than expected, the app detects this and reloads the playlist to sync
-
-**Important limitation:** MOC keeps its playlist in memory and only saves to `~/.moc/playlist.m3u` at certain times (e.g., when MOC exits, or when you press `S` in the MOC UI to save). This means:
-
-- If you modify the playlist in MOC's UI **without changing tracks or saving**, the app will still show the old playlist until you either:
-  - Skip to another track in MOC (triggers automatic reload on every track change)
-  - Press `S` in MOC's ncurses UI to save the playlist
-  - Click the **Refresh** button (🔄) in this app's playlist panel
-
-**Sync behavior:**
-- **Changes are reflected** when:
-  - You skip to another track in MOC (automatic reload on every track change)
-  - MOC saves its playlist (press `S` in MOC, or when MOC exits)
-  - You click the **Refresh** button in the playlist panel
-  - You make changes in the GTK app (immediately synced to MOC)
-- There may be a **small delay (up to ~0.5s)** because status and playlist are polled periodically
-- If `~/.moc/playlist.m3u` is moved or disabled, the GTK playlist will no longer auto-sync until it becomes available again
-- The app automatically detects when MOC is playing independently and syncs accordingly
+- **Playlist synchronization**: The GTK playlist mirrors MOC's playlist from `~/.moc/playlist.m3u`
+- **Bidirectional sync**: Changes in either the GTK app or MOC are synchronized
+- **Player controls**: Playback controls (play, pause, volume, shuffle) control MOC when available
+- **File type handling**: MOC handles audio files; video containers (MP4, MKV, WebM, etc.) use the internal GStreamer player
+- **Automatic server management**: MOC server is started automatically and shut down when the app closes
 
 ---
 
@@ -409,11 +361,17 @@ emerge -av media-plugins/gst-plugins-flac      # FLAC audio
 emerge -av media-plugins/gst-plugins-openh264  # H.264 video
 ```
 
-### "MOC error: No files added - no sound files on command line!"
+### "MOC error: Failed to add track to MOC playlist!"
 
-This error occurs when trying to play a track that has an invalid or missing file path. The app now validates file paths before sending them to MOC, but if you see this error:
+This error can occur during app initialization or when syncing playlists:
 
 ```bash
+# Check if MOC server is running
+mocp --info
+
+# If not running, start it manually
+mocp --server
+
 # Check if the track file exists
 ls -l /path/to/your/track.mp3
 
@@ -421,24 +379,9 @@ ls -l /path/to/your/track.mp3
 # The app will automatically skip invalid tracks when syncing to MOC
 ```
 
-**What was fixed:**
-- File path validation before adding tracks to MOC playlist
-- Validation before attempting playback
-- Better error messages to identify problematic tracks
-- Tracks with missing files are automatically skipped when syncing to MOC
-
 ### "Songs don't automatically advance to the next track!"
 
-If playback stops when a song finishes instead of automatically playing the next song:
-
-**What was fixed:**
-- Improved end-of-track detection in MOC synchronization
-- Automatic next track advancement when a track finishes
-- Autonext is now always enabled when starting playback
-- Shuffle mode now works correctly with automatic track advancement
-- Better handling of track completion for both sequential and shuffled playback
-
-The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. When shuffle is enabled, the app works with MOC's shuffle feature to play tracks in random order.
+If playback stops when a song finishes instead of automatically playing the next song, ensure autonext is enabled. The app should automatically advance to the next track when a song finishes. When shuffle is enabled, tracks play in random order.
 
 ### "Panel layout is messed up!"
 

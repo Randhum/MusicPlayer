@@ -99,15 +99,88 @@ class MocSyncHelper:
         return self.use_moc and not self.is_video_track(track)
     
     def initialize(self):
-        """Initialize MOC server and settings."""
+        """Initialize MOC server and settings.
+        
+        If MOC is already running, loads its current state but then
+        maintains the app as orchestrator by syncing our playlist to MOC.
+        """
         if not self.use_moc:
             return False
         
-        if self.moc_controller.ensure_server():
-            self.moc_controller.enable_autonext()
-            self.sync_shuffle_from_moc()
-            return True
-        return False
+        success, was_already_running = self.moc_controller.ensure_server()
+        if not success:
+            return False
+        
+        # If MOC was already running, detect and load its current state
+        if was_already_running:
+            logger.info("MOC server was already running - detecting current state")
+            # Load playlist and state from running MOC
+            self._load_state_from_running_moc()
+        
+        # Always ensure autonext is enabled and sync shuffle state
+        self.moc_controller.enable_autonext()
+        self.sync_shuffle_from_moc()
+        
+        # Sync our playlist to MOC to take control (app remains orchestrator)
+        # This ensures that even if MOC had a playlist, we sync ours to it
+        # Only sync if we have a playlist (either loaded from MOC or already in app)
+        tracks = self.playlist_manager.get_playlist()
+        if tracks:
+            current_index = self.playlist_manager.get_current_index()
+            # Sync playlist to MOC but don't start playback - app controls playback
+            self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
+            logger.info("Synced %d tracks to MOC - app is now orchestrator", len(tracks))
+        
+        return True
+    
+    def _load_state_from_running_moc(self):
+        """Load current state from a running MOC instance."""
+        # Get current status
+        status = self.moc_controller.get_status(force_refresh=True)
+        if not status:
+            return
+        
+        # Get current file from status to pass to get_playlist (avoids redundant status call)
+        current_file = status.get("file_path")
+        
+        # Load playlist from MOC (pass current_file to avoid redundant status call)
+        moc_tracks, moc_index = self.moc_controller.get_playlist(current_file=current_file)
+        
+        # If MOC has a playlist, load it into our app
+        if moc_tracks:
+            self.playlist_manager.clear()
+            self.playlist_manager.add_tracks(moc_tracks)
+            if moc_index >= 0:
+                self.playlist_manager.set_current_index(moc_index)
+            self.playlist_view.set_playlist(moc_tracks, moc_index)
+            logger.info("Loaded %d tracks from running MOC instance", len(moc_tracks))
+        
+        # Update playback state
+        state = status.get("state", "STOP")
+        file_path = status.get("file_path")
+        
+        if file_path:
+            self.last_file = file_path
+            # Update metadata
+            track = TrackMetadata(file_path)
+            self.metadata_panel.set_track(track)
+        
+        # Update UI playback state
+        if state == "PLAY":
+            self.player_controls.set_playing(True)
+        elif state == "PAUSE":
+            self.player_controls.set_playing(False)
+        
+        # Update position if available
+        position = float(status.get("position", 0.0))
+        duration = float(status.get("duration", 0.0))
+        if duration > 0:
+            self.player_controls.update_progress(position, duration)
+        
+        # Sync shuffle state
+        self.sync_shuffle_from_moc()
+        
+        logger.info("Loaded state from running MOC: %s, track: %s", state, file_path)
     
     def sync_shuffle_from_moc(self):
         """Sync shuffle state from MOC to UI."""
@@ -334,7 +407,7 @@ class MocSyncHelper:
             # MOC handles autonext automatically, so we detect when the file_path changes
             # This is the primary mechanism for track advancement
             if file_path and file_path != self.last_file:
-                # Track changed - MOC has advanced to next track or changed externally
+                # Track changed - MOC has advanced to next track or changed externally (e.g., via mocp next button)
                 # Mark the previous track as played if shuffle is enabled
                 if self.shuffle_enabled and self.last_file:
                     self.played_tracks_in_shuffle.add(self.last_file)
@@ -342,9 +415,10 @@ class MocSyncHelper:
                 self.last_file = file_path
                 self.end_detected = False
                 
-                # When track changes, reload full playlist from MOC to ensure sync
-                # This handles cases where MOC playlist was modified externally
-                moc_tracks, moc_index = self.moc_controller.get_playlist()
+                # When track changes (especially from external mocp commands), reload full playlist from MOC
+                # This ensures we're in sync with MOC's current state
+                # Pass current_file to avoid redundant status call
+                moc_tracks, moc_index = self.moc_controller.get_playlist(current_file=file_path)
                 if moc_tracks:
                     # MOC has a playlist - sync it to our app
                     self.playlist_manager.clear()
@@ -478,16 +552,20 @@ class MocSyncHelper:
         else:
             # Not using MOC for current track, but MOC might be playing independently
             # Detect if MOC is playing a different track than our current one
+            # This handles cases where user clicks "next" in mocp while app is using internal player
             if file_path and state == "PLAY":
                 current_track = self.playlist_manager.get_current_track()
                 if not current_track or file_path != current_track.file_path:
-                    # MOC is playing independently - reload playlist from MOC to sync
+                    # MOC is playing independently (e.g., user clicked next in mocp)
+                    # Reload playlist from MOC to sync with external changes
                     if self.sync_enabled:
                         # Disable sync temporarily to allow reloading from MOC
                         self.sync_enabled = False
-                    # Reload playlist from MOC to sync with external changes
+                    # Force reload to sync with MOC's current state
                     self.load_playlist_from_moc()
-                    self.last_file = file_path
+                    # Update last_file to prevent duplicate track change detection
+                    if file_path != self.last_file:
+                        self.last_file = file_path
             elif state == "STOP":
                 # Both are stopped - re-enable sync for next playback
                 if not self.sync_enabled:

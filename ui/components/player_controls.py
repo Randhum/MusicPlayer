@@ -35,7 +35,7 @@ class PlayerControls(Gtk.Box):
         progress_box.append(self.time_label)
         
         self.progress_scale = Gtk.Scale.new_with_range(
-            Gtk.Orientation.HORIZONTAL, 0.0, 100.0, 1.0
+            Gtk.Orientation.HORIZONTAL, 0.0, 100.0, 0.1
         )
         self.progress_scale.set_draw_value(False)
         self.progress_scale.set_hexpand(True)
@@ -51,13 +51,22 @@ class PlayerControls(Gtk.Box):
         gesture_release.connect('released', self._on_progress_release)
         self.progress_scale.add_controller(gesture_release)
         
-        # Connect value-changed for seeking
+        # Connect value-changed for seeking (both click and drag)
         self.progress_scale.connect('value-changed', self._on_progress_changed)
         progress_box.append(self.progress_scale)
         
+        # Duration and time remaining labels in a vertical box
+        time_labels_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.duration_label = Gtk.Label(label="00:00")
         self.duration_label.set_size_request(50, -1)
-        progress_box.append(self.duration_label)
+        time_labels_box.append(self.duration_label)
+        
+        self.time_remaining_label = Gtk.Label(label="-00:00")
+        self.time_remaining_label.set_size_request(50, -1)
+        self.time_remaining_label.add_css_class("dim-label")
+        time_labels_box.append(self.time_remaining_label)
+        
+        progress_box.append(time_labels_box)
         
         self.append(progress_box)
         
@@ -148,7 +157,9 @@ class PlayerControls(Gtk.Box):
         # Update slider only when not seeking (prevents interference during drag)
         if not self._seeking:
             if duration > 0:
+                # Calculate progress percentage, allowing up to 100% to reach the end
                 progress = (position / duration) * 100.0
+                # Allow progress to reach exactly 100.0 when at the end
                 progress = max(0.0, min(100.0, progress))
             else:
                 progress = 0.0
@@ -157,6 +168,13 @@ class PlayerControls(Gtk.Box):
         # Always update time labels
         self.time_label.set_text(self._format_time(position))
         self.duration_label.set_text(self._format_time(duration))
+        
+        # Update time remaining label
+        if duration > 0:
+            remaining = max(0.0, duration - position)
+            self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
+        else:
+            self.time_remaining_label.set_text("-00:00")
     
     def reset_seeking(self):
         """Reset seeking state - call this after a seek operation completes."""
@@ -180,7 +198,19 @@ class PlayerControls(Gtk.Box):
         """Handle progress bar value change during seeking."""
         if self._seeking and self._duration > 0:
             value = scale.get_value()
-            position = (value / 100.0) * self._duration
+            # Calculate position from percentage, allowing to reach the full duration
+            # When value is 100.0, position should be exactly duration
+            if value >= 100.0:
+                position = self._duration
+            else:
+                position = (value / 100.0) * self._duration
+            
+            # Update time labels immediately during seeking for better feedback
+            self.time_label.set_text(self._format_time(position))
+            remaining = max(0.0, self._duration - position)
+            self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
+            
+            # Emit seek signal
             self.emit('seek-changed', position)
     
     def _on_progress_press(self, gesture, n_press, x, y):
@@ -195,10 +225,20 @@ class PlayerControls(Gtk.Box):
                 self.progress_scale.set_value(percentage)
     
     def _on_progress_release(self, gesture, n_press, x, y):
-        """Handle progress bar release - seeking state will be reset after seek completes."""
+        """Handle progress bar release - finalize seek position."""
+        # On release, ensure we seek to the final position
+        if self._seeking and self._duration > 0:
+            value = self.progress_scale.get_value()
+            # Calculate final position, allowing to reach the full duration
+            if value >= 100.0:
+                position = self._duration
+            else:
+                position = (value / 100.0) * self._duration
+            
+            # Emit final seek signal
+            self.emit('seek-changed', position)
         # Don't reset _seeking here - let the seek handler do it after the operation completes
         # This prevents slider from jumping during the seek operation
-        pass
     
     def _on_volume_changed(self, scale):
         """Handle volume slider change."""
