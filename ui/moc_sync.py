@@ -17,6 +17,9 @@ from gi.repository import GLib
 from core.metadata import TrackMetadata
 from core.config import get_config
 from core.moc_controller import MocController
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class MocSyncHelper:
@@ -35,7 +38,8 @@ class MocSyncHelper:
                  player_controls,
                  metadata_panel,
                  playlist_view,
-                 is_video_track_fn: Callable[[Optional[TrackMetadata]], bool]):
+                 is_video_track_fn: Callable[[Optional[TrackMetadata]], bool],
+                 mpris2=None):
         """
         Initialize MOC sync helper.
         
@@ -46,6 +50,7 @@ class MocSyncHelper:
             metadata_panel: MetadataPanel instance
             playlist_view: PlaylistView instance
             is_video_track_fn: Function to check if track is video
+            mpris2: Optional MPRIS2Manager instance for desktop integration
         """
         self.moc_controller = moc_controller
         self.playlist_manager = playlist_manager
@@ -53,6 +58,7 @@ class MocSyncHelper:
         self.metadata_panel = metadata_panel
         self.playlist_view = playlist_view
         self.is_video_track = is_video_track_fn
+        self.mpris2 = mpris2
         
         self.use_moc = moc_controller.is_available()
         
@@ -73,6 +79,11 @@ class MocSyncHelper:
         # Callbacks
         self.on_track_finished: Optional[Callable] = None
         self.on_shuffle_changed: Optional[Callable[[bool], None]] = None
+        
+        # Debouncing for sync operations to prevent rapid-fire syncs
+        self._sync_timeout_id: Optional[int] = None
+        self._sync_pending: bool = False
+        self._sync_start_playback: bool = False
         
         # Initialize playlist mtime if file exists
         config = get_config()
@@ -125,16 +136,40 @@ class MocSyncHelper:
                 self.played_tracks_in_shuffle.add(current_track.file_path)
     
     def sync_playlist_to_moc(self, start_playback: bool = False):
-        """Sync current playlist to MOC."""
+        """Sync current playlist to MOC with debouncing to prevent rapid-fire syncs."""
         if not self.use_moc or not self.sync_enabled:
             return
+        
+        # Cancel any pending sync
+        if self._sync_timeout_id is not None:
+            GLib.source_remove(self._sync_timeout_id)
+            self._sync_timeout_id = None
+        
+        # Update pending sync parameters
+        self._sync_pending = True
+        self._sync_start_playback = start_playback or self._sync_start_playback
+        
+        # Schedule sync after a short delay (debounce)
+        # This prevents multiple rapid syncs when adding many tracks
+        self._sync_timeout_id = GLib.timeout_add(300, self._do_sync_playlist_to_moc)  # 300ms debounce
+    
+    def _do_sync_playlist_to_moc(self):
+        """Actually perform the sync (called after debounce delay)."""
+        self._sync_timeout_id = None
+        
+        if not self._sync_pending:
+            return False
+        
+        self._sync_pending = False
+        start_playback = self._sync_start_playback
+        self._sync_start_playback = False
         
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
         
         if not tracks:
             self.moc_controller.set_playlist([], -1, start_playback=False)
-            return
+            return False
         
         track = self.playlist_manager.get_current_track()
         if track and self.should_use_moc(track) and start_playback:
@@ -143,6 +178,8 @@ class MocSyncHelper:
         else:
             # Not using MOC for current track - just sync playlist
             self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
+        
+        return False  # Don't repeat
     
     def sync_playlist_for_playback(self):
         """Sync playlist to MOC when starting playback."""
@@ -187,6 +224,7 @@ class MocSyncHelper:
         if not self.use_moc:
             return
         
+        # Load playlist from MOC
         tracks, current_index = self.moc_controller.get_playlist()
         
         if tracks:
@@ -197,6 +235,10 @@ class MocSyncHelper:
             self.playlist_view.set_playlist(tracks, current_index)
             # Reset shuffle tracking when loading a new playlist
             self.reset_shuffle_tracking()
+            
+            # Load full metadata asynchronously in background
+            # This prevents blocking the UI
+            GLib.idle_add(self._load_metadata_async, 0)
         elif not tracks:
             # Check if MOC is playing something - if so, it has a playlist in memory
             status = self.moc_controller.get_status()
@@ -204,6 +246,49 @@ class MocSyncHelper:
                 # MOC is playing but we can't read the playlist file
                 # Don't clear - MOC has tracks in memory that aren't saved yet
                 pass
+    
+    def _load_metadata_async(self, start_index: int = 0) -> bool:
+        """Load full metadata for tracks asynchronously (non-blocking)."""
+        tracks = self.playlist_manager.get_playlist()
+        if not tracks:
+            return False
+        
+        # Process a batch of tracks (10 at a time) to keep UI responsive
+        batch_size = 10
+        end_index = min(start_index + batch_size, len(tracks))
+        
+        for i in range(start_index, end_index):
+            track = tracks[i]
+            if not track or not track.file_path:
+                continue
+            
+            # Only load metadata if we don't have it yet (title is just filename)
+            if not track.title or track.title == Path(track.file_path).stem:
+                try:
+                    full_metadata = TrackMetadata(track.file_path)
+                    # Update track with full metadata
+                    track.title = full_metadata.title
+                    track.artist = full_metadata.artist
+                    track.album = full_metadata.album
+                    track.album_artist = full_metadata.album_artist
+                    track.track_number = full_metadata.track_number
+                    track.duration = full_metadata.duration
+                    track.album_art_path = full_metadata.album_art_path
+                    track.genre = full_metadata.genre
+                    track.year = full_metadata.year
+                except Exception as e:
+                    logger.debug("Error loading metadata for %s: %s", track.file_path, e)
+        
+        # Update playlist view with what we have so far
+        self.playlist_view.set_playlist(tracks, self.playlist_manager.get_current_index())
+        
+        # If there are more tracks to process, schedule continuation
+        if end_index < len(tracks):
+            GLib.idle_add(self._load_metadata_async, end_index)
+            return False
+        
+        # All metadata loaded
+        return False  # Don't repeat
     
     def update_status(self) -> bool:
         """
@@ -233,17 +318,23 @@ class MocSyncHelper:
             # Update playback state
             self.player_controls.set_playing(state == "PLAY")
             
+            # Update MPRIS2 playback status
+            if self.mpris2:
+                is_playing = state == "PLAY"
+                is_paused = state == "PAUSE"
+                self.mpris2.update_playback_status(is_playing, is_paused=is_paused)
+            
             # Update position display
             if duration > 0:
                 self.player_controls.update_progress(position, duration)
             elif position > 0:
                 self.player_controls.update_progress(position, 0.0)
             
-            # Detect track change (MOC auto-advancement when track finishes)
+            # Detect track change (MOC auto-advancement when track finishes or external change)
             # MOC handles autonext automatically, so we detect when the file_path changes
             # This is the primary mechanism for track advancement
             if file_path and file_path != self.last_file:
-                # Track changed - MOC has advanced to next track
+                # Track changed - MOC has advanced to next track or changed externally
                 # Mark the previous track as played if shuffle is enabled
                 if self.shuffle_enabled and self.last_file:
                     self.played_tracks_in_shuffle.add(self.last_file)
@@ -251,24 +342,57 @@ class MocSyncHelper:
                 self.last_file = file_path
                 self.end_detected = False
                 
-                # Update metadata and playlist
-                new_track = TrackMetadata(file_path)
-                self.metadata_panel.set_track(new_track)
-                
-                # Find and select this track in our playlist
-                playlist = self.playlist_manager.get_playlist()
-                found_in_playlist = False
-                for idx, t in enumerate(playlist):
-                    if t.file_path == file_path:
-                        self.playlist_manager.set_current_index(idx)
-                        self.playlist_view.set_playlist(playlist, idx)
-                        found_in_playlist = True
-                        break
-                
-                # If track not found in playlist, it means MOC advanced to a track
-                # that's not in our current playlist - notify callback to handle it
-                if not found_in_playlist and self.on_track_finished:
-                    self.on_track_finished()
+                # When track changes, reload full playlist from MOC to ensure sync
+                # This handles cases where MOC playlist was modified externally
+                moc_tracks, moc_index = self.moc_controller.get_playlist()
+                if moc_tracks:
+                    # MOC has a playlist - sync it to our app
+                    self.playlist_manager.clear()
+                    self.playlist_manager.add_tracks(moc_tracks)
+                    # Find the current track in the loaded playlist
+                    found_index = -1
+                    for idx, t in enumerate(moc_tracks):
+                        if t.file_path == file_path:
+                            found_index = idx
+                            break
+                    if found_index >= 0:
+                        self.playlist_manager.set_current_index(found_index)
+                        self.playlist_view.set_playlist(moc_tracks, found_index)
+                    else:
+                        # Track not in playlist - use MOC's reported index
+                        if moc_index >= 0:
+                            self.playlist_manager.set_current_index(moc_index)
+                            self.playlist_view.set_playlist(moc_tracks, moc_index)
+                        else:
+                            self.playlist_view.set_playlist(moc_tracks, -1)
+                    
+                    # Update metadata
+                    new_track = TrackMetadata(file_path)
+                    self.metadata_panel.set_track(new_track)
+                    # Update MPRIS2 metadata
+                    if self.mpris2:
+                        self.mpris2.update_metadata(new_track)
+                else:
+                    # MOC is playing but playlist file not available - use status only
+                    new_track = TrackMetadata(file_path)
+                    self.metadata_panel.set_track(new_track)
+                    # Update MPRIS2 metadata
+                    if self.mpris2:
+                        self.mpris2.update_metadata(new_track)
+                    
+                    # Try to find in current playlist
+                    playlist = self.playlist_manager.get_playlist()
+                    found_in_playlist = False
+                    for idx, t in enumerate(playlist):
+                        if t.file_path == file_path:
+                            self.playlist_manager.set_current_index(idx)
+                            self.playlist_view.set_playlist(playlist, idx)
+                            found_in_playlist = True
+                            break
+                    
+                    # If track not found in playlist, notify callback
+                    if not found_in_playlist and self.on_track_finished:
+                        self.on_track_finished()
             
             # Detect if track reached the end (position >= duration)
             # This handles cases where MOC doesn't auto-advance or stops at the end
@@ -310,6 +434,8 @@ class MocSyncHelper:
                     
                     if has_more_tracks:
                         # There are more tracks to play - trigger advancement
+                        # Don't reset end_detected here - it will be reset when the track actually changes
+                        # or in handle_track_finished after advancement
                         if self.on_track_finished:
                             self.on_track_finished()
                     elif state == "STOP":
@@ -345,28 +471,23 @@ class MocSyncHelper:
                     
                     if has_more_tracks:
                         # Track finished and MOC stopped, but there are more tracks
-                        self.end_detected = True
+                        # Don't reset end_detected here - it will be reset when the track actually changes
+                        # or in handle_track_finished after advancement
                         if self.on_track_finished:
                             self.on_track_finished()
         else:
-            # Detect if MOC is playing independently (not synced from our app)
+            # Not using MOC for current track, but MOC might be playing independently
+            # Detect if MOC is playing a different track than our current one
             if file_path and state == "PLAY":
                 current_track = self.playlist_manager.get_current_track()
                 if not current_track or file_path != current_track.file_path:
-                    # MOC is playing independently - disable sync
+                    # MOC is playing independently - reload playlist from MOC to sync
                     if self.sync_enabled:
+                        # Disable sync temporarily to allow reloading from MOC
                         self.sync_enabled = False
-                        self.last_file = file_path
-                        # Update UI to reflect MOC's independent playback
-                        track = TrackMetadata(file_path)
-                        self.metadata_panel.set_track(track)
-                        # Try to find and select this track in our playlist
-                        playlist = self.playlist_manager.get_playlist()
-                        for idx, t in enumerate(playlist):
-                            if t.file_path == file_path:
-                                self.playlist_manager.set_current_index(idx)
-                                self.playlist_view.set_playlist(playlist, idx)
-                                break
+                    # Reload playlist from MOC to sync with external changes
+                    self.load_playlist_from_moc()
+                    self.last_file = file_path
             elif state == "STOP":
                 # Both are stopped - re-enable sync for next playback
                 if not self.sync_enabled:
@@ -400,19 +521,31 @@ class MocSyncHelper:
                     self._shuffle_set_pending_count = 0
         # Note: shuffle sync is handled by main_window
         
-        # Detect external playlist changes (e.g. from MOC UI) by watching the M3U file
+        # Detect external playlist changes (e.g. from MOC UI or CLI) by watching the M3U file
         try:
             config = get_config()
             moc_playlist_path = config.moc_playlist_path
-            mtime = moc_playlist_path.stat().st_mtime
+            if moc_playlist_path.exists():
+                mtime = moc_playlist_path.stat().st_mtime
+            else:
+                mtime = self.playlist_mtime
         except OSError:
             mtime = self.playlist_mtime
         
-        if mtime != self.playlist_mtime:
+        # Track if file changed (before updating mtime)
+        playlist_file_changed = mtime != self.playlist_mtime
+        
+        if playlist_file_changed:
             self.playlist_mtime = mtime
-            # Only reload if MOC sync is disabled (MOC is playing independently)
+            # Reload playlist from MOC when file changes
+            # If sync_enabled is False, MOC is playing independently - always reload
+            # If sync_enabled is True, check if this is an external change
+            # (we reload if track changed externally, detected earlier in this function)
             if not self.sync_enabled:
+                # MOC is playing independently - reload to follow MOC
                 self.load_playlist_from_moc()
+            # Note: If sync_enabled is True and we just synced to MOC ourselves,
+            # the track change detection above will have already handled reloading
         
         return True
     
@@ -541,11 +674,16 @@ class MocSyncHelper:
         # Sync playlist and start playback
         self.sync_playlist_for_playback()
         
-        # Ensure autonext and shuffle are enabled
-        self.moc_controller.enable_autonext()
+        # For shuffle mode, disable MOC's autonext - we handle advancement ourselves
+        # For sequential mode, enable autonext so MOC can auto-advance
         if self.shuffle_enabled:
-            self.moc_controller.enable_shuffle()
+            # Disable autonext - we'll manually advance using our shuffle logic
+            self.moc_controller.disable_autonext()
+            # Note: MOC's shuffle command doesn't work reliably, so we ignore it
+            # and handle shuffle entirely in our code
         else:
+            # Sequential mode - enable autonext so MOC can auto-advance
+            self.moc_controller.enable_autonext()
             self.moc_controller.disable_shuffle()
         
         # Mark current track as played in shuffle mode
@@ -588,15 +726,31 @@ class MocSyncHelper:
         if not self.use_moc:
             return
         
-        # Check if MOC has already auto-advanced
-        moc_status = self.moc_controller.get_status(force_refresh=True)
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
+        current_track = self.playlist_manager.get_current_track()
+        
+        # Mark current track as played if shuffle is enabled
+        if self.shuffle_enabled and current_track and current_track.file_path:
+            self.played_tracks_in_shuffle.add(current_track.file_path)
+        
+        # When shuffle is enabled, always use our shuffle logic instead of MOC's autonext
+        # MOC's shuffle might not work reliably, so we handle it ourselves
+        if self.shuffle_enabled:
+            # Disable MOC's autonext to prevent conflicts with our shuffle logic
+            # We'll manually advance using our shuffle algorithm
+            self.moc_controller.disable_autonext()
+            # Manually advance using our shuffle logic
+            self.next_track()
+            self.end_detected = False
+            return
+        
+        # For sequential mode, check if MOC has already auto-advanced
+        moc_status = self.moc_controller.get_status(force_refresh=True)
         
         if moc_status:
             moc_state = moc_status.get("state", "STOP")
             moc_file = moc_status.get("file_path")
-            current_track = self.playlist_manager.get_current_track()
             
             # Check if MOC has already advanced to a different track
             if moc_state == "PLAY" and moc_file and current_track and moc_file != current_track.file_path:
@@ -606,10 +760,20 @@ class MocSyncHelper:
                         self.playlist_manager.set_current_index(idx)
                         self.playlist_view.set_playlist(tracks, idx)
                         self.metadata_panel.set_track(t)
+                        # Update MPRIS2 metadata
+                        if self.mpris2:
+                            self.mpris2.update_metadata(t)
+                        # Update last_file to new track - this will reset end_detected in next update_status call
+                        self.last_file = moc_file
+                        # Reset end_detected since track has changed
+                        self.end_detected = False
                         return
         
         # MOC hasn't auto-advanced - manually advance
+        # Reset end_detected after we advance (next_track will change the track)
         self.next_track()
+        # Reset end_detected after advancing to allow detection of next track end
+        self.end_detected = False
     
     def get_cached_duration(self) -> float:
         """Get cached duration if available."""

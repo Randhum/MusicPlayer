@@ -92,7 +92,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.player_controls,
             self.metadata_panel,
             self.playlist_view,
-            self._is_video_track
+            self._is_video_track,
+            self.mpris2
         )
         self.moc_sync.on_track_finished = self._on_moc_track_finished
         self.moc_sync.on_shuffle_changed = self._on_moc_shuffle_changed
@@ -481,11 +482,37 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle shuffle state change from MOC."""
         self.player_controls.shuffle_button.set_active(shuffle_enabled)
     
+    def _update_mpris2_navigation_capabilities(self):
+        """Update MPRIS2 CanGoNext and CanGoPrevious based on playlist state."""
+        if not self.mpris2:
+            return
+        
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
+        
+        # Can go next if there's a next track or shuffle is enabled with tracks available
+        can_go_next = False
+        if tracks:
+            if self.use_moc and self.moc_sync.get_shuffle_enabled():
+                # In shuffle mode, can go next if there are unplayed tracks or all tracks played
+                can_go_next = len(tracks) > 0
+            else:
+                # Sequential mode - can go next if not at end
+                can_go_next = current_index < len(tracks) - 1
+        
+        # Can go previous if there's a previous track
+        can_go_previous = current_index > 0
+        
+        self.mpris2.update_can_go_next(can_go_next)
+        self.mpris2.update_can_go_previous(can_go_previous)
+    
     def _update_playlist_view(self):
         """Update the playlist view."""
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
         self.playlist_view.set_playlist(tracks, current_index)
+        # Update MPRIS2 navigation capabilities when playlist changes
+        self._update_mpris2_navigation_capabilities()
         return False
     
     def _on_search_changed(self, entry):
@@ -500,6 +527,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.playlist_manager.clear()
             self._update_playlist_view()
         if self.use_moc:
+            # Re-enable sync and sync playlist when user searches
+            self.moc_sync.sync_enabled = True
             self.moc_sync.sync_playlist_to_moc(start_playback=False)
             # Reset shuffle tracking when playlist changes
             self.moc_sync.reset_shuffle_tracking()
@@ -513,6 +542,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Reset shuffle tracking when playlist changes
         if self.use_moc:
             self.moc_sync.reset_shuffle_tracking()
+            # Re-enable sync and sync playlist when user explicitly selects a track
+            self.moc_sync.sync_enabled = True
+            self.moc_sync.sync_playlist_to_moc(start_playback=False)
         self._play_current_track()
     
     def _on_album_selected(self, browser, tracks: List[TrackMetadata]):
@@ -524,6 +556,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Reset shuffle tracking when playlist changes
         if self.use_moc:
             self.moc_sync.reset_shuffle_tracking()
+            # Re-enable sync and sync playlist when user explicitly selects an album
+            self.moc_sync.sync_enabled = True
+            self.moc_sync.sync_playlist_to_moc(start_playback=False)
         self._play_current_track()
     
     def _on_playlist_track_activated(self, view, index: int):
@@ -575,9 +610,10 @@ class MainWindow(Gtk.ApplicationWindow):
         
         self.metadata_panel.set_track(track)
         
-        # Update MPRIS2 metadata
+        # Update MPRIS2 metadata and navigation capabilities
         if self.mpris2:
             self.mpris2.update_metadata(track)
+            self._update_mpris2_navigation_capabilities()
     
     def _setup_mpris2(self):
         """Set up MPRIS2 callbacks for media key support."""
@@ -653,7 +689,11 @@ class MainWindow(Gtk.ApplicationWindow):
             # Use internal player for video files
             self.player.stop()
         
+        # Update MPRIS2 playback status
+        if self.mpris2:
+            self.mpris2.update_playback_status(False, is_paused=False)
         self._update_playlist_view()
+        self._update_mpris2_navigation_capabilities()
     
     def _on_next(self):
         """Handle next button click - route to appropriate player."""
@@ -670,6 +710,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 if next_track:
                     self._update_playlist_view()
                     self._play_current_track()
+        # Update MPRIS2 navigation capabilities after track change
+        self._update_mpris2_navigation_capabilities()
     
     def _on_prev(self):
         """Handle previous button click - route to appropriate player."""
@@ -683,6 +725,8 @@ class MainWindow(Gtk.ApplicationWindow):
             if prev_track:
                 self._update_playlist_view()
                 self._play_current_track()
+        # Update MPRIS2 navigation capabilities after track change
+        self._update_mpris2_navigation_capabilities()
     
     def _on_seek(self, controls, position: float):
         """Handle seek operation - route to appropriate player."""
@@ -716,6 +760,8 @@ class MainWindow(Gtk.ApplicationWindow):
             # Update MPRIS2
             if self.mpris2:
                 self.mpris2.update_playback_status(is_playing, is_paused=False)
+                # Update CanGoNext/CanGoPrevious based on playlist state
+                self._update_mpris2_navigation_capabilities()
     
     def _on_player_position_changed(self, position: float, duration: float):
         """Handle player position change - only for internal player (video files)."""
@@ -791,6 +837,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Periodically update position display - from active player."""
         track = self.playlist_manager.get_current_track()
         if not track:
+            # Update MPRIS2 position even when no track (set to 0)
+            if self.mpris2:
+                self.mpris2.update_position(0.0)
             return True
         
         if self._should_use_moc(track):
@@ -802,6 +851,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.player_controls.update_progress(position, duration)
             elif position > 0:
                 self.player_controls.update_progress(position, 0.0)
+            # Update MPRIS2 position
+            if self.mpris2:
+                self.mpris2.update_position(position)
         else:
             # Update from internal player for video files
             if self.player.is_playing:
@@ -813,6 +865,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 elif position > 0:
                     # If we have position but no duration yet, still update position
                     self.player_controls.update_progress(position, 0.0)
+                # Update MPRIS2 position
+                if self.mpris2:
+                    self.mpris2.update_position(position)
+            else:
+                # Player not playing - update MPRIS2 with current position
+                if self.mpris2:
+                    position = self.player.get_position()
+                    self.mpris2.update_position(position)
         return True
 
     def _update_moc_status(self):

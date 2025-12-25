@@ -146,9 +146,15 @@ class TrackMetadata:
                 # FLAC and OGG use Vorbis comments accessed via tags attribute
                 if isinstance(audio_file, (FLAC, OggVorbis)):
                     # Access via tags dictionary
+                    # Note: Checking 'key in audio_file.tags' can raise ValueError for invalid keys
+                    # in Vorbis files, so we need to catch that
                     if hasattr(audio_file, 'tags') and audio_file.tags is not None:
-                        if key in audio_file.tags:
-                            value = audio_file.tags[key]
+                        try:
+                            if key in audio_file.tags:
+                                value = audio_file.tags[key]
+                        except ValueError:
+                            # Invalid key for Vorbis tags - skip this key
+                            pass
                 # MP3 uses ID3 tags - can access directly or via tags
                 elif isinstance(audio_file, MP3):
                     # Try direct access first
@@ -170,10 +176,18 @@ class TrackMetadata:
                     try:
                         if key in audio_file:
                             value = audio_file[key]
-                    except (KeyError, TypeError):
-                        if hasattr(audio_file, 'tags') and audio_file.tags is not None:
-                            if key in audio_file.tags:
-                                value = audio_file.tags[key]
+                    except (KeyError, TypeError, ValueError):
+                        # ValueError can occur with Vorbis tags for invalid keys
+                        try:
+                            if hasattr(audio_file, 'tags') and audio_file.tags is not None:
+                                try:
+                                    if key in audio_file.tags:
+                                        value = audio_file.tags[key]
+                                except ValueError:
+                                    # Invalid key for this file type - skip
+                                    pass
+                        except (AttributeError, TypeError):
+                            pass
                 
                 if value is None:
                     continue

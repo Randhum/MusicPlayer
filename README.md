@@ -167,6 +167,18 @@ You should see a window with your music library, playlist, and Bluetooth control
   - **Shuffle**: toggle to play the current playlist in **random order**; the *Next* button and automatic track advance will pick a random track instead of the next in sequence.
   - **Seek & Volume**: larger, touch-friendly sliders for scrubbing through the track and adjusting volume.
 
+### Desktop Integration (MPRIS2)
+
+The player supports **MPRIS2** (Media Player Remote Interfacing Specification) for seamless desktop integration:
+
+- **Media keys support**: Use your keyboard's media keys (Play/Pause, Next, Previous) to control playback
+- **Desktop notifications**: Some desktop environments show playback information in notifications
+- **System integration**: The player appears in system media controls and can be controlled remotely via D-Bus
+- **Metadata sync**: Track information (title, artist, album, artwork) is automatically synchronized with the desktop environment
+- **Position tracking**: Playback position is continuously updated for accurate progress display
+
+All MPRIS2 features work seamlessly with both MOC (for audio files) and the internal GStreamer player (for video files).
+
 ### MOC Integration (Music On Console, Gentoo)
 
 If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
@@ -195,26 +207,35 @@ In all cases, when we hand playback responsibility from one backend to the other
 
 #### How playlist sync behaves with external `mocp` changes
 
-When you edit the playlist directly in MOC (e.g. via the `mocp` ncurses UI or CLI):
+The app provides **bidirectional synchronization** between the GTK interface and MOC:
 
-- The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes.
-- Additionally, whenever MOC reports that the **current track changed**, the app reloads the full playlist from `~/.moc/playlist.m3u` and updates the selection to follow the current MOC track.
+**App → MOC (Your changes in the GTK app):**
+- All playlist modifications (add, remove, reorder tracks) automatically sync to MOC
+- Playback controls (play, pause, stop, next, previous) are sent to MOC
+- Volume changes sync to MOC
+- Shuffle state syncs to MOC
+
+**MOC → App (External changes via `mocp` CLI or UI):**
+- The app **watches `~/.moc/playlist.m3u`** and reloads it when the file timestamp changes
+- Whenever MOC reports that the **current track changed**, the app automatically reloads the full playlist from `~/.moc/playlist.m3u` and updates the selection to follow the current MOC track
+- If MOC starts playing a different track than expected, the app detects this and reloads the playlist to sync
 
 **Important limitation:** MOC keeps its playlist in memory and only saves to `~/.moc/playlist.m3u` at certain times (e.g., when MOC exits, or when you press `S` in the MOC UI to save). This means:
 
 - If you modify the playlist in MOC's UI **without changing tracks or saving**, the app will still show the old playlist until you either:
-  - Skip to another track in MOC (triggers automatic reload).
-  - Press `S` in MOC's ncurses UI to save the playlist.
-  - Click the **Refresh** button (🔄) in this app's playlist panel.
+  - Skip to another track in MOC (triggers automatic reload on every track change)
+  - Press `S` in MOC's ncurses UI to save the playlist
+  - Click the **Refresh** button (🔄) in this app's playlist panel
 
-This means:
-
+**Sync behavior:**
 - **Changes are reflected** when:
-  - You skip to another track in MOC (automatic reload on every track change).
-  - MOC saves its playlist (press `S` in MOC, or when MOC exits).
-  - You click the **Refresh** button in the playlist panel.
-- There may be a **small delay (up to ~0.5s)** because status and playlist are polled periodically.
-- If `~/.moc/playlist.m3u` is moved or disabled, the GTK playlist will no longer auto-sync until it becomes available again.
+  - You skip to another track in MOC (automatic reload on every track change)
+  - MOC saves its playlist (press `S` in MOC, or when MOC exits)
+  - You click the **Refresh** button in the playlist panel
+  - You make changes in the GTK app (immediately synced to MOC)
+- There may be a **small delay (up to ~0.5s)** because status and playlist are polled periodically
+- If `~/.moc/playlist.m3u` is moved or disabled, the GTK playlist will no longer auto-sync until it becomes available again
+- The app automatically detects when MOC is playing independently and syncs accordingly
 
 ---
 
@@ -235,6 +256,8 @@ MusicPlayer/
 │   ├── bluetooth_manager.py      # Device discovery & connection
 │   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
 │   ├── metadata.py               # Reading ID3 tags, album art
+│   ├── moc_controller.py         # MOC (Music On Console) integration
+│   ├── mpris2.py                 # MPRIS2 desktop integration
 │   ├── music_library.py          # Scanning folders for music
 │   └── playlist_manager.py       # Queue management
 │

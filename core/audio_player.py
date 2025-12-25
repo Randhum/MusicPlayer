@@ -108,7 +108,11 @@ class AudioPlayer:
             if debug:
                 logger.debug("GStreamer debug: %s", debug)
             self._log_codec_help(err.message, debug or "")
+            # Stop playback and notify state change
             self._stop()
+            # Explicitly notify state change on error
+            if self.on_state_changed:
+                self.on_state_changed(False)
             
         elif msg_type == Gst.MessageType.EOS:
             self.is_playing = False
