@@ -12,6 +12,49 @@ from pathlib import Path
 from typing import Optional
 
 
+class _SafeSysLogHandler(logging.Handler):
+    """
+    Wrapper around SysLogHandler that gracefully handles connection failures.
+    
+    This prevents logging errors from breaking the application when syslog/journald
+    is unavailable or the socket connection fails.
+    """
+    
+    def __init__(self, syslog_handler: logging.handlers.SysLogHandler):
+        super().__init__()
+        self.syslog_handler = syslog_handler
+        self._failed = False
+        # Copy properties from wrapped handler
+        self.setLevel(syslog_handler.level)
+        self.setFormatter(syslog_handler.formatter)
+    
+    def emit(self, record):
+        """Emit a record, silently failing if syslog is unavailable."""
+        if self._failed:
+            return  # Don't try again if we've already failed
+        
+        try:
+            self.syslog_handler.emit(record)
+        except (OSError, FileNotFoundError, ConnectionError) as e:
+            # Mark as failed and don't try again
+            # This prevents spam of error messages
+            self._failed = True
+            # Silently ignore - syslog is not available
+            pass
+        except Exception:
+            # For any other exception, also mark as failed
+            self._failed = True
+            pass
+    
+    def close(self):
+        """Close the handler."""
+        try:
+            self.syslog_handler.close()
+        except Exception:
+            pass
+        super().close()
+
+
 class LinuxLogger:
     """
     Linux-native logger with syslog/journald integration.
@@ -78,16 +121,20 @@ class LinuxLogger:
         if use_syslog:
             try:
                 # Try Unix socket first (journald)
-                syslog_handler = logging.handlers.SysLogHandler(
-                    address='/dev/log',
-                    facility=logging.handlers.SysLogHandler.LOG_USER
-                )
-                syslog_handler.setLevel(logging.INFO)
-                # Simpler format for syslog
-                syslog_formatter = logging.Formatter('%(name)s[%(process)d]: %(levelname)s: %(message)s')
-                syslog_handler.setFormatter(syslog_formatter)
-                self.logger.addHandler(syslog_handler)
-            except (OSError, AttributeError):
+                # Check if /dev/log exists before creating handler
+                if os.path.exists('/dev/log') or os.path.exists('/run/systemd/journal/socket'):
+                    syslog_handler = logging.handlers.SysLogHandler(
+                        address='/dev/log',
+                        facility=logging.handlers.SysLogHandler.LOG_USER
+                    )
+                    syslog_handler.setLevel(logging.INFO)
+                    # Simpler format for syslog
+                    syslog_formatter = logging.Formatter('%(name)s[%(process)d]: %(levelname)s: %(message)s')
+                    syslog_handler.setFormatter(syslog_formatter)
+                    # Wrap in error-handling handler to catch emit failures
+                    safe_syslog_handler = _SafeSysLogHandler(syslog_handler)
+                    self.logger.addHandler(safe_syslog_handler)
+            except (OSError, AttributeError, FileNotFoundError):
                 # Fallback if syslog unavailable
                 pass
         
