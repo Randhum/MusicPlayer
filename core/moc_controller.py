@@ -417,9 +417,25 @@ class MocController:
                 successfully_added[idx] = moc_playlist_index
                 moc_playlist_index += 1
             else:
-                logger.warning("Failed to add track to MOC playlist: %s", abs_path)
+                # Log more details about the failure
+                error_msg = f"Failed to add track to MOC playlist: {abs_path}"
                 if result.stderr:
-                    logger.debug("MOC error: %s", result.stderr)
+                    error_msg += f" - Error: {result.stderr.strip()}"
+                if result.stdout:
+                    error_msg += f" - Output: {result.stdout.strip()}"
+                logger.warning(error_msg)
+                
+                # Check if MOC server is running
+                status = self.get_status(force_refresh=False)
+                if not status:
+                    logger.warning("MOC server may not be running - attempting to start it")
+                    self.ensure_server()
+                    # Retry once after ensuring server is running
+                    retry_result = self._run("-a", abs_path, capture_output=True)
+                    if retry_result.returncode == 0:
+                        successfully_added[idx] = moc_playlist_index
+                        moc_playlist_index += 1
+                        logger.debug("Successfully added track after server restart: %s", abs_path)
 
         # Optionally start playback from the selected track
         if start_playback and 0 <= current_index < len(tracks):
