@@ -124,23 +124,244 @@ class MocController:
         # Call --server directly (idempotent - starts if needed, no-op if running)
         result = self._run("--server", capture_output=True)
         
-        if result.returncode == 0:
-            # Server is now available - try a quick status check to see if it was already running
-            # We use a lightweight check: if --info works immediately, server was likely already running
-            # This avoids the overhead of a separate is_server_running() call
-            status_result = self._run("--info", capture_output=True)
-            was_already_running = status_result.returncode == 0 and bool(status_result.stdout)
-            
-            # Give server a moment to fully start if we just started it
-            if not was_already_running:
-                time.sleep(0.1)
-            
-            self._server_available = True
-            return True, was_already_running
+        # Check if server is already running (exit code 2 with "Server is already running")
+        was_already_running = False
+        if result.returncode == 2 and result.stderr:
+            stderr_lower = result.stderr.lower()
+            if "server is already running" in stderr_lower:
+                was_already_running = True
+                # Server is already running - verify it's accessible
+                status_result = self._run("--info", capture_output=True)
+                if status_result.returncode == 0 and bool(status_result.stdout):
+                    self._server_available = True
+                    return True, True
+                # Server reported as running but not accessible - might be stale
+                return False, False
         
-        # Failed to start server
+        if result.returncode == 0:
+            # Server was just started - verify it's ready
+            # Give server a moment to fully start
+            time.sleep(0.2)
+            status_result = self._run("--info", capture_output=True)
+            if status_result.returncode == 0 and bool(status_result.stdout):
+                self._server_available = True
+                return True, False
+        
+        # Failed to start server or server not accessible
         return False, False
 
+    # ------------------------------------------------------------------
+    # Playlist file operations (work directly with M3U file using line indexes)
+    # ------------------------------------------------------------------
+    
+    def add_track_at_line_m3u(self, line_index: int, file_path: str) -> bool:
+        """
+        Add a track at a specific line index directly in the M3U playlist file.
+        
+        Args:
+            line_index: Line number where to insert (0-based, excluding comments/empty lines)
+            file_path: File path to add
+            
+        Returns:
+            True if successful
+        """
+        if not self._playlist_path.exists():
+            # Create empty playlist file
+            self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._playlist_path.open('w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+        
+        try:
+            # Read all lines
+            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            
+            # Filter out comments and empty lines to get actual track lines
+            track_lines = []
+            track_line_indices = []  # Map from track index to actual line number
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    track_lines.append(stripped)
+                    track_line_indices.append(i)
+            
+            # Validate line_index
+            if line_index < 0:
+                line_index = 0
+            if line_index > len(track_lines):
+                line_index = len(track_lines)
+            
+            # Determine where to insert in the actual file
+            if line_index >= len(track_line_indices):
+                # Append at end
+                insert_at = len(lines)
+            else:
+                # Insert before the line at track_line_indices[line_index]
+                insert_at = track_line_indices[line_index]
+            
+            # Insert the new line
+            lines.insert(insert_at, file_path + '\n')
+            
+            # Write back
+            with self._playlist_path.open('w', encoding='utf-8') as f:
+                f.writelines(lines)
+            
+            return True
+        except Exception as e:
+            logger.error("Error adding track to M3U file: %s", e, exc_info=True)
+            return False
+    
+    def remove_track_at_line_m3u(self, line_index: int) -> bool:
+        """
+        Remove a track at a specific line index from the M3U playlist file.
+        
+        Args:
+            line_index: Index of track to remove (0-based, excluding comments/empty lines)
+            
+        Returns:
+            True if successful
+        """
+        if not self._playlist_path.exists():
+            return False
+        
+        try:
+            # Read all lines
+            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            
+            # Find track lines and their indices
+            track_line_indices = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    track_line_indices.append(i)
+            
+            if not (0 <= line_index < len(track_line_indices)):
+                return False
+            
+            # Remove the line
+            actual_line_index = track_line_indices[line_index]
+            lines.pop(actual_line_index)
+            
+            # Write back
+            with self._playlist_path.open('w', encoding='utf-8') as f:
+                f.writelines(lines)
+            
+            return True
+        except Exception as e:
+            logger.error("Error removing track from M3U file: %s", e, exc_info=True)
+            return False
+    
+    def move_track_in_m3u(self, from_line_index: int, to_line_index: int) -> bool:
+        """
+        Move a track from one line index to another in the M3U playlist file.
+        
+        Args:
+            from_line_index: Current line index of the track
+            to_line_index: Target line index for the track
+            
+        Returns:
+            True if successful
+        """
+        if not self._playlist_path.exists():
+            return False
+        
+        if from_line_index == to_line_index:
+            return True
+        
+        try:
+            # Read all lines
+            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            
+            # Find track lines and their indices
+            track_line_indices = []
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    track_line_indices.append(i)
+            
+            if not (0 <= from_line_index < len(track_line_indices) and 
+                    0 <= to_line_index < len(track_line_indices)):
+                return False
+            
+            # Get actual line indices
+            from_actual = track_line_indices[from_line_index]
+            to_actual = track_line_indices[to_line_index]
+            
+            # Move the line
+            line_content = lines.pop(from_actual)
+            # Adjust to_actual if needed (since we removed a line before it)
+            if to_actual > from_actual:
+                to_actual -= 1
+            lines.insert(to_actual, line_content)
+            
+            # Write back
+            with self._playlist_path.open('w', encoding='utf-8') as f:
+                f.writelines(lines)
+            
+            return True
+        except Exception as e:
+            logger.error("Error moving track in M3U file: %s", e, exc_info=True)
+            return False
+    
+    def get_track_at_line_m3u(self, line_index: int) -> Optional[str]:
+        """
+        Get file path at a specific line index from the M3U playlist file.
+        
+        Args:
+            line_index: Index of track to get (0-based, excluding comments/empty lines)
+            
+        Returns:
+            File path or None if index is invalid
+        """
+        if not self._playlist_path.exists():
+            return None
+        
+        try:
+            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            
+            # Find track lines
+            track_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped and not stripped.startswith('#'):
+                    track_lines.append(stripped)
+            
+            if not (0 <= line_index < len(track_lines)):
+                return None
+            
+            return track_lines[line_index]
+        except Exception as e:
+            logger.error("Error reading track from M3U file: %s", e, exc_info=True)
+            return None
+    
+    def get_playlist_length_m3u(self) -> int:
+        """Get the number of tracks in the M3U playlist file."""
+        if not self._playlist_path.exists():
+            return 0
+        
+        try:
+            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                count = 0
+                for line in f:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith('#'):
+                        count += 1
+                return count
+        except Exception as e:
+            logger.error("Error reading M3U file length: %s", e, exc_info=True)
+            return 0
+    
+    def clear_playlist_m3u(self):
+        """Clear the M3U playlist file (keeps header)."""
+        try:
+            with self._playlist_path.open('w', encoding='utf-8') as f:
+                f.write("#EXTM3U\n")
+        except Exception as e:
+            logger.error("Error clearing M3U file: %s", e, exc_info=True)
+    
     # ------------------------------------------------------------------
     # Playlist
     # ------------------------------------------------------------------
@@ -360,6 +581,35 @@ class MocController:
             return
         self.ensure_server()
         self._run("--previous")
+    
+    def jump_to_index(self, index: int, start_playback: bool = False):
+        """
+        Jump to a specific track index in MOC's playlist.
+        
+        Args:
+            index: Index of track to jump to (0-based)
+            start_playback: If True, start playback after jumping
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_available():
+            return False
+        
+        self.ensure_server()
+        
+        # MOC uses -j (jump) with index
+        # Format: mocp -j <index>
+        result = self._run("-j", str(index), capture_output=True)
+        
+        if result.returncode == 0:
+            if start_playback:
+                self.play()
+            logger.debug("Jumped to index %d", index)
+            return True
+        else:
+            logger.warning("Failed to jump to index %d", index)
+            return False
 
     def set_volume(self, volume: float):
         """Set volume as a float 0.0–1.0."""

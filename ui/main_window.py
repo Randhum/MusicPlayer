@@ -77,10 +77,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # Setup MPRIS2 callbacks (after player callbacks are set)
         self._setup_mpris2()
         
-        # Setup playlist manager
-        self.playlist_manager.current_playlist = []
-        self.playlist_manager.current_index = -1
-        
         # Create UI with dockable panels (needed before MOC sync helper)
         self._create_ui()
         
@@ -975,40 +971,50 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_add_track(self, browser, track: TrackMetadata):
         """Handle 'Add to Playlist' from library browser context menu."""
-        self.playlist_manager.add_track(track)
+        # Get current playlist length to determine index
+        index = self.playlist_manager.get_playlist_length_file()
+        # Add directly to files using index
+        self.moc_sync.sync_add_track_file(index, track)
+        # Reload from file to update in-memory cache and UI
+        self.playlist_manager.load_playlist_from_file()
         self._update_playlist_view()
-        if self.use_moc:
-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
     
     def _on_add_album(self, browser, tracks):
         """Handle 'Add Album to Playlist' from library browser context menu."""
-        self.playlist_manager.add_tracks(tracks)
+        # Add each track at the appropriate index
+        start_index = self.playlist_manager.get_playlist_length_file()
+        for i, track in enumerate(tracks):
+            self.moc_sync.sync_add_track_file(start_index + i, track)
+        # Reload from file to update in-memory cache and UI
+        self.playlist_manager.load_playlist_from_file()
         self._update_playlist_view()
-        if self.use_moc:
-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_remove_track(self, view, index: int):
         """Handle track removal from playlist."""
-        self.playlist_manager.remove_track(index)
+        # Remove directly from files using index
+        self.moc_sync.sync_remove_track_file(index)
+        # Reload from file to update in-memory cache and UI
+        self.playlist_manager.load_playlist_from_file()
         self._update_playlist_view()
-        if self.use_moc:
-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_move_up(self, view, index: int):
         """Handle moving track up in playlist."""
         if index > 0:
-            self.playlist_manager.move_track(index, index - 1)
+            # Move directly in files using indexes
+            self.moc_sync.sync_move_track_file(index, index - 1)
+            # Reload from file to update in-memory cache and UI
+            self.playlist_manager.load_playlist_from_file()
             self._update_playlist_view()
-            if self.use_moc:
-                self.moc_sync.sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_move_down(self, view, index: int):
         """Handle moving track down in playlist."""
-        if index < len(self.playlist_manager.current_playlist) - 1:
-            self.playlist_manager.move_track(index, index + 1)
+        playlist_length = self.playlist_manager.get_playlist_length_file()
+        if index < playlist_length - 1:
+            # Move directly in files using indexes
+            self.moc_sync.sync_move_track_file(index, index + 1)
+            # Reload from file to update in-memory cache and UI
+            self.playlist_manager.load_playlist_from_file()
             self._update_playlist_view()
-            if self.use_moc:
-                self.moc_sync.sync_playlist_to_moc(start_playback=False)
     
     def _on_playlist_refresh(self, view):
         """Handle refresh from MOC - reload the playlist from MOC's playlist file."""

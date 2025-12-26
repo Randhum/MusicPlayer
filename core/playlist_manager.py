@@ -6,12 +6,13 @@ from typing import List, Optional
 
 from core.metadata import TrackMetadata
 from core.logging import get_logger
+from core.config import get_config
 
 logger = get_logger(__name__)
 
 
 class PlaylistManager:
-    """Manages playlists - in-memory and persistent storage."""
+    """Manages playlists - works directly with playlist files using indexes."""
     
     def __init__(self, playlists_dir: Optional[Path] = None):
         if playlists_dir is None:
@@ -19,8 +20,16 @@ class PlaylistManager:
         self.playlists_dir = Path(playlists_dir)
         self.playlists_dir.mkdir(parents=True, exist_ok=True)
         
+        # Current playlist file path (None means no active playlist file)
+        config = get_config()
+        self.current_playlist_file: Optional[Path] = config.cache_dir / 'current_playlist.json'
+        
+        # In-memory cache (optional, for quick access)
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
+        
+        # Load playlist from file on initialization
+        self.load_playlist_from_file()
     
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
         """Add a track to the current playlist."""
@@ -73,7 +82,14 @@ class PlaylistManager:
     
     def set_current_index(self, index: int):
         """Set the current playing index."""
-        if 0 <= index < len(self.current_playlist):
+        data = self._read_playlist_file()
+        tracks = data.get('tracks', [])
+        if 0 <= index < len(tracks):
+            self.current_index = index
+            data['current_index'] = index
+            self._write_playlist_file(data)
+        elif 0 <= index < len(self.current_playlist):
+            # Fallback to in-memory if file doesn't have tracks yet
             self.current_index = index
     
     def get_next_track(self) -> Optional[TrackMetadata]:
@@ -155,5 +171,197 @@ class PlaylistManager:
     
     def get_current_index(self) -> int:
         """Get the current playing index."""
+        data = self._read_playlist_file()
+        file_index = data.get('current_index', -1)
+        # Use file index if available, otherwise fallback to in-memory
+        if file_index != -1 or len(data.get('tracks', [])) > 0:
+            self.current_index = file_index
+            return file_index
         return self.current_index
+    
+    # ------------------------------------------------------------------
+    # File-based index operations (work directly with JSON file)
+    # ------------------------------------------------------------------
+    
+    def _get_playlist_file(self) -> Path:
+        """Get the current playlist file path."""
+        return self.current_playlist_file
+    
+    def _read_playlist_file(self) -> Optional[dict]:
+        """Read the current playlist file and return its contents."""
+        playlist_file = self._get_playlist_file()
+        if not playlist_file.exists():
+            return {'name': 'current', 'tracks': [], 'current_index': -1}
+        
+        try:
+            with open(playlist_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Ensure current_index exists for backward compatibility
+                if 'current_index' not in data:
+                    data['current_index'] = -1
+                return data
+        except Exception as e:
+            logger.error("Error reading playlist file: %s", e, exc_info=True)
+            return {'name': 'current', 'tracks': [], 'current_index': -1}
+    
+    def _write_playlist_file(self, data: dict):
+        """Write playlist data to file."""
+        playlist_file = self._get_playlist_file()
+        try:
+            # Write atomically using temp file
+            temp_file = playlist_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            temp_file.replace(playlist_file)
+        except Exception as e:
+            logger.error("Error writing playlist file: %s", e, exc_info=True)
+    
+    def add_track_at_index_file(self, index: int, track: TrackMetadata) -> bool:
+        """
+        Add a track at a specific index directly in the playlist file.
+        
+        Args:
+            index: Position where to insert (0-based)
+            track: Track to add
+            
+        Returns:
+            True if successful
+        """
+        data = self._read_playlist_file()
+        tracks = data.get('tracks', [])
+        current_index = data.get('current_index', -1)
+        
+        # Validate index
+        if index < 0:
+            index = 0
+        if index > len(tracks):
+            index = len(tracks)
+        
+        # Insert track dict at index
+        track_dict = track.to_dict()
+        tracks.insert(index, track_dict)
+        data['tracks'] = tracks
+        
+        # Adjust current index if needed
+        if index <= current_index:
+            current_index += 1
+        data['current_index'] = current_index
+        
+        self._write_playlist_file(data)
+        
+        return True
+    
+    def remove_track_at_index_file(self, index: int) -> bool:
+        """
+        Remove a track at a specific index directly from the playlist file.
+        
+        Args:
+            index: Index of track to remove (0-based)
+            
+        Returns:
+            True if successful
+        """
+        data = self._read_playlist_file()
+        tracks = data.get('tracks', [])
+        current_index = data.get('current_index', -1)
+        
+        if not (0 <= index < len(tracks)):
+            return False
+        
+        # Remove track at index
+        tracks.pop(index)
+        data['tracks'] = tracks
+        
+        # Adjust current index if needed
+        if index < current_index:
+            current_index -= 1
+        elif index == current_index:
+            current_index = -1
+        data['current_index'] = current_index
+        
+        self._write_playlist_file(data)
+        
+        return True
+    
+    def move_track_in_file(self, from_index: int, to_index: int) -> bool:
+        """
+        Move a track from one index to another directly in the playlist file.
+        
+        Args:
+            from_index: Current index of the track
+            to_index: Target index for the track
+            
+        Returns:
+            True if successful
+        """
+        data = self._read_playlist_file()
+        tracks = data.get('tracks', [])
+        current_index = data.get('current_index', -1)
+        
+        if not (0 <= from_index < len(tracks) and 0 <= to_index < len(tracks)):
+            return False
+        
+        if from_index == to_index:
+            return True
+        
+        # Move track
+        track_dict = tracks.pop(from_index)
+        tracks.insert(to_index, track_dict)
+        data['tracks'] = tracks
+        
+        # Update current index
+        if current_index == from_index:
+            current_index = to_index
+        elif from_index < current_index <= to_index:
+            current_index -= 1
+        elif to_index <= current_index < from_index:
+            current_index += 1
+        data['current_index'] = current_index
+        
+        self._write_playlist_file(data)
+        
+        return True
+    
+    def get_track_at_index_file(self, index: int) -> Optional[TrackMetadata]:
+        """
+        Get track at a specific index from the playlist file.
+        
+        Args:
+            index: Index of track to get
+            
+        Returns:
+            TrackMetadata or None if index is invalid
+        """
+        data = self._read_playlist_file()
+        tracks = data.get('tracks', [])
+        
+        if not (0 <= index < len(tracks)):
+            return None
+        
+        return TrackMetadata.from_dict(tracks[index])
+    
+    def get_playlist_length_file(self) -> int:
+        """Get the length of the playlist from file."""
+        data = self._read_playlist_file()
+        return len(data.get('tracks', []))
+    
+    def clear_playlist_file(self):
+        """Clear the playlist file."""
+        data = {'name': 'current', 'tracks': [], 'current_index': -1}
+        self._write_playlist_file(data)
+    
+    def load_playlist_from_file(self) -> bool:
+        """Load the current playlist from file into memory cache."""
+        data = self._read_playlist_file()
+        tracks_data = data.get('tracks', [])
+        
+        self.current_playlist = [
+            TrackMetadata.from_dict(track_dict)
+            for track_dict in tracks_data
+        ]
+        
+        # Load current_index from file
+        self.current_index = data.get('current_index', -1)
+        
+        return True
 
