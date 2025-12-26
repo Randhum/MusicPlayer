@@ -94,6 +94,69 @@ class MocSyncHelper:
             except OSError:
                 self.playlist_mtime = 0.0
     
+    def sync_add_track_file(self, index: int, track: TrackMetadata):
+        """
+        Add a track at a specific index to both JSON and M3U playlist files.
+        
+        Args:
+            index: Index where to add the track
+            track: Track to add
+        """
+        # Add to JSON playlist file
+        self.playlist_manager.add_track_at_index_file(index, track)
+        
+        # Add to M3U file if using MOC and track is audio
+        if self.use_moc and self.sync_enabled and self.should_use_moc(track):
+            file_path = str(Path(track.file_path).resolve())
+            self.moc_controller.add_track_at_line_m3u(index, file_path)
+    
+    def sync_remove_track_file(self, index: int):
+        """
+        Remove a track at a specific index from both JSON and M3U playlist files.
+        
+        Args:
+            index: Index of track to remove
+        """
+        # Remove from JSON playlist file
+        self.playlist_manager.remove_track_at_index_file(index)
+        
+        # Remove from M3U file if using MOC
+        if self.use_moc and self.sync_enabled:
+            self.moc_controller.remove_track_at_line_m3u(index)
+    
+    def sync_move_track_file(self, from_index: int, to_index: int):
+        """
+        Move a track from one index to another in both JSON and M3U playlist files.
+        
+        Args:
+            from_index: Original index of the track
+            to_index: New index of the track
+        """
+        # Move in JSON playlist file
+        self.playlist_manager.move_track_in_file(from_index, to_index)
+        
+        # Move in M3U file if using MOC
+        if self.use_moc and self.sync_enabled:
+            self.moc_controller.move_track_in_m3u(from_index, to_index)
+    
+    def sync_jump_to_index_file(self, index: int, start_playback: bool = False):
+        """
+        Jump to a specific index in MOC (uses MOC command, not file operation).
+        
+        Args:
+            index: Index to jump to
+            start_playback: Whether to start playback after jumping
+        """
+        if not self.use_moc or not self.sync_enabled:
+            return
+        
+        track = self.playlist_manager.get_track_at_index_file(index)
+        if track and not self.should_use_moc(track):
+            return  # Don't sync video tracks to MOC
+        
+        # Use MOC command to jump (this updates MOC's internal state)
+        self.moc_controller.jump_to_index(index, start_playback=start_playback)
+    
     def should_use_moc(self, track: Optional[TrackMetadata]) -> bool:
         """Check if MOC should be used for this track."""
         return self.use_moc and not self.is_video_track(track)
@@ -130,6 +193,8 @@ class MocSyncHelper:
             # Sync playlist to MOC but don't start playback - app controls playback
             self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
             logger.info("Synced %d tracks to MOC - app is now orchestrator", len(tracks))
+            # Re-enable autonext after syncing playlist
+            self.moc_controller.enable_autonext()
         
         return True
     

@@ -51,7 +51,14 @@ class PlayerControls(Gtk.Box):
         gesture_release.connect('released', self._on_progress_release)
         self.progress_scale.add_controller(gesture_release)
         
-        # Connect value-changed for seeking (both click and drag)
+        # Use drag gesture to detect when user is dragging vs clicking
+        gesture_drag = Gtk.GestureDrag()
+        gesture_drag.connect('drag-begin', self._on_progress_drag_begin)
+        gesture_drag.connect('drag-update', self._on_progress_drag_update)
+        gesture_drag.connect('drag-end', self._on_progress_drag_end)
+        self.progress_scale.add_controller(gesture_drag)
+        
+        # Connect value-changed only for preview updates during drag (not for seeking)
         self.progress_scale.connect('value-changed', self._on_progress_changed)
         progress_box.append(self.progress_scale)
         
@@ -134,6 +141,7 @@ class PlayerControls(Gtk.Box):
         self.append(controls_box)
         
         self._seeking = False
+        self._dragging = False  # Track if user is actively dragging
         self._duration = 0.0
         self._updating_volume = False  # Flag to prevent feedback loop
     
@@ -195,8 +203,10 @@ class PlayerControls(Gtk.Box):
         return f"{minutes:02d}:{secs:02d}"
     
     def _on_progress_changed(self, scale):
-        """Handle progress bar value change during seeking."""
-        if self._seeking and self._duration > 0:
+        """Handle progress bar value change - update preview only during drag."""
+        # Only update time labels during drag/seek, don't emit seek signal
+        # The seek signal will be emitted on release or click
+        if (self._seeking or self._dragging) and self._duration > 0:
             value = scale.get_value()
             # Calculate position from percentage, allowing to reach the full duration
             # When value is 100.0, position should be exactly duration
@@ -210,8 +220,7 @@ class PlayerControls(Gtk.Box):
             remaining = max(0.0, self._duration - position)
             self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
             
-            # Emit seek signal
-            self.emit('seek-changed', position)
+            # Don't emit seek signal here - only on release or click
     
     def _on_progress_press(self, gesture, n_press, x, y):
         """Handle progress bar press - start seeking."""
