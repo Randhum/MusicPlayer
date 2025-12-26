@@ -474,3 +474,4 @@ def fetch_metadata(
     fetcher = MetadataFetcher()
     return fetcher.fetch_metadata(title, artist, album, duration)
 
+
