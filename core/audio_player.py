@@ -241,6 +241,12 @@ class AudioPlayer:
     def pause(self):
         """Pause playback."""
         if self.playbin:
+            # Update position one last time before pausing to ensure we have the exact paused position
+            if self.is_playing:
+                success, position = self.playbin.query_position(Gst.Format.TIME)
+                if success:
+                    self.position = position / Gst.SECOND
+            
             self.playbin.set_state(Gst.State.PAUSED)
             self.is_playing = False
     
@@ -302,7 +308,8 @@ class AudioPlayer:
     
     def get_position(self) -> float:
         """Get current position in seconds."""
-        if self.playbin and self.is_playing:
+        if self.playbin:
+            # Query position even when paused to get accurate paused position
             success, position = self.playbin.query_position(Gst.Format.TIME)
             if success:
                 self.position = position / Gst.SECOND

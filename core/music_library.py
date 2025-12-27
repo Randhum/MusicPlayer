@@ -28,6 +28,7 @@ AUDIO_EXTENSIONS = {
     '.aiff', '.aif',  # Audio Interchange File Format
     '.alac', '.m4a',  # Apple Lossless (also uses .m4a)
     '.ape',           # Monkey's Audio
+    '.wv',            # WavPack
     # Container formats (may contain audio)
     '.mp4',           # MPEG-4 (may contain AAC/ALAC)
     '.mkv',           # Matroska (may contain audio)
