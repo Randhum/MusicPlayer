@@ -2,7 +2,8 @@
 
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, GObject
+gi.require_version('GLib', '2.0')
+from gi.repository import Gtk, GObject, GLib
 
 
 class PlayerControls(Gtk.Box):
@@ -17,6 +18,7 @@ class PlayerControls(Gtk.Box):
         'seek-changed': (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         'volume-changed': (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         'shuffle-toggled': (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        'autonext-toggled': (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
     }
     
     def __init__(self):
@@ -42,24 +44,16 @@ class PlayerControls(Gtk.Box):
         # Touch-friendly height (slightly larger)
         self.progress_scale.set_size_request(-1, 36)
         
-        # Use GTK4 gesture controllers for button events
-        gesture_press = Gtk.GestureClick()
-        gesture_press.connect('pressed', self._on_progress_press)
-        self.progress_scale.add_controller(gesture_press)
+        # GTK Scale handles user interaction (clicking/dragging) automatically
+        # We use gesture controllers to detect when user starts/finishes interacting
+        # This allows us to distinguish user interaction from programmatic updates
+        gesture_click = Gtk.GestureClick()
+        gesture_click.connect('pressed', self._on_progress_pressed)
+        gesture_click.connect('released', self._on_progress_released)
+        self.progress_scale.add_controller(gesture_click)
         
-        gesture_release = Gtk.GestureClick()
-        gesture_release.connect('released', self._on_progress_release)
-        self.progress_scale.add_controller(gesture_release)
-        
-        # Use drag gesture to detect when user is dragging vs clicking
-        gesture_drag = Gtk.GestureDrag()
-        gesture_drag.connect('drag-begin', self._on_progress_drag_begin)
-        gesture_drag.connect('drag-update', self._on_progress_drag_update)
-        gesture_drag.connect('drag-end', self._on_progress_drag_end)
-        self.progress_scale.add_controller(gesture_drag)
-        
-        # Connect value-changed only for preview updates during drag (not for seeking)
-        self.progress_scale.connect('value-changed', self._on_progress_changed)
+        # Use value-changed to update labels during user interaction
+        self.progress_scale.connect('value-changed', self._on_progress_value_changed)
         progress_box.append(self.progress_scale)
         
         # Duration and time remaining labels in a vertical box
@@ -119,6 +113,16 @@ class PlayerControls(Gtk.Box):
         self.shuffle_button.connect('toggled', self._on_shuffle_toggled)
         controls_box.append(self.shuffle_button)
         
+        # Autonext toggle
+        self.autonext_button = Gtk.ToggleButton()
+        autonext_image = Gtk.Image.new_from_icon_name("media-playlist-repeat-symbolic")
+        self.autonext_button.set_child(autonext_image)
+        self.autonext_button.set_size_request(button_size, button_size)
+        self.autonext_button.set_tooltip_text("Toggle Autonext")
+        self.autonext_button.set_active(True)  # Default to enabled
+        self.autonext_button.connect('toggled', self._on_autonext_toggled)
+        controls_box.append(self.autonext_button)
+        
         # Volume control
         volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         volume_box.set_halign(Gtk.Align.END)
@@ -140,9 +144,11 @@ class PlayerControls(Gtk.Box):
         
         self.append(controls_box)
         
-        self._dragging = False  # Track if user is actively dragging
+        self._user_interacting = False  # Track if user is actively interacting with slider
         self._duration = 0.0
         self._updating_volume = False  # Flag to prevent feedback loop
+        self._updating_progress = False  # Flag to prevent feedback loop when programmatically updating
+        self._seek_timeout_id = None  # Timeout ID for debounced seek during drag
     
     def set_playing(self, playing: bool):
         """Update button states based on playing status."""
@@ -150,7 +156,15 @@ class PlayerControls(Gtk.Box):
         self.pause_button.set_visible(playing)
     
     def update_progress(self, position: float, duration: float):
-        """Update progress bar and time labels."""
+        """Update progress bar and time labels (programmatic update from playback position)."""
+        # Don't update if user is actively interacting with the slider
+        if self._user_interacting:
+            # Only update duration if it changed
+            if duration != self._duration:
+                self._duration = duration
+                self.duration_label.set_text(self._format_time(duration))
+            return
+        
         # Validate inputs
         position = max(0.0, position)
         duration = max(0.0, duration)
@@ -161,23 +175,26 @@ class PlayerControls(Gtk.Box):
         
         self._duration = duration
         
-        # Update slider only when not dragging (prevents interference during user interaction)
-        if not self._dragging:
-            if duration > 0:
-                # Calculate progress percentage, allowing up to 100% to reach the end
-                # Use a small epsilon to handle floating point precision issues
-                # If position is very close to duration (within 0.1 seconds), treat as 100%
-                if position >= duration - 0.1:
-                    progress = 100.0
-                else:
-                    progress = (position / duration) * 100.0
-                # Clamp to valid range
-                progress = max(0.0, min(100.0, progress))
+        # Update slider programmatically (set flag to prevent value-changed from triggering seek)
+        if duration > 0:
+            # Calculate progress percentage, allowing up to 100% to reach the end
+            # Use a small epsilon to handle floating point precision issues
+            # If position is very close to duration (within 0.1 seconds), treat as 100%
+            if position >= duration - 0.1:
+                progress = 100.0
             else:
-                progress = 0.0
-            self.progress_scale.set_value(progress)
+                progress = (position / duration) * 100.0
+            # Clamp to valid range
+            progress = max(0.0, min(100.0, progress))
+        else:
+            progress = 0.0
         
-        # Always update time labels
+        # Set flag to prevent value-changed handler from treating this as user interaction
+        self._updating_progress = True
+        self.progress_scale.set_value(progress)
+        self._updating_progress = False
+        
+        # Update time labels
         self.time_label.set_text(self._format_time(position))
         self.duration_label.set_text(self._format_time(duration))
         
@@ -202,84 +219,79 @@ class PlayerControls(Gtk.Box):
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
     
-    def _on_progress_changed(self, scale):
-        """Handle progress bar value change - update preview only during drag."""
-        # Only update time labels during drag, don't emit seek signal
-        # The seek signal will be emitted on release or click
-        if self._dragging and self._duration > 0:
-            value = scale.get_value()
-            # Calculate position from percentage, allowing to reach the full duration
-            # Use >= 99.9999 to account for floating point precision issues while allowing exact 100.0
+    def _on_progress_pressed(self, gesture, n_press, x, y):
+        """Handle button press on progress bar - user is starting to interact."""
+        # Cancel any pending seek timeout
+        if self._seek_timeout_id:
+            GLib.source_remove(self._seek_timeout_id)
+            self._seek_timeout_id = None
+        
+        # Mark that user is interacting - this prevents update_progress() from interfering
+        self._user_interacting = True
+    
+    def _on_progress_released(self, gesture, n_press, x, y):
+        """Handle button release on progress bar - user finished interacting, seek to position."""
+        # Cancel any pending seek timeout
+        if self._seek_timeout_id:
+            GLib.source_remove(self._seek_timeout_id)
+            self._seek_timeout_id = None
+        
+        # User finished interacting
+        self._user_interacting = False
+        
+        # Seek to the current slider value immediately
+        self._apply_seek()
+    
+    def _apply_seek(self):
+        """Apply seek to current slider value."""
+        if self._duration > 0:
+            value = self.progress_scale.get_value()
+            # Calculate position from slider value
+            # Clamp value to valid range first
+            value = max(0.0, min(100.0, value))
             if value >= 99.9999:
                 position = self._duration
             else:
                 position = (value / 100.0) * self._duration
             
-            # Update time labels immediately during seeking for better feedback
+            # Ensure position is within valid range
+            position = max(0.0, min(self._duration, position))
+            
+            # Emit seek signal - this will be handled by main_window._on_seek()
+            self.emit('seek-changed', position)
+    
+    def _on_progress_value_changed(self, scale):
+        """Handle progress bar value change - update labels during user interaction."""
+        # Only update labels if this is a user interaction (not programmatic update)
+        if self._user_interacting and not self._updating_progress and self._duration > 0:
+            value = scale.get_value()
+            # Calculate position from slider value
+            if value >= 99.9999:
+                position = self._duration
+            else:
+                position = (value / 100.0) * self._duration
+            
+            # Update time labels immediately during user interaction for real-time feedback
             self.time_label.set_text(self._format_time(position))
             remaining = max(0.0, self._duration - position)
             self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
             
-            # Don't emit seek signal here - only on release or click
-    
-    def _on_progress_press(self, gesture, n_press, x, y):
-        """Handle progress bar press - update slider position."""
-        # Calculate position from click location and update slider
-        if self._duration > 0:
-            allocation = self.progress_scale.get_allocation()
-            width = allocation.width
-            if width > 0:
-                percentage = max(0.0, min(100.0, (x / width) * 100.0))
-                self.progress_scale.set_value(percentage)
-    
-    def _on_progress_release(self, gesture, n_press, x, y):
-        """Handle progress bar release - finalize seek position."""
-        # Only seek if this was a click (not a drag - drag is handled by drag_end)
-        if not self._dragging and self._duration > 0:
-            value = self.progress_scale.get_value()
-            # Calculate final position, allowing to reach the full duration
-            # Use >= 99.9999 to account for floating point precision issues while allowing exact 100.0
-            if value >= 99.9999:
-                position = self._duration
-            else:
-                position = (value / 100.0) * self._duration
-            
-            # Emit seek signal for click
-            self.emit('seek-changed', position)
-    
-    def _on_progress_drag_begin(self, gesture, start_x, start_y):
-        """Handle drag begin - mark as dragging."""
-        self._dragging = True
-    
-    def _on_progress_drag_update(self, gesture, offset_x, offset_y):
-        """Handle drag update - update slider position based on drag."""
-        if self._duration > 0:
-            allocation = self.progress_scale.get_allocation()
-            width = allocation.width
-            if width > 0:
-                # Get the start position of the drag
-                start_x, start_y = gesture.get_start_point()
-                # Calculate current position
-                current_x = start_x + offset_x
-                percentage = max(0.0, min(100.0, (current_x / width) * 100.0))
-                self.progress_scale.set_value(percentage)
-    
-    def _on_progress_drag_end(self, gesture, offset_x, offset_y):
-        """Handle drag end - finalize seek position."""
-        if self._dragging and self._duration > 0:
-            value = self.progress_scale.get_value()
-            # Calculate final position, allowing to reach the full duration
-            # Use >= 99.9999 to account for floating point precision issues while allowing exact 100.0
-            if value >= 99.9999:
-                position = self._duration
-            else:
-                position = (value / 100.0) * self._duration
-            
-            # Emit seek signal for drag
-            self.emit('seek-changed', position)
+            # Schedule a debounced seek (only applies if user stops dragging)
+            # This provides immediate feedback while dragging, and seeks when user pauses
+            if self._seek_timeout_id:
+                GLib.source_remove(self._seek_timeout_id)
+            # Wait 150ms after last value change before seeking (debounce)
+            self._seek_timeout_id = GLib.timeout_add(150, self._on_seek_timeout)
         
-        # Reset dragging state immediately after emitting seek
-        self._dragging = False
+        # Note: When not user interaction, time labels are updated by update_progress()
+    
+    def _on_seek_timeout(self):
+        """Handle seek timeout - apply seek after user stops dragging."""
+        self._seek_timeout_id = None
+        # Only seek if user is still interacting (they paused dragging)
+        if self._user_interacting:
+            self._apply_seek()
+        return False  # Don't repeat
     
     def _on_volume_changed(self, scale):
         """Handle volume slider change."""
@@ -292,4 +304,9 @@ class PlayerControls(Gtk.Box):
         """Handle shuffle toggle button."""
         active = button.get_active()
         self.emit('shuffle-toggled', active)
+    
+    def _on_autonext_toggled(self, button):
+        """Handle autonext toggle button."""
+        active = button.get_active()
+        self.emit('autonext-toggled', active)
 

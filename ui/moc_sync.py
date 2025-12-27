@@ -7,7 +7,6 @@ and MOC's playlist, managing state, position tracking, and playback coordination
 from pathlib import Path
 from typing import Optional, Callable, List
 import json
-import random
 import time
 
 import gi
@@ -20,26 +19,6 @@ from core.moc_controller import MocController
 from core.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-def _normalize_path(file_path: Optional[str]) -> Optional[str]:
-    """
-    Normalize a file path to ensure consistent comparison.
-    
-    Args:
-        file_path: The file path to normalize, or None
-        
-    Returns:
-        Normalized absolute path as string, or None if input is None
-    """
-    if not file_path:
-        return None
-    try:
-        return str(Path(file_path).resolve())
-    except (OSError, ValueError):
-        # If path resolution fails, return original path
-        return file_path
-
 
 class MocSyncHelper:
     """
@@ -90,11 +69,8 @@ class MocSyncHelper:
         self.end_detected: bool = False
         self._resuming: bool = False  # Flag to prevent playlist sync during resume
         
-        # Shuffle tracking - track which songs have been played in shuffle mode
-        self.played_tracks_in_shuffle: set[str] = set()
+        # Shuffle state - rely on MOC's shuffle when available
         self.shuffle_enabled: bool = False
-        self._shuffle_set_pending: bool = False  # Flag to prevent update_status from overwriting our shuffle state
-        self._shuffle_set_pending_count: int = 0  # Counter to keep flag active for multiple update cycles
         
         # Callbacks
         self.on_track_finished: Optional[Callable] = None
@@ -126,7 +102,7 @@ class MocSyncHelper:
         self.playlist_manager.add_track_at_index_file(index, track)
         
         # Add to M3U file if using MOC and track is audio
-        if self.use_moc and self.sync_enabled and self.should_use_moc(track):
+        if self.use_moc and self.sync_enabled and not self.is_video_track(track):
             file_path = str(Path(track.file_path).resolve())
             self.moc_controller.add_track_at_index_m3u(index, file_path)
     
@@ -167,20 +143,16 @@ class MocSyncHelper:
             index: Index to jump to
             start_playback: Whether to start playback after jumping
         """
-        if not self.use_moc or not self.sync_enabled:
+        if not self.sync_enabled:
             return
         
         track = self.playlist_manager.get_track_at_index_file(index)
-        if track and not self.should_use_moc(track):
+        if track and is_video_track(track):
             return  # Don't sync video tracks to MOC
         
         # Use MOC command to jump (this updates MOC's internal state)
         self.moc_controller.jump_to_index(index, start_playback=start_playback)
-    
-    def should_use_moc(self, track: Optional[TrackMetadata]) -> bool:
-        """Check if MOC should be used for this track."""
-        return self.use_moc and not self.is_video_track(track)
-    
+        
     def initialize(self):
         """Initialize MOC server and settings.
         
@@ -213,8 +185,6 @@ class MocSyncHelper:
             # Sync playlist to MOC but don't start playback - app controls playback
             self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
             logger.info("Synced %d tracks to MOC - app is now orchestrator", len(tracks))
-            # Re-enable autonext after syncing playlist
-            self.moc_controller.enable_autonext()
         
         return True
     
@@ -269,35 +239,19 @@ class MocSyncHelper:
     
     def sync_shuffle_from_moc(self):
         """Sync shuffle state from MOC to UI."""
-        if not self.use_moc:
-            return
-        
         moc_shuffle = self.moc_controller.get_shuffle_state()
         if moc_shuffle is not None:
             self.shuffle_enabled = moc_shuffle
-            # Reset played tracks when shuffle state changes
-            if not moc_shuffle:
-                self.played_tracks_in_shuffle.clear()
             if self.on_shuffle_changed:
                 self.on_shuffle_changed(moc_shuffle)
     
     def set_shuffle_enabled(self, enabled: bool):
-        """Set shuffle state and reset played tracks tracking."""
+        """Set shuffle state (relies on MOC's shuffle when available)."""
         self.shuffle_enabled = enabled
-        if not enabled:
-            # Clear played tracks when shuffle is disabled
-            self.played_tracks_in_shuffle.clear()
-        else:
-            # When shuffle is enabled, mark current track as played if it exists
-            current_track = self.playlist_manager.get_current_track()
-            if current_track and current_track.file_path:
-                normalized_path = _normalize_path(current_track.file_path)
-                if normalized_path:
-                    self.played_tracks_in_shuffle.add(normalized_path)
     
     def sync_playlist_to_moc(self, start_playback: bool = False):
         """Sync current playlist to MOC with debouncing to prevent rapid-fire syncs."""
-        if not self.use_moc or not self.sync_enabled:
+        if not self.sync_enabled:
             return
         
         # Cancel any pending sync
@@ -332,7 +286,7 @@ class MocSyncHelper:
             return False
         
         track = self.playlist_manager.get_current_track()
-        if track and self.should_use_moc(track) and start_playback:
+        if track and not self.is_video_track(track) and start_playback:
             # Using MOC for playback - sync playlist and start playing
             self.moc_controller.set_playlist(tracks, current_index, start_playback=True)
         else:
@@ -343,7 +297,7 @@ class MocSyncHelper:
     
     def sync_playlist_for_playback(self):
         """Sync playlist to MOC when starting playback."""
-        if not self.use_moc or not self.sync_enabled:
+        if not self.sync_enabled:
             return
         # Don't sync if we're in the middle of resuming - this would reset the playlist
         if self._resuming:
@@ -380,22 +334,16 @@ class MocSyncHelper:
             return
         
         track = self.playlist_manager.get_current_track()
-        if track and self.should_use_moc(track):
+        if track and not self.is_video_track(track):
             self.moc_controller.set_playlist(tracks, current_index, start_playback=True)
         else:
             self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
-        
-        # Always ensure autonext is enabled so tracks advance automatically
-        self.moc_controller.enable_autonext()
         
         # Sync shuffle state
         # Note: shuffle state is managed by main_window, not here
     
     def load_playlist_from_moc(self):
         """Load playlist from MOC's playlist file."""
-        if not self.use_moc:
-            return
-        
         # Load playlist from MOC
         tracks, current_index = self.moc_controller.get_playlist()
         
@@ -406,7 +354,6 @@ class MocSyncHelper:
                 self.playlist_manager.set_current_index(current_index)
             self.playlist_view.set_playlist(tracks, current_index)
             # Reset shuffle tracking when loading a new playlist
-            self.reset_shuffle_tracking()
             
             # Load full metadata asynchronously in background
             # This prevents blocking the UI
@@ -468,8 +415,6 @@ class MocSyncHelper:
         
         Returns True to continue polling, False to stop.
         """
-        if not self.use_moc:
-            return False
         
         status = self.moc_controller.get_status()
         if not status:
@@ -491,7 +436,7 @@ class MocSyncHelper:
         
         # Update UI state if we're using MOC for current track
         track = self.playlist_manager.get_current_track()
-        if track and self.should_use_moc(track):
+        if track and not self.is_video_track(track):
             # Update playback state
             self.player_controls.set_playing(state == "PLAY")
             
@@ -535,11 +480,7 @@ class MocSyncHelper:
                         return True
                 
                 # Track actually changed - MOC has advanced to next track or changed externally
-                # Mark the previous track as played if shuffle is enabled
-                if self.shuffle_enabled and self.last_file:
-                    normalized_path = _normalize_path(self.last_file)
-                    if normalized_path:
-                        self.played_tracks_in_shuffle.add(normalized_path)
+                # MOC handles shuffle automatically, no need to track played tracks
                 
                 self.last_file = file_path
                 self.end_detected = False
@@ -609,36 +550,9 @@ class MocSyncHelper:
                     # Track has finished
                     self.end_detected = True
                     
-                    # Mark current track as played if shuffle is enabled
-                    if self.shuffle_enabled and file_path:
-                        normalized_path = _normalize_path(file_path)
-                        if normalized_path:
-                            self.played_tracks_in_shuffle.add(normalized_path)
-                    
                     # Check if there are more tracks to play
-                    # In shuffle mode, check if all tracks have been played
-                    # In sequential mode, check if there's a next track
-                    has_more_tracks = False
-                    if self.shuffle_enabled:
-                        # In shuffle mode, check if all tracks have been played
-                        playlist_file_paths = {_normalize_path(t.file_path) for t in playlist if t.file_path}
-                        played_normalized = {_normalize_path(p) for p in self.played_tracks_in_shuffle if p}
-                        unplayed_tracks = playlist_file_paths - played_normalized
-                        has_more_tracks = len(unplayed_tracks) > 0
-                        
-                        # If all tracks have been played, reset and start over
-                        if not has_more_tracks and len(playlist) > 0:
-                            # All tracks played - reset and continue shuffling
-                            self.played_tracks_in_shuffle.clear()
-                            # Mark current track as played for the new cycle
-                            if file_path:
-                                normalized_path = _normalize_path(file_path)
-                                if normalized_path:
-                                    self.played_tracks_in_shuffle.add(normalized_path)
-                            has_more_tracks = len(playlist) > 1  # Continue if more than 1 track
-                    else:
-                        # Sequential mode - check if there's a next track
-                        has_more_tracks = current_index < len(playlist) - 1
+                    # When using MOC, it handles shuffle automatically, so just check if there's a next track
+                    has_more_tracks = current_index < len(playlist) - 1
                     
                     if has_more_tracks:
                         # There are more tracks to play - trigger advancement
@@ -647,40 +561,18 @@ class MocSyncHelper:
                         if self.on_track_finished:
                             self.on_track_finished()
                     elif state == "STOP":
-                        # End of playlist (or all tracks played in shuffle) - ensure we're stopped
+                        # End of playlist - ensure we're stopped
                         self.playlist_manager.set_current_index(-1)
                         self.playlist_view.set_playlist(playlist, -1)
-                        # Reset played tracks when playback stops
-                        if self.shuffle_enabled:
-                            self.played_tracks_in_shuffle.clear()
             
             # Fallback: Detect if MOC stopped at the end (in case position detection missed it)
             # Only check this if we're still on the same file and MOC stopped
             if duration > 0 and state == "STOP" and file_path == self.last_file and not self.end_detected:
                 # Check if position is at or near the end (within 1 second)
                 if position >= duration - 1.0:
-                    # Mark current track as played if shuffle is enabled
-                    if self.shuffle_enabled and file_path:
-                        normalized_path = _normalize_path(file_path)
-                        if normalized_path:
-                            self.played_tracks_in_shuffle.add(normalized_path)
-                    
-                    # Check if there are more tracks to play (same logic as above)
-                    has_more_tracks = False
-                    if self.shuffle_enabled:
-                        playlist_file_paths = {_normalize_path(t.file_path) for t in playlist if t.file_path}
-                        played_normalized = {_normalize_path(p) for p in self.played_tracks_in_shuffle if p}
-                        unplayed_tracks = playlist_file_paths - played_normalized
-                        has_more_tracks = len(unplayed_tracks) > 0
-                        if not has_more_tracks and len(playlist) > 0:
-                            self.played_tracks_in_shuffle.clear()
-                            if file_path:
-                                normalized_path = _normalize_path(file_path)
-                                if normalized_path:
-                                    self.played_tracks_in_shuffle.add(normalized_path)
-                            has_more_tracks = len(playlist) > 1
-                    else:
-                        has_more_tracks = current_index < len(playlist) - 1
+                    # Check if there are more tracks to play
+                    # When using MOC, it handles shuffle automatically
+                    has_more_tracks = current_index < len(playlist) - 1
                     
                     if has_more_tracks:
                         # Track finished and MOC stopped, but there are more tracks
@@ -711,32 +603,13 @@ class MocSyncHelper:
                     self.sync_enabled = True
         
         # Sync shuffle state from MOC if user changes it externally
-        # BUT: Don't sync if we just set shuffle ourselves (prevent overwriting our state)
-        # NOTE: MOC's shuffle/autonext commands don't seem to work reliably, so we ignore
-        # MOC's reported state when we've set shuffle ourselves
+        # Since we rely on MOC's shuffle, always sync from MOC's reported state
         moc_shuffle = status.get("shuffle", False)
-        if moc_shuffle != self.shuffle_enabled and not self._shuffle_set_pending:
-            # Only sync if we didn't just set shuffle ourselves
-            # But only sync FROM MOC if MOC actually has shuffle enabled (to detect external changes)
-            # If MOC reports shuffle=false but we have it enabled, don't overwrite (MOC commands don't work)
-            if moc_shuffle:
-                # MOC has shuffle enabled externally - sync to our state
-                self.set_shuffle_enabled(moc_shuffle)
-            # If moc_shuffle is false but we have it enabled, ignore it (MOC's command didn't work)
-        elif self._shuffle_set_pending:
-            # Keep flag active for a few update cycles to allow MOC to update its status
-            # Also clear if MOC now reports the correct shuffle state
-            if moc_shuffle == self.shuffle_enabled:
-                # MOC now matches our state - clear the flag
-                self._shuffle_set_pending = False
-                self._shuffle_set_pending_count = 0
-            else:
-                # Decrement counter, clear flag after 5 update cycles (~2.5 seconds)
-                self._shuffle_set_pending_count -= 1
-                if self._shuffle_set_pending_count <= 0:
-                    self._shuffle_set_pending = False
-                    self._shuffle_set_pending_count = 0
-        # Note: shuffle sync is handled by main_window
+        if moc_shuffle != self.shuffle_enabled:
+            # MOC's shuffle state changed - sync to our state
+            self.set_shuffle_enabled(moc_shuffle)
+            if self.on_shuffle_changed:
+                self.on_shuffle_changed(moc_shuffle)
         
         # Detect external playlist changes (e.g. from MOC UI or CLI) by watching the M3U file
         try:
@@ -769,26 +642,13 @@ class MocSyncHelper:
     def reset_end_detection(self):
         """Reset end-of-track detection flag."""
         self.end_detected = False
-    
-    def reset_shuffle_tracking(self):
-        """Reset shuffle tracking when playlist changes."""
-        self.played_tracks_in_shuffle.clear()
-        # Mark current track as played if shuffle is enabled
-        if self.shuffle_enabled:
-            current_track = self.playlist_manager.get_current_track()
-            if current_track and current_track.file_path:
-                normalized_path = _normalize_path(current_track.file_path)
-                if normalized_path:
-                    self.played_tracks_in_shuffle.add(normalized_path)
-    
+        
     # ===================================================================
     # High-level playback control methods - main_window should use these
     # ===================================================================
     
     def play(self):
         """Start or resume playback."""
-        if not self.use_moc:
-            return
         # Set resuming flag to prevent playlist sync during resume
         self._resuming = True
         
@@ -808,72 +668,22 @@ class MocSyncHelper:
     
     def pause(self):
         """Pause playback."""
-        if not self.use_moc:
-            return
         self.moc_controller.pause()
     
     def stop(self):
         """Stop playback."""
-        if not self.use_moc:
-            return
         self.moc_controller.stop()
         self.playlist_manager.set_current_index(-1)
         self.playlist_view.set_playlist(self.playlist_manager.get_playlist(), -1)
-        if self.shuffle_enabled:
-            self.played_tracks_in_shuffle.clear()
     
     def next_track(self):
-        """Advance to next track (handles shuffle if enabled)."""
-        if not self.use_moc:
-            return
-        
-        tracks = self.playlist_manager.get_playlist()
-        current_index = self.playlist_manager.get_current_index()
-        
-        if self.shuffle_enabled:
-            # Shuffle mode - select random unplayed track
-            if len(tracks) == 0:
-                return
-            if len(tracks) == 1:
-                new_index = 0
-            else:
-                # Get unplayed tracks - normalize paths for consistent comparison
-                playlist_file_paths = {_normalize_path(t.file_path) for t in tracks if t.file_path}
-                played_normalized = {_normalize_path(p) for p in self.played_tracks_in_shuffle if p}
-                unplayed = playlist_file_paths - played_normalized
-                
-                if len(unplayed) == 0:
-                    # All tracks played - reset and continue
-                    self.played_tracks_in_shuffle.clear()
-                    unplayed = playlist_file_paths
-                    if current_index >= 0 and tracks[current_index].file_path:
-                        normalized_current = _normalize_path(tracks[current_index].file_path)
-                        if normalized_current:
-                            self.played_tracks_in_shuffle.add(normalized_current)
-                
-                # Select random unplayed track
-                unplayed_list = [t for t in tracks if t.file_path and _normalize_path(t.file_path) in unplayed]
-                if unplayed_list:
-                    selected = random.choice(unplayed_list)
-                    new_index = tracks.index(selected)
-                else:
-                    return
-        else:
-            # Sequential mode
-            if current_index < len(tracks) - 1:
-                new_index = current_index + 1
-            else:
-                return  # End of playlist
-        
-        self.playlist_manager.set_current_index(new_index)
-        self.playlist_view.set_playlist(tracks, new_index)
-        self.play_track()
+        """Advance to next track - relies on MOC's shuffle when enabled."""
+        # When MOC is available, let MOC handle shuffle - just call next
+        # MOC will automatically shuffle if shuffle is enabled
+        self.moc_controller.next()
     
     def previous_track(self):
         """Go to previous track."""
-        if not self.use_moc:
-            return
-        
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
         
@@ -885,11 +695,8 @@ class MocSyncHelper:
     
     def play_track(self):
         """Play the current track from playlist."""
-        if not self.use_moc:
-            return
-        
         track = self.playlist_manager.get_current_track()
-        if not track or not self.should_use_moc(track):
+        if not track or self.is_video_track(track):
             return
         
         # Validate file exists
@@ -911,23 +718,11 @@ class MocSyncHelper:
         # Sync playlist and start playback
         self.sync_playlist_for_playback()
         
-        # For shuffle mode, disable MOC's autonext - we handle advancement ourselves
-        # For sequential mode, enable autonext so MOC can auto-advance
+        # Set shuffle state in MOC
         if self.shuffle_enabled:
-            # Disable autonext - we'll manually advance using our shuffle logic
-            self.moc_controller.disable_autonext()
-            # Note: MOC's shuffle command doesn't work reliably, so we ignore it
-            # and handle shuffle entirely in our code
+            self.moc_controller.enable_shuffle()
         else:
-            # Sequential mode - enable autonext so MOC can auto-advance
-            self.moc_controller.enable_autonext()
             self.moc_controller.disable_shuffle()
-        
-        # Mark current track as played in shuffle mode
-        if self.shuffle_enabled and track.file_path:
-            normalized_path = _normalize_path(track.file_path)
-            if normalized_path:
-                self.played_tracks_in_shuffle.add(normalized_path)
         
         # Update metadata panel with new track
         self.metadata_panel.set_track(track)
@@ -941,22 +736,11 @@ class MocSyncHelper:
     def set_shuffle(self, enabled: bool):
         """Set shuffle mode and sync with MOC."""
         self.set_shuffle_enabled(enabled)
-        if not self.use_moc:
-            return
         
         if enabled:
             self.moc_controller.enable_shuffle()
         else:
             self.moc_controller.disable_shuffle()
-        
-        # Always ensure autonext is enabled
-        self.moc_controller.enable_autonext()
-        # Set flag to prevent update_status from overwriting our state
-        # Keep it active for 5 update cycles (~2.5 seconds) to allow MOC to update
-        self._shuffle_set_pending = True
-        self._shuffle_set_pending_count = 5
-        # Note: Even if MOC doesn't report shuffle as enabled immediately, we keep our state
-        # MOC's shuffle might work differently (e.g., only affects next track selection)
         
         # Notify UI of shuffle change
         if self.on_shuffle_changed:
@@ -966,33 +750,35 @@ class MocSyncHelper:
         """Get current shuffle state."""
         return self.shuffle_enabled
     
-    def handle_track_finished(self):
-        """Handle track completion - advance to next track if available."""
-        if not self.use_moc:
-            return
-        
-        tracks = self.playlist_manager.get_playlist()
-        current_index = self.playlist_manager.get_current_index()
-        current_track = self.playlist_manager.get_current_track()
-        
-        # Mark current track as played if shuffle is enabled
-        if self.shuffle_enabled and current_track and current_track.file_path:
-            normalized_path = _normalize_path(current_track.file_path)
-            if normalized_path:
-                self.played_tracks_in_shuffle.add(normalized_path)
-        
-        # When shuffle is enabled, always use our shuffle logic instead of MOC's autonext
-        # MOC's shuffle might not work reliably, so we handle it ourselves
-        if self.shuffle_enabled:
-            # Disable MOC's autonext to prevent conflicts with our shuffle logic
-            # We'll manually advance using our shuffle algorithm
+    def get_autonext_enabled(self) -> bool:
+        """Get current autonext state from MOC."""
+        autonext_state = self.moc_controller.get_autonext_state()
+        return autonext_state if autonext_state is not None else True  # Default to enabled
+    
+    def set_autonext_enabled(self, enabled: bool):
+        """Set autonext state in MOC."""
+        if enabled:
+            self.moc_controller.enable_autonext()
+        else:
             self.moc_controller.disable_autonext()
-            # Manually advance using our shuffle logic
-            self.next_track()
-            self.end_detected = False
-            return
+    
+    def toggle_autonext(self) -> bool:
+        """Toggle autonext state and return new state."""
+        current_state = self.get_autonext_enabled()
+        new_state = not current_state
+        self.set_autonext_enabled(new_state)
+        return new_state
+    
+    def handle_track_finished(self):
+        """Handle track completion - let MOC handle advancement (including shuffle)."""
+        # MOC handles shuffle automatically when enabled, so we don't need to do anything
+        # MOC's autonext will advance to the next track (shuffled if shuffle is enabled)
+        # Just reset end_detected flag
+        self.end_detected = False
         
-        # For sequential mode, check if MOC has already auto-advanced
+        # Check if MOC has already auto-advanced
+        tracks = self.playlist_manager.get_playlist()
+        current_track = self.playlist_manager.get_current_track()
         moc_status = self.moc_controller.get_status(force_refresh=True)
         
         if moc_status:
@@ -1016,11 +802,8 @@ class MocSyncHelper:
                         self.end_detected = False
                         return
         
-        # MOC hasn't auto-advanced - manually advance
-        # Reset end_detected after we advance (next_track will change the track)
-        self.next_track()
-        # Reset end_detected after advancing to allow detection of next track end
-        self.end_detected = False
+        # MOC hasn't auto-advanced - MOC will handle it automatically with autonext
+        # No need to manually advance when using MOC shuffle
     
     def get_cached_duration(self) -> float:
         """Get cached duration if available."""
@@ -1036,10 +819,19 @@ class MocSyncHelper:
         """Get cached position if available."""
         return self.last_position
     
-    def seek(self, position: float):
-        """Seek to position in current track."""
-        if not self.use_moc:
-            return
+    def seek(self, position: float, force: bool = False):
+        """
+        Seek to position in current track.
+        
+        Args:
+            position: Target position in seconds
+            force: If True, always seek regardless of threshold (for user-initiated seeks)
+        """
+        # Clamp position to valid range
+        position = max(0.0, position)
+        duration = self.get_cached_duration()
+        if duration > 0:
+            position = min(position, duration)
         
         # Get current position
         current_pos = self.get_cached_position()
@@ -1049,19 +841,19 @@ class MocSyncHelper:
                 current_pos = float(status.get("position", 0.0))
         
         delta = position - current_pos
-        if abs(delta) > 0.5:  # Only seek if delta is significant
+        # Always seek if forced (user-initiated) or if delta is significant (>= 0.5 seconds)
+        # The 0.5 second threshold prevents tiny seeks from automatic playback position updates
+        if force or abs(delta) >= 0.5:
             self.moc_controller.seek_relative(delta)
             # Reset end-detection when seeking (whether away from or to the end)
             # This ensures end detection can trigger properly after seeking
-            duration = self.get_cached_duration()
             if duration > 0:
                 # Always reset end detection when seeking, so the next update_status
                 # can properly detect if we're at the end and trigger autoplay
                 self.reset_end_detection()
             # Force refresh status cache after seek
             status_after = self.moc_controller.get_status(force_refresh=True)
-            autonext_after = status_after.get("autonext", False) if status_after else False
-            # Re-enable autonext if it was disabled by seek
-            if not autonext_after:
-                self.moc_controller.enable_autonext()
+            logger.debug("Seeked to position %.2f (delta: %.2f, forced: %s)", position, delta, force)
+        else:
+            logger.debug("Seek skipped - delta too small: %.2f seconds", abs(delta))
 
