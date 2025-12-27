@@ -543,7 +543,15 @@ class MocController:
         if not self.is_available():
             return
         self.ensure_server()
-        self._run("--play")
+        # Check if MOC is paused - if so, use --unpause to resume from paused position
+        # Otherwise, use --play to start playback
+        status = self.get_status(force_refresh=False)
+        if status and status.get("state") == "PAUSE":
+            # MOC is paused - use --unpause to resume from paused position
+            self._run("--unpause")
+        else:
+            # MOC is stopped or not playing - use --play to start
+            self._run("--play")
 
     def pause(self):
         """Pause playback."""
@@ -777,7 +785,21 @@ class MocController:
                     file_path = Path(track.file_path)
                     if file_path.exists() and file_path.is_file():
                         abs_path = str(file_path.resolve())
+                        # Check if MOC is already paused on this track - if so, just resume instead of restarting
+                        status = self.get_status(force_refresh=False)
+                        if status:
+                            moc_state = status.get("state", "STOP")
+                            moc_file = status.get("file_path")
+                            if moc_state == "PAUSE" and moc_file:
+                                moc_file_abs = str(Path(moc_file).resolve())
+                                if moc_file_abs == abs_path:
+                                    # MOC is already paused on this track - just resume, don't restart
+                                    logger.debug("MOC is paused on target track - using --unpause to resume instead of restarting")
+                                    self._run("--unpause", capture_output=False)
+                                    return
+                        
                         # Use --playit to play the specific file (works even if it's in playlist)
+                        # This will restart from the beginning
                         result = self._run("--playit", abs_path, capture_output=True)
                         if result.returncode != 0:
                             # Fallback: use jump with 0-based index

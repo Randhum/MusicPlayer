@@ -69,6 +69,7 @@ class MocSyncHelper:
         self.playlist_mtime: float = 0.0
         self.sync_enabled: bool = True
         self.end_detected: bool = False
+        self._resuming: bool = False  # Flag to prevent playlist sync during resume
         
         # Shuffle tracking - track which songs have been played in shuffle mode
         self.played_tracks_in_shuffle: set[str] = set()
@@ -323,14 +324,26 @@ class MocSyncHelper:
         """Sync playlist to MOC when starting playback."""
         if not self.use_moc or not self.sync_enabled:
             return
+        # Don't sync if we're in the middle of resuming - this would reset the playlist
+        if self._resuming:
+            return
         
-        # Check if MOC is playing independently
+        # Check if MOC is already paused on the current track - if so, don't sync (would reset position)
         moc_status = self.moc_controller.get_status(force_refresh=False)
         if moc_status:
             moc_state = moc_status.get("state", "STOP")
             moc_file = moc_status.get("file_path")
             current_track = self.playlist_manager.get_current_track()
             
+            # If MOC is paused on the current track, don't sync (would reset position)
+            if moc_state == "PAUSE" and moc_file and current_track:
+                from pathlib import Path
+                moc_file_abs = str(Path(moc_file).resolve())
+                track_file_abs = str(Path(current_track.file_path).resolve())
+                if moc_file_abs == track_file_abs:
+                    return
+            
+            # Check if MOC is playing independently
             if moc_state == "PLAY" and moc_file and current_track:
                 if moc_file != current_track.file_path:
                     # MOC is playing independently - don't sync
@@ -450,6 +463,11 @@ class MocSyncHelper:
         self.last_position = position
         self.last_duration = duration
         
+        # If last_file is None and we have a file_path, set it to prevent false track change detection
+        # This is especially important when resuming, as last_file might not be set yet
+        if self.last_file is None and file_path:
+            self.last_file = file_path
+        
         # Update UI state if we're using MOC for current track
         track = self.playlist_manager.get_current_track()
         if track and self.should_use_moc(track):
@@ -471,8 +489,31 @@ class MocSyncHelper:
             # Detect track change (MOC auto-advancement when track finishes or external change)
             # MOC handles autonext automatically, so we detect when the file_path changes
             # This is the primary mechanism for track advancement
-            if file_path and file_path != self.last_file:
-                # Track changed - MOC has advanced to next track or changed externally (e.g., via mocp next button)
+            # BUT: Don't treat state change from PAUSE to PLAY as a track change (it's just resuming)
+            # Only treat it as a track change if the file_path actually changed AND we're not just resuming
+            # Also, if last_file is None (first time), don't treat it as a track change
+            if file_path and file_path != self.last_file and self.last_file is not None:
+                # Don't reload playlist if we're in the middle of resuming - this would reset the playlist
+                if self._resuming:
+                    # Just update last_file to match current file
+                    self.last_file = file_path
+                    self.end_detected = False
+                    return True
+                
+                # Check if this is just a resume (same track, state changed from PAUSE to PLAY)
+                # If so, don't reload the playlist - just update last_file
+                current_track = self.playlist_manager.get_current_track()
+                if current_track and current_track.file_path:
+                    from pathlib import Path
+                    current_file_abs = str(Path(current_track.file_path).resolve())
+                    new_file_abs = str(Path(file_path).resolve())
+                    if current_file_abs == new_file_abs:
+                        # Same track - just resuming, don't reload playlist
+                        self.last_file = file_path
+                        self.end_detected = False
+                        return True
+                
+                # Track actually changed - MOC has advanced to next track or changed externally
                 # Mark the previous track as played if shuffle is enabled
                 if self.shuffle_enabled and self.last_file:
                     self.played_tracks_in_shuffle.add(self.last_file)
@@ -713,7 +754,22 @@ class MocSyncHelper:
         """Start or resume playback."""
         if not self.use_moc:
             return
+        # Set resuming flag to prevent playlist sync during resume
+        self._resuming = True
+        
+        # Set last_file to current track to prevent false track change detection during resume
+        current_track = self.playlist_manager.get_current_track()
+        if current_track and current_track.file_path:
+            self.last_file = current_track.file_path
+        
         self.moc_controller.play()
+        # Clear resuming flag after a short delay to allow MOC to resume
+        # Use GLib.timeout_add to clear after resume completes
+        def clear_resuming():
+            self._resuming = False
+            return False  # Don't repeat
+        from gi.repository import GLib
+        GLib.timeout_add(1000, clear_resuming)  # Clear after 1 second
     
     def pause(self):
         """Pause playback."""
@@ -801,7 +857,7 @@ class MocSyncHelper:
         # Validate file exists
         file_path = Path(track.file_path)
         if not file_path.exists() or not file_path.is_file():
-            print(f"Error: Track file does not exist: {track.file_path}")
+            logger.error("Track file does not exist: %s", track.file_path)
             return
         
         # Stop MOC if it's currently playing a different track
@@ -832,6 +888,12 @@ class MocSyncHelper:
         # Mark current track as played in shuffle mode
         if self.shuffle_enabled and track.file_path:
             self.played_tracks_in_shuffle.add(track.file_path)
+        
+        # Update metadata panel with new track
+        self.metadata_panel.set_track(track)
+        # Update MPRIS2 metadata
+        if self.mpris2:
+            self.mpris2.update_metadata(track)
         
         # Reset end detection
         self.reset_end_detection()

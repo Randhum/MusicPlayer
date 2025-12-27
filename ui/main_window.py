@@ -749,9 +749,19 @@ class MainWindow(Gtk.ApplicationWindow):
             # Resume MOC playback
             self._stop_internal_player_if_needed()
             self.moc_sync.play()
+            # Update metadata panel when resuming
+            self.metadata_panel.set_track(track)
+            # Update MPRIS2 metadata
+            if self.mpris2:
+                self.mpris2.update_metadata(track)
         else:
             # Resume internal player playback
             self.player.play()
+            # Update metadata panel when resuming
+            self.metadata_panel.set_track(track)
+            # Update MPRIS2 metadata
+            if self.mpris2:
+                self.mpris2.update_metadata(track)
     
     def _get_selected_track_index(self) -> int:
         """
@@ -786,53 +796,26 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_play(self):
         """Handle play button click - route to appropriate player."""
-        logger.debug("=== _on_play called ===")
-        
         # Step 1: Check if we can resume a paused track
         current_track = self.playlist_manager.get_current_track()
-        current_index = self.playlist_manager.get_current_index()
-        logger.debug("Current track: %s (index: %d)", 
-                    current_track.file_path if current_track else "None", current_index)
-        
-        # Check MOC state regardless of current_track
-        if self.use_moc:
-            moc_status = self.moc_controller.get_status(force_refresh=True)
-            logger.debug("MOC status: %s", moc_status)
-            if moc_status:
-                moc_state = moc_status.get("state", "STOP")
-                moc_file = moc_status.get("file_path")
-                logger.debug("MOC state: %s, file: %s", moc_state, moc_file)
-        
-        # Check internal player state
-        logger.debug("Internal player - current_track: %s, is_playing: %s",
-                    self.player.current_track.file_path if self.player.current_track else "None",
-                    self.player.is_playing)
         
         if current_track:
             # Check if this track is already playing - do nothing
             is_playing = self._is_track_playing(current_track)
-            logger.debug("Track is playing: %s", is_playing)
             if is_playing:
-                logger.debug("Already playing, returning")
                 return
             
             # Check if this track is paused and can be resumed
             can_resume = self._can_resume_track(current_track)
-            logger.debug("Can resume track: %s", can_resume)
             if can_resume:
-                logger.debug("Resuming track")
                 self._resume_track(current_track)
                 return
-            else:
-                logger.debug("Cannot resume - falling through to next steps")
         
         # Step 2: Check if there's a selected track in the playlist
         selected_track = self._get_selected_track()
-        logger.debug("Selected track: %s", selected_track.file_path if selected_track else "None")
         if selected_track:
             # Set it as current and play
             index = self._get_selected_track_index()
-            logger.debug("Playing selected track at index %d", index)
             if index >= 0:
                 self.playlist_manager.set_current_index(index)
                 self._update_playlist_view()
@@ -841,10 +824,7 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Step 3: Play current track (if exists)
         if current_track:
-            logger.debug("Playing current track (fallback)")
             self._play_current_track()
-        else:
-            logger.debug("No current track, no selected track - nothing to play")
     
     def _on_pause(self):
         """Handle pause button click - route to appropriate player."""
