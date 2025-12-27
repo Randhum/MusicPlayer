@@ -22,6 +22,25 @@ from core.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _normalize_path(file_path: Optional[str]) -> Optional[str]:
+    """
+    Normalize a file path to ensure consistent comparison.
+    
+    Args:
+        file_path: The file path to normalize, or None
+        
+    Returns:
+        Normalized absolute path as string, or None if input is None
+    """
+    if not file_path:
+        return None
+    try:
+        return str(Path(file_path).resolve())
+    except (OSError, ValueError):
+        # If path resolution fails, return original path
+        return file_path
+
+
 class MocSyncHelper:
     """
     Helper class for managing MOC synchronization.
@@ -272,7 +291,9 @@ class MocSyncHelper:
             # When shuffle is enabled, mark current track as played if it exists
             current_track = self.playlist_manager.get_current_track()
             if current_track and current_track.file_path:
-                self.played_tracks_in_shuffle.add(current_track.file_path)
+                normalized_path = _normalize_path(current_track.file_path)
+                if normalized_path:
+                    self.played_tracks_in_shuffle.add(normalized_path)
     
     def sync_playlist_to_moc(self, start_playback: bool = False):
         """Sync current playlist to MOC with debouncing to prevent rapid-fire syncs."""
@@ -516,7 +537,9 @@ class MocSyncHelper:
                 # Track actually changed - MOC has advanced to next track or changed externally
                 # Mark the previous track as played if shuffle is enabled
                 if self.shuffle_enabled and self.last_file:
-                    self.played_tracks_in_shuffle.add(self.last_file)
+                    normalized_path = _normalize_path(self.last_file)
+                    if normalized_path:
+                        self.played_tracks_in_shuffle.add(normalized_path)
                 
                 self.last_file = file_path
                 self.end_detected = False
@@ -588,7 +611,9 @@ class MocSyncHelper:
                     
                     # Mark current track as played if shuffle is enabled
                     if self.shuffle_enabled and file_path:
-                        self.played_tracks_in_shuffle.add(file_path)
+                        normalized_path = _normalize_path(file_path)
+                        if normalized_path:
+                            self.played_tracks_in_shuffle.add(normalized_path)
                     
                     # Check if there are more tracks to play
                     # In shuffle mode, check if all tracks have been played
@@ -596,8 +621,9 @@ class MocSyncHelper:
                     has_more_tracks = False
                     if self.shuffle_enabled:
                         # In shuffle mode, check if all tracks have been played
-                        playlist_file_paths = {t.file_path for t in playlist if t.file_path}
-                        unplayed_tracks = playlist_file_paths - self.played_tracks_in_shuffle
+                        playlist_file_paths = {_normalize_path(t.file_path) for t in playlist if t.file_path}
+                        played_normalized = {_normalize_path(p) for p in self.played_tracks_in_shuffle if p}
+                        unplayed_tracks = playlist_file_paths - played_normalized
                         has_more_tracks = len(unplayed_tracks) > 0
                         
                         # If all tracks have been played, reset and start over
@@ -606,7 +632,9 @@ class MocSyncHelper:
                             self.played_tracks_in_shuffle.clear()
                             # Mark current track as played for the new cycle
                             if file_path:
-                                self.played_tracks_in_shuffle.add(file_path)
+                                normalized_path = _normalize_path(file_path)
+                                if normalized_path:
+                                    self.played_tracks_in_shuffle.add(normalized_path)
                             has_more_tracks = len(playlist) > 1  # Continue if more than 1 track
                     else:
                         # Sequential mode - check if there's a next track
@@ -633,18 +661,23 @@ class MocSyncHelper:
                 if position >= duration - 1.0:
                     # Mark current track as played if shuffle is enabled
                     if self.shuffle_enabled and file_path:
-                        self.played_tracks_in_shuffle.add(file_path)
+                        normalized_path = _normalize_path(file_path)
+                        if normalized_path:
+                            self.played_tracks_in_shuffle.add(normalized_path)
                     
                     # Check if there are more tracks to play (same logic as above)
                     has_more_tracks = False
                     if self.shuffle_enabled:
-                        playlist_file_paths = {t.file_path for t in playlist if t.file_path}
-                        unplayed_tracks = playlist_file_paths - self.played_tracks_in_shuffle
+                        playlist_file_paths = {_normalize_path(t.file_path) for t in playlist if t.file_path}
+                        played_normalized = {_normalize_path(p) for p in self.played_tracks_in_shuffle if p}
+                        unplayed_tracks = playlist_file_paths - played_normalized
                         has_more_tracks = len(unplayed_tracks) > 0
                         if not has_more_tracks and len(playlist) > 0:
                             self.played_tracks_in_shuffle.clear()
                             if file_path:
-                                self.played_tracks_in_shuffle.add(file_path)
+                                normalized_path = _normalize_path(file_path)
+                                if normalized_path:
+                                    self.played_tracks_in_shuffle.add(normalized_path)
                             has_more_tracks = len(playlist) > 1
                     else:
                         has_more_tracks = current_index < len(playlist) - 1
@@ -744,7 +777,9 @@ class MocSyncHelper:
         if self.shuffle_enabled:
             current_track = self.playlist_manager.get_current_track()
             if current_track and current_track.file_path:
-                self.played_tracks_in_shuffle.add(current_track.file_path)
+                normalized_path = _normalize_path(current_track.file_path)
+                if normalized_path:
+                    self.played_tracks_in_shuffle.add(normalized_path)
     
     # ===================================================================
     # High-level playback control methods - main_window should use these
@@ -802,19 +837,22 @@ class MocSyncHelper:
             if len(tracks) == 1:
                 new_index = 0
             else:
-                # Get unplayed tracks
-                playlist_file_paths = {t.file_path for t in tracks if t.file_path}
-                unplayed = playlist_file_paths - self.played_tracks_in_shuffle
+                # Get unplayed tracks - normalize paths for consistent comparison
+                playlist_file_paths = {_normalize_path(t.file_path) for t in tracks if t.file_path}
+                played_normalized = {_normalize_path(p) for p in self.played_tracks_in_shuffle if p}
+                unplayed = playlist_file_paths - played_normalized
                 
                 if len(unplayed) == 0:
                     # All tracks played - reset and continue
                     self.played_tracks_in_shuffle.clear()
                     unplayed = playlist_file_paths
                     if current_index >= 0 and tracks[current_index].file_path:
-                        self.played_tracks_in_shuffle.add(tracks[current_index].file_path)
+                        normalized_current = _normalize_path(tracks[current_index].file_path)
+                        if normalized_current:
+                            self.played_tracks_in_shuffle.add(normalized_current)
                 
                 # Select random unplayed track
-                unplayed_list = [t for t in tracks if t.file_path in unplayed]
+                unplayed_list = [t for t in tracks if t.file_path and _normalize_path(t.file_path) in unplayed]
                 if unplayed_list:
                     selected = random.choice(unplayed_list)
                     new_index = tracks.index(selected)
@@ -887,7 +925,9 @@ class MocSyncHelper:
         
         # Mark current track as played in shuffle mode
         if self.shuffle_enabled and track.file_path:
-            self.played_tracks_in_shuffle.add(track.file_path)
+            normalized_path = _normalize_path(track.file_path)
+            if normalized_path:
+                self.played_tracks_in_shuffle.add(normalized_path)
         
         # Update metadata panel with new track
         self.metadata_panel.set_track(track)
@@ -937,7 +977,9 @@ class MocSyncHelper:
         
         # Mark current track as played if shuffle is enabled
         if self.shuffle_enabled and current_track and current_track.file_path:
-            self.played_tracks_in_shuffle.add(current_track.file_path)
+            normalized_path = _normalize_path(current_track.file_path)
+            if normalized_path:
+                self.played_tracks_in_shuffle.add(normalized_path)
         
         # When shuffle is enabled, always use our shuffle logic instead of MOC's autonext
         # MOC's shuffle might not work reliably, so we handle it ourselves
