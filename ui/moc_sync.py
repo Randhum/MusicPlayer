@@ -128,7 +128,7 @@ class MocSyncHelper:
         # Add to M3U file if using MOC and track is audio
         if self.use_moc and self.sync_enabled and self.should_use_moc(track):
             file_path = str(Path(track.file_path).resolve())
-            self.moc_controller.add_track_at_line_m3u(index, file_path)
+            self.moc_controller.add_track_at_index_m3u(index, file_path)
     
     def sync_remove_track_file(self, index: int):
         """
@@ -142,7 +142,7 @@ class MocSyncHelper:
         
         # Remove from M3U file if using MOC
         if self.use_moc and self.sync_enabled:
-            self.moc_controller.remove_track_at_line_m3u(index)
+            self.moc_controller.remove_track_at_index_m3u(index)
     
     def sync_move_track_file(self, from_index: int, to_index: int):
         """
