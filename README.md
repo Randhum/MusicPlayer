@@ -69,7 +69,8 @@ emerge -av \
   media-plugins/gst-plugins-flac \ 
   media-plugins/gst-plugins-faad \
   media-plugins/gst-plugins-openh264 \
-  media-plugins/gst-plugins-bluez
+  media-plugins/gst-plugins-bluez \
+  media-plugins/gst-plugins-wavpack
 
 # ALSA - Advanced Linux Sound Architecture (low-level audio)
 emerge -av media-libs/alsa-lib
@@ -87,6 +88,9 @@ emerge -av dev-python/pygobject dev-python/mutagen dev-python/dbus-python
 
 # Optional: FFmpeg for extra format support
 emerge -av media-video/ffmpeg
+
+# WavPack support (lossless audio format)
+emerge -av media-sound/wavpack
 ```
 
 > 🧪 **Challenge:** After installing, try `gst-inspect-1.0 | wc -l` to see how many GStreamer plugins you have. The more plugins, the more formats you can play!
@@ -127,7 +131,7 @@ rc-service bluetooth status
 | Type | Formats | Why It Works |
 |------|---------|--------------|
 | 🎵 **Lossy Audio** | MP3, AAC/M4A, OGG, Opus, WMA | `gst-plugins-good`, `mpg123` |
-| 🎶 **Lossless Audio** | FLAC, WAV, AIFF, ALAC, APE | `gst-plugins-flac` |
+| 🎶 **Lossless Audio** | FLAC, WAV, AIFF, ALAC, APE, WavPack | `gst-plugins-base` (WAV, AIFF), `gst-plugins-flac`, `gst-plugins-wavpack` |
 | 🎬 **Video** | MP4, MKV, WebM, AVI, MOV | `gst-plugins-bad`, `openh264` |
 
 ---
@@ -164,10 +168,13 @@ You should see a window with your music library, playlist, and Bluetooth control
 
 - **Playback controls** (bottom bar):
   - **Play / Pause / Stop / Previous / Next**: control the current playlist.
+    - **Play button**: If a track is selected in the playlist, starts playing from the selected track. If no track is selected, plays the current track. If paused, resumes from the paused position instead of restarting.
+    - **Pause button**: Pauses playback at the current position. Pressing Play again resumes from the paused position.
   - **Shuffle**: toggle to play the current playlist in **random order**; the *Next* button and automatic track advance will pick a random track instead of the next in sequence.
   - **Seek & Volume**: larger, touch-friendly sliders for scrubbing through the track and adjusting volume.
     - **Progress slider**: Click or drag to seek to any position in the track. The slider can reach the full end of the song (100% position). Time labels update in real-time during seeking for immediate feedback.
     - **Time display**: Shows current position (left), total duration (right), and time remaining (below duration) for easy tracking of playback progress.
+- **Playlist context menu**: Right-click (or long-press on touch) a track in the playlist to access options like Play, Remove, Move Up/Down. The menu properly captures clicks and applies actions to the selected track.
 
 ### Desktop Integration (MPRIS2)
 
@@ -183,6 +190,27 @@ The player supports **MPRIS2** (Media Player Remote Interfacing Specification) f
 
 If `mocp` is installed (Gentoo package `media-sound/moc`), the app integrates with MOC (Music On Console):
 
+**For proper MOC integration with full format support, configure the following USE flags:**
+
+```bash
+# MOC package with format support
+media-sound/moc aac alsa ffmpeg libsamplerate oss wavpack
+
+# FFmpeg compatibility layer
+media-video/ffmpeg-compat openh264
+
+# FFmpeg with codec support
+media-video/ffmpeg chromium codec2 jack lame libdrm openal opencl opengl opus oss snappy sndio vaapi vdpau webp x264 x265
+```
+
+You can set these in `/etc/portage/package.use` or use `emerge` with USE flags:
+```bash
+USE="aac alsa ffmpeg libsamplerate oss wavpack" emerge -av media-sound/moc
+USE="openh264" emerge -av media-video/ffmpeg-compat
+USE="chromium codec2 jack lame libdrm openal opencl opengl opus oss snappy sndio vaapi vdpau webp x264 x265" emerge -av media-video/ffmpeg
+```
+
+**Features:**
 - **Playlist synchronization**: The GTK playlist mirrors MOC's playlist from `~/.moc/playlist.m3u`
 - **Bidirectional sync**: Changes in either the GTK app or MOC are synchronized
 - **Player controls**: Playback controls (play, pause, volume, shuffle) control MOC when available
@@ -383,6 +411,7 @@ emerge -av media-libs/gst-plugins-bad
 
 # Specific codecs
 emerge -av media-plugins/gst-plugins-flac      # FLAC audio
+emerge -av media-plugins/gst-plugins-wavpack   # WavPack audio
 emerge -av media-plugins/gst-plugins-openh264  # H.264 video
 ```
 

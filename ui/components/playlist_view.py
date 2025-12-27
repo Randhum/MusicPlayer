@@ -228,6 +228,10 @@ class PlaylistView(Gtk.Box):
             indices = path.get_indices()
             if indices:
                 self.selected_index = indices[0]
+                # Select the row to ensure it's highlighted
+                selection = self.tree_view.get_selection()
+                selection.select_path(path)
+                self.tree_view.set_cursor(path, None, False)
         else:
             self.selected_index = -1
         
@@ -261,6 +265,8 @@ class PlaylistView(Gtk.Box):
         self.context_menu = Gtk.Popover()
         # Set child first, then parent
         self.context_menu.set_has_arrow(True)
+        # Set modal to ensure it captures all events and prevents clicks from going through
+        self.context_menu.set_modal(True)
         
         # Create menu box with touch-friendly spacing
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
@@ -360,37 +366,37 @@ class PlaylistView(Gtk.Box):
     
     def _on_menu_play(self):
         """Handle 'Play' from context menu."""
-        self._close_menu()
         if self.selected_index >= 0:
             self.emit('track-activated', self.selected_index)
+        self._close_menu()
     
     def _on_menu_remove(self):
         """Handle 'Remove' from context menu."""
-        self._close_menu()
         if self.selected_index >= 0:
             self.emit('remove-track', self.selected_index)
+        self._close_menu()
     
     def _on_menu_move_up(self):
         """Handle 'Move Up' from context menu."""
-        self._close_menu()
         if self.selected_index > 0:
             self.emit('move-track-up', self.selected_index)
+        self._close_menu()
     
     def _on_menu_move_down(self):
         """Handle 'Move Down' from context menu."""
-        self._close_menu()
         if self.selected_index < len(self.tracks) - 1:
             self.emit('move-track-down', self.selected_index)
+        self._close_menu()
     
     def _on_menu_clear(self):
         """Handle 'Clear Playlist' from context menu."""
-        self._close_menu()
         self.emit('clear-playlist')
+        self._close_menu()
     
     def _on_menu_save(self):
         """Handle 'Save Playlist' from context menu."""
-        self._close_menu()
         self.emit('save-playlist')
+        self._close_menu()
     
     def _close_menu(self):
         """Close the context menu safely."""

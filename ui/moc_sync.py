@@ -947,9 +947,12 @@ class MocSyncHelper:
         delta = position - current_pos
         if abs(delta) > 0.5:  # Only seek if delta is significant
             self.moc_controller.seek_relative(delta)
-            # Reset end-detection if we seek away from the end
+            # Reset end-detection when seeking (whether away from or to the end)
+            # This ensures end detection can trigger properly after seeking
             duration = self.get_cached_duration()
-            if duration > 0 and position < duration - 1.0:
+            if duration > 0:
+                # Always reset end detection when seeking, so the next update_status
+                # can properly detect if we're at the end and trigger autoplay
                 self.reset_end_detection()
             # Force refresh status cache after seek
             status_after = self.moc_controller.get_status(force_refresh=True)

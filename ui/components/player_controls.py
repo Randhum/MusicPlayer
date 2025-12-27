@@ -140,7 +140,6 @@ class PlayerControls(Gtk.Box):
         
         self.append(controls_box)
         
-        self._seeking = False
         self._dragging = False  # Track if user is actively dragging
         self._duration = 0.0
         self._updating_volume = False  # Flag to prevent feedback loop
@@ -162,12 +161,17 @@ class PlayerControls(Gtk.Box):
         
         self._duration = duration
         
-        # Update slider only when not seeking (prevents interference during drag)
-        if not self._seeking:
+        # Update slider only when not dragging (prevents interference during user interaction)
+        if not self._dragging:
             if duration > 0:
                 # Calculate progress percentage, allowing up to 100% to reach the end
-                progress = (position / duration) * 100.0
-                # Allow progress to reach exactly 100.0 when at the end
+                # Use a small epsilon to handle floating point precision issues
+                # If position is very close to duration (within 0.1 seconds), treat as 100%
+                if position >= duration - 0.1:
+                    progress = 100.0
+                else:
+                    progress = (position / duration) * 100.0
+                # Clamp to valid range
                 progress = max(0.0, min(100.0, progress))
             else:
                 progress = 0.0
@@ -183,10 +187,6 @@ class PlayerControls(Gtk.Box):
             self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
         else:
             self.time_remaining_label.set_text("-00:00")
-    
-    def reset_seeking(self):
-        """Reset seeking state - call this after a seek operation completes."""
-        self._seeking = False
     
     def set_volume(self, volume: float):
         """Set volume slider value (programmatically, without triggering signal)."""
@@ -204,13 +204,13 @@ class PlayerControls(Gtk.Box):
     
     def _on_progress_changed(self, scale):
         """Handle progress bar value change - update preview only during drag."""
-        # Only update time labels during drag/seek, don't emit seek signal
+        # Only update time labels during drag, don't emit seek signal
         # The seek signal will be emitted on release or click
-        if (self._seeking or self._dragging) and self._duration > 0:
+        if self._dragging and self._duration > 0:
             value = scale.get_value()
             # Calculate position from percentage, allowing to reach the full duration
-            # When value is 100.0, position should be exactly duration
-            if value >= 100.0:
+            # Use >= 99.9999 to account for floating point precision issues while allowing exact 100.0
+            if value >= 99.9999:
                 position = self._duration
             else:
                 position = (value / 100.0) * self._duration
@@ -223,9 +223,8 @@ class PlayerControls(Gtk.Box):
             # Don't emit seek signal here - only on release or click
     
     def _on_progress_press(self, gesture, n_press, x, y):
-        """Handle progress bar press - start seeking."""
-        self._seeking = True
-        # Calculate position from click location and seek immediately
+        """Handle progress bar press - update slider position."""
+        # Calculate position from click location and update slider
         if self._duration > 0:
             allocation = self.progress_scale.get_allocation()
             width = allocation.width
@@ -235,19 +234,52 @@ class PlayerControls(Gtk.Box):
     
     def _on_progress_release(self, gesture, n_press, x, y):
         """Handle progress bar release - finalize seek position."""
-        # On release, ensure we seek to the final position
-        if self._seeking and self._duration > 0:
+        # Only seek if this was a click (not a drag - drag is handled by drag_end)
+        if not self._dragging and self._duration > 0:
             value = self.progress_scale.get_value()
             # Calculate final position, allowing to reach the full duration
-            if value >= 100.0:
+            # Use >= 99.9999 to account for floating point precision issues while allowing exact 100.0
+            if value >= 99.9999:
                 position = self._duration
             else:
                 position = (value / 100.0) * self._duration
             
-            # Emit final seek signal
+            # Emit seek signal for click
             self.emit('seek-changed', position)
-        # Don't reset _seeking here - let the seek handler do it after the operation completes
-        # This prevents slider from jumping during the seek operation
+    
+    def _on_progress_drag_begin(self, gesture, start_x, start_y):
+        """Handle drag begin - mark as dragging."""
+        self._dragging = True
+    
+    def _on_progress_drag_update(self, gesture, offset_x, offset_y):
+        """Handle drag update - update slider position based on drag."""
+        if self._duration > 0:
+            allocation = self.progress_scale.get_allocation()
+            width = allocation.width
+            if width > 0:
+                # Get the start position of the drag
+                start_x, start_y = gesture.get_start_point()
+                # Calculate current position
+                current_x = start_x + offset_x
+                percentage = max(0.0, min(100.0, (current_x / width) * 100.0))
+                self.progress_scale.set_value(percentage)
+    
+    def _on_progress_drag_end(self, gesture, offset_x, offset_y):
+        """Handle drag end - finalize seek position."""
+        if self._dragging and self._duration > 0:
+            value = self.progress_scale.get_value()
+            # Calculate final position, allowing to reach the full duration
+            # Use >= 99.9999 to account for floating point precision issues while allowing exact 100.0
+            if value >= 99.9999:
+                position = self._duration
+            else:
+                position = (value / 100.0) * self._duration
+            
+            # Emit seek signal for drag
+            self.emit('seek-changed', position)
+        
+        # Reset dragging state immediately after emitting seek
+        self._dragging = False
     
     def _on_volume_changed(self, scale):
         """Handle volume slider change."""
