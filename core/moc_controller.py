@@ -54,7 +54,7 @@ class MocController:
         Run `mocp` with the given arguments.
         
         Handles errors gracefully and prevents overwhelming the MOC server.
-        Silently handles "server not running" errors to avoid spam.
+        Uses ensure_server() to verify and restart server on connection errors.
         """
         if not self._mocp_path:
             # Simulate a failed process
@@ -71,7 +71,7 @@ class MocController:
             )
             
             # Check for server connection errors and handle gracefully
-            # Reset server availability flag on connection failures
+            # Use ensure_server to verify and potentially restart the server
             if result.returncode != 0 and result.stderr:
                 stderr_lower = result.stderr.lower()
                 # Check for server connection errors (be specific to avoid false positives)
@@ -82,15 +82,43 @@ class MocController:
                     "connection refused",
                 ]
                 if any(err in stderr_lower for err in server_errors):
-                    # Only reset if this isn't a --server command (we handle those separately)
-                    if "--server" not in args:
+                    # Only handle if this isn't a --server or --info command
+                    # (--server is handled in ensure_server, --info is used for verification)
+                    if "--server" not in args and "--info" not in args:
+                        # Try to ensure server is running
+                        success, _ = self.ensure_server()
+                        if not success:
+                            # Server still not available after ensure_server attempt
+                            self._server_available = False
+                            self._status_cache = None
+                            return subprocess.CompletedProcess(args=cmd, returncode=125, stdout="", stderr="")
+                        # Server was restarted - retry the command once
+                        retry_result = subprocess.run(
+                            cmd,
+                            capture_output=capture_output,
+                            text=True,
+                            check=False,
+                            timeout=5.0,
+                        )
+                        if retry_result.returncode == 0:
+                            # Retry succeeded - update server_available
+                            self._server_available = True
+                            # Clear status cache on successful command
+                            self._status_cache = None
+                            self._status_cache_time = 0.0
+                            return retry_result
+                        # Retry also failed
                         self._server_available = False
                         self._status_cache = None
-                    return subprocess.CompletedProcess(args=cmd, returncode=125, stdout="", stderr="")
+                        return subprocess.CompletedProcess(args=cmd, returncode=125, stdout="", stderr="")
+            
+            # Command succeeded - update server_available flag
+            if result.returncode == 0:
+                self._server_available = True
             
             # Clear status cache on successful command (except for --info and --server)
             # This ensures UI reflects changes immediately after control commands
-            if "--info" not in args and "--server" not in args:
+            if result.returncode == 0 and "--info" not in args and "--server" not in args:
                 self._status_cache = None
                 # Also reset cache time to force refresh on next get_status() call
                 self._status_cache_time = 0.0
@@ -103,239 +131,240 @@ class MocController:
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
     def ensure_server(self) -> Tuple[bool, bool]:
-        """Ensure MOC server is running.
+        """
+        Ensure MOC server is running and verify it's active.
         
-        Since `mocp --server` is idempotent (starts if not running, no-op if running),
-        we can just call it directly without checking first. This simplifies the logic
-        and avoids race conditions.
+        Calls `mocp --server` and verifies the server has started or is already running.
+        If verification fails, tries to restart the server once.
         
         Returns:
             tuple: (success: bool, was_already_running: bool)
-                - success: True if server is now available, False otherwise
-                - was_already_running: True if server was already running before this call
+                - success: True if server is now active, False if startup failed
+                - was_already_running: True if server was already running, False if it was started
         """
-        if not self.is_available():
-            return False, False
         
         # If we already know server is available, return early (most common case)
         if self._server_available:
             return True, True
         
-        # Call --server directly (idempotent - starts if needed, no-op if running)
+        # First attempt: call --server
         result = self._run("--server", capture_output=True)
+        was_already_running = False
         
         # Check if server is already running (exit code 2 with "Server is already running")
-        was_already_running = False
         if result.returncode == 2 and result.stderr:
             stderr_lower = result.stderr.lower()
             if "server is already running" in stderr_lower:
                 was_already_running = True
-                # Server is already running - verify it's accessible
-                status_result = self._run("--info", capture_output=True)
-                if status_result.returncode == 0 and bool(status_result.stdout):
-                    self._server_available = True
-                    return True, True
-                # Server reported as running but not accessible - might be stale
-                return False, False
         
-        if result.returncode == 0:
-            # Server was just started - verify it's ready
-            # Give server a moment to fully start
-            time.sleep(0.2)
-            status_result = self._run("--info", capture_output=True)
-            if status_result.returncode == 0 and bool(status_result.stdout):
-                self._server_available = True
-                return True, False
+        # Verify server is active
+        time.sleep(0.2)  # Give server a moment to be ready
+        status_result = self._run("--info", capture_output=True)
+        if status_result.returncode == 0 and bool(status_result.stdout):
+            self._server_available = True
+            logger.info("MOC server is active (was already running: %s)", was_already_running)
+            return True, was_already_running
         
-        # Failed to start server or server not accessible
+        # Verification failed - try restart once
+        logger.warning("MOC server verification failed, attempting restart")
+        self._server_available = False
+        
+        # Second attempt: restart server
+        result = self._run("--server", capture_output=True)
+        time.sleep(0.3)  # Give server more time to start
+        status_result = self._run("--info", capture_output=True)
+        
+        if status_result.returncode == 0 and bool(status_result.stdout):
+            self._server_available = True
+            logger.info("MOC server restarted successfully")
+            return True, False
+        
+        # Failed to start server after retry
+        logger.error("MOC server startup error - failed to start after retry")
+        self._server_available = False
         return False, False
 
     # ------------------------------------------------------------------
-    # Playlist file operations (work directly with M3U file using line indexes)
+    # M3U file operations (follow M3U standard with EXTINF pairs)
     # ------------------------------------------------------------------
     
-    def add_track_at_line_m3u(self, line_index: int, file_path: str) -> bool:
+    def _parse_m3u_playlist(self) -> List[Tuple[int, Optional[str], str]]:
         """
-        Add a track at a specific line index directly in the M3U playlist file.
+        Parse M3U playlist file following the standard format.
+        
+        M3U format uses pairs:
+        - #EXTINF:duration,title (metadata line)
+        - /path/to/file (file path line)
+        
+        Returns:
+            List of tuples: (track_index, extinf_line, file_path)
+            - track_index: 0-based index of the track
+            - extinf_line: The EXTINF metadata line (without newline), or None if missing
+            - file_path: The file path line (without newline)
+        """
+        tracks = []
+        if not self._playlist_path.exists():
+            return tracks
+        
+        try:
+            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+            
+            i = 0
+            track_index = 0
+            while i < len(lines):
+                line = lines[i].rstrip('\n\r')
+                stripped = line.strip()
+                
+                # Skip empty lines and header
+                if not stripped or stripped == "#EXTM3U":
+                    i += 1
+                    continue
+                
+                # Check if this is an EXTINF line
+                if stripped.startswith("#EXTINF:"):
+                    extinf_line = stripped
+                    # Next line should be the file path
+                    if i + 1 < len(lines):
+                        file_path = lines[i + 1].rstrip('\n\r').strip()
+                        if file_path and not file_path.startswith('#'):
+                            tracks.append((track_index, extinf_line, file_path))
+                            track_index += 1
+                            i += 2  # Skip both EXTINF and file path lines
+                            continue
+                
+                # If no EXTINF, treat as plain file path
+                if not stripped.startswith('#'):
+                    tracks.append((track_index, None, stripped))
+                    track_index += 1
+                
+                i += 1
+        except Exception as e:
+            logger.error("Error parsing M3U file: %s", e, exc_info=True)
+        
+        return tracks
+    
+    def _write_m3u_playlist(self, tracks: List[Tuple[Optional[str], str]]) -> bool:
+        """
+        Write tracks to M3U playlist file following the standard format.
         
         Args:
-            line_index: Line number where to insert (0-based, excluding comments/empty lines)
-            file_path: File path to add
-            
+            tracks: List of tuples (extinf_line, file_path)
+                - extinf_line: EXTINF metadata line (with #EXTINF: prefix), or None
+                - file_path: File path to write
+        
         Returns:
             True if successful
         """
-        if not self._playlist_path.exists():
-            # Create empty playlist file
+        try:
             self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
             with self._playlist_path.open('w', encoding='utf-8') as f:
                 f.write("#EXTM3U\n")
-        
-        try:
-            # Read all lines
-            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
-            # Filter out comments and empty lines to get actual track lines
-            track_lines = []
-            track_line_indices = []  # Map from track index to actual line number
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped and not stripped.startswith('#'):
-                    track_lines.append(stripped)
-                    track_line_indices.append(i)
-            
-            # Validate line_index
-            if line_index < 0:
-                line_index = 0
-            if line_index > len(track_lines):
-                line_index = len(track_lines)
-            
-            # Determine where to insert in the actual file
-            if line_index >= len(track_line_indices):
-                # Append at end
-                insert_at = len(lines)
-            else:
-                # Insert before the line at track_line_indices[line_index]
-                insert_at = track_line_indices[line_index]
-            
-            # Insert the new line
-            lines.insert(insert_at, file_path + '\n')
-            
-            # Write back
-            with self._playlist_path.open('w', encoding='utf-8') as f:
-                f.writelines(lines)
-            
+                for extinf_line, file_path in tracks:
+                    if extinf_line:
+                        f.write(extinf_line + '\n')
+                    f.write(file_path + '\n')
             return True
         except Exception as e:
-            logger.error("Error adding track to M3U file: %s", e, exc_info=True)
+            logger.error("Error writing M3U file: %s", e, exc_info=True)
             return False
     
-    def remove_track_at_line_m3u(self, line_index: int) -> bool:
+    def get_track_at_index_m3u(self, track_index: int) -> Optional[Tuple[Optional[str], str]]:
         """
-        Remove a track at a specific line index from the M3U playlist file.
+        Get track at a specific index from the M3U playlist file.
         
         Args:
-            line_index: Index of track to remove (0-based, excluding comments/empty lines)
+            track_index: Index of track to get (0-based)
+            
+        Returns:
+            Tuple (extinf_line, file_path) or None if index is invalid
+            - extinf_line: EXTINF metadata line or None
+            - file_path: File path
+        """
+        parsed_tracks = self._parse_m3u_playlist()
+        if not (0 <= track_index < len(parsed_tracks)):
+            return None
+        _, extinf_line, file_path = parsed_tracks[track_index]
+        return (extinf_line, file_path)
+    
+    def add_track_at_index_m3u(self, track_index: int, file_path: str, extinf_line: Optional[str] = None) -> bool:
+        """
+        Add a track at a specific index in the M3U playlist file.
+        
+        Args:
+            track_index: Index where to insert (0-based)
+            file_path: File path to add
+            extinf_line: Optional EXTINF metadata line (with #EXTINF: prefix)
             
         Returns:
             True if successful
         """
-        if not self._playlist_path.exists():
-            return False
+        parsed_tracks = self._parse_m3u_playlist()
         
-        try:
-            # Read all lines
-            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
-            # Find track lines and their indices
-            track_line_indices = []
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped and not stripped.startswith('#'):
-                    track_line_indices.append(i)
-            
-            if not (0 <= line_index < len(track_line_indices)):
-                return False
-            
-            # Remove the line
-            actual_line_index = track_line_indices[line_index]
-            lines.pop(actual_line_index)
-            
-            # Write back
-            with self._playlist_path.open('w', encoding='utf-8') as f:
-                f.writelines(lines)
-            
-            return True
-        except Exception as e:
-            logger.error("Error removing track from M3U file: %s", e, exc_info=True)
-            return False
-    
-    def move_track_in_m3u(self, from_line_index: int, to_line_index: int) -> bool:
+        # Convert to (extinf_line, file_path) format
+        track_list = [(extinf, path) for _, extinf, path in parsed_tracks]
+        
+        # Validate and clamp track_index
+        if track_index < 0:
+            track_index = 0
+        if track_index > len(track_list):
+            track_index = len(track_list)
+        
+        # Insert new track
+        track_list.insert(track_index, (extinf_line, file_path))
+        
+        return self._write_m3u_playlist(track_list)
+
+    def remove_track_at_index_m3u(self, track_index: int) -> bool:
         """
-        Move a track from one line index to another in the M3U playlist file.
+        Remove a track at a specific index from the M3U playlist file.
         
         Args:
-            from_line_index: Current line index of the track
-            to_line_index: Target line index for the track
+            track_index: Index of track to remove (0-based)
             
         Returns:
             True if successful
         """
-        if not self._playlist_path.exists():
+        parsed_tracks = self._parse_m3u_playlist()
+        
+        if not (0 <= track_index < len(parsed_tracks)):
             return False
         
-        if from_line_index == to_line_index:
-            return True
+        # Convert to (extinf_line, file_path) format and remove
+        track_list = [(extinf, path) for _, extinf, path in parsed_tracks]
+        track_list.pop(track_index)
         
-        try:
-            # Read all lines
-            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
-            # Find track lines and their indices
-            track_line_indices = []
-            for i, line in enumerate(lines):
-                stripped = line.strip()
-                if stripped and not stripped.startswith('#'):
-                    track_line_indices.append(i)
-            
-            if not (0 <= from_line_index < len(track_line_indices) and 
-                    0 <= to_line_index < len(track_line_indices)):
-                return False
-            
-            # Get actual line indices
-            from_actual = track_line_indices[from_line_index]
-            to_actual = track_line_indices[to_line_index]
-            
-            # Move the line
-            line_content = lines.pop(from_actual)
-            # Adjust to_actual if needed (since we removed a line before it)
-            if to_actual > from_actual:
-                to_actual -= 1
-            lines.insert(to_actual, line_content)
-            
-            # Write back
-            with self._playlist_path.open('w', encoding='utf-8') as f:
-                f.writelines(lines)
-            
-            return True
-        except Exception as e:
-            logger.error("Error moving track in M3U file: %s", e, exc_info=True)
-            return False
+        return self._write_m3u_playlist(track_list)
     
-    def get_track_at_line_m3u(self, line_index: int) -> Optional[str]:
+    def move_track_in_m3u(self, from_index: int, to_index: int) -> bool:
         """
-        Get file path at a specific line index from the M3U playlist file.
+        Move a track from one index to another in the M3U playlist file.
         
         Args:
-            line_index: Index of track to get (0-based, excluding comments/empty lines)
+            from_index: Current index of the track
+            to_index: Target index for the track
             
         Returns:
-            File path or None if index is invalid
+            True if successful
         """
-        if not self._playlist_path.exists():
-            return None
+        if from_index == to_index:
+            return True
         
-        try:
-            with self._playlist_path.open('r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
-            # Find track lines
-            track_lines = []
-            for line in lines:
-                stripped = line.strip()
-                if stripped and not stripped.startswith('#'):
-                    track_lines.append(stripped)
-            
-            if not (0 <= line_index < len(track_lines)):
-                return None
-            
-            return track_lines[line_index]
-        except Exception as e:
-            logger.error("Error reading track from M3U file: %s", e, exc_info=True)
-            return None
+        parsed_tracks = self._parse_m3u_playlist()
+        
+        if not (0 <= from_index < len(parsed_tracks) and 
+                0 <= to_index < len(parsed_tracks)):
+            return False
+        
+        # Convert to (extinf_line, file_path) format
+        track_list = [(extinf, path) for _, extinf, path in parsed_tracks]
+        
+        # Move the track
+        track = track_list.pop(from_index)
+        track_list.insert(to_index, track)
+        
+        return self._write_m3u_playlist(track_list)
+    
     
     def get_playlist_length_m3u(self) -> int:
         """Get the number of tracks in the M3U playlist file."""
@@ -367,7 +396,7 @@ class MocController:
     # ------------------------------------------------------------------
     def get_playlist(self, current_file: Optional[str] = None) -> Tuple[List[TrackMetadata], int]:
         """
-        Read MOC's current playlist and return (tracks, current_index).
+        Read MOC's current playlist from M3U file and return (tracks, current_index).
 
         current_index is -1 if there is no active track.
         
@@ -378,39 +407,29 @@ class MocController:
         tracks: List[TrackMetadata] = []
         current_index = -1
 
-        if not self._playlist_path.exists():
-            return tracks, current_index
+        # Parse M3U file
+        parsed_tracks = self._parse_m3u_playlist()
+        
+        # Convert to TrackMetadata objects
+        for _, _, file_path in parsed_tracks:
+            # Only include files that actually exist
+            if Path(file_path).exists():
+                metadata = TrackMetadata(file_path)
+                tracks.append(metadata)
 
-        # Get current track path from status if not provided
-        # This allows callers to pass it to avoid redundant status calls
+        # Find current track index
         if current_file is None:
             status = self.get_status()
             current_file = status.get("file_path") if status else None
-
-        try:
-            with self._playlist_path.open("r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    # M3U entries are usually absolute paths; if not, treat as-is
-                    path = Path(line).expanduser()
-                    if not path.is_absolute():
-                        path = path.expanduser()
-                    file_path = str(path)
-                    # Only include files that actually exist
-                    if not Path(file_path).exists():
-                        continue
-                    metadata = TrackMetadata(file_path)
-                    tracks.append(metadata)
-
-            if current_file:
-                for idx, track in enumerate(tracks):
-                    if track.file_path == current_file:
-                        current_index = idx
-                        break
-        except Exception as e:
-            logger.error("Error reading MOC playlist: %s", e, exc_info=True)
+        
+        if current_file:
+            # Normalize paths for comparison
+            current_file_resolved = str(Path(current_file).resolve())
+            for idx, track in enumerate(tracks):
+                track_path_resolved = str(Path(track.file_path).resolve())
+                if track_path_resolved == current_file_resolved:
+                    current_index = idx
+                    break
 
         return tracks, current_index
 
@@ -425,7 +444,7 @@ class MocController:
 
         Returns None if status can't be read.
         """
-        if not self.is_available():
+        if not self._server_available:
             return None
 
         # Check cache first (unless forced refresh)
@@ -438,14 +457,6 @@ class MocController:
         if current_time - self._last_error_time < self._error_backoff:
             # Return cached status if available, otherwise None
             return self._status_cache
-
-        # Only check server if we don't know it's available
-        # This avoids redundant ensure_server() calls when server is already known to be running
-        if not self._server_available:
-            success, _ = self.ensure_server()
-            if not success:
-                self._status_cache = None
-                return None
         
         result = self._run("--info", capture_output=True)
         
@@ -470,7 +481,8 @@ class MocController:
         state = info.get("State", "").upper() or "STOP"
         file_path = info.get("File")
 
-        def _parse_float(value: Optional[str]) -> float:
+        def parse_float(value: Optional[str]) -> float:
+            """Parse a string value to float, returning 0.0 on error."""
             if not value:
                 return 0.0
             try:
@@ -480,7 +492,7 @@ class MocController:
 
         # MOC outputs position and duration in seconds
         # Try both "CurrentSec" and "CurrentTime" (in case format varies)
-        position = _parse_float(info.get("CurrentSec"))
+        position = parse_float(info.get("CurrentSec"))
         if position == 0.0:
             # Fallback: try parsing from "CurrentTime" format (MM:SS)
             current_time_str = info.get("CurrentTime", "")
@@ -492,7 +504,7 @@ class MocController:
                 except (ValueError, IndexError):
                     pass
         
-        duration = _parse_float(info.get("TotalSec"))
+        duration = parse_float(info.get("TotalSec"))
         if duration == 0.0:
             # Fallback: try parsing from "TotalTime" format (MM:SS)
             total_time_str = info.get("TotalTime", "")
@@ -540,9 +552,8 @@ class MocController:
     # ------------------------------------------------------------------
     def play(self):
         """Start / resume playback."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         # Check if MOC is paused - if so, use --unpause to resume from paused position
         # Otherwise, use --play to start playback
         status = self.get_status(force_refresh=False)
@@ -555,21 +566,19 @@ class MocController:
 
     def pause(self):
         """Pause playback."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--pause")
 
     def stop(self):
         """Stop playback."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--stop")
 
     def shutdown(self):
         """Completely stop the MOC server (equivalent to `mocp --exit`)."""
-        if not self.is_available():
+        if not self._server_available:
             return
         # We don't call ensure_server() here on purpose – if the server is not
         # running, there is nothing to shut down.
@@ -578,16 +587,14 @@ class MocController:
 
     def next(self):
         """Skip to next track."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--next")
 
     def previous(self):
         """Go back to previous track."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--previous")
     
     def jump_to_index(self, index: int, start_playback: bool = False):
@@ -601,10 +608,8 @@ class MocController:
         Returns:
             True if successful, False otherwise
         """
-        if not self.is_available():
+        if not self._server_available:
             return False
-        
-        self.ensure_server()
         
         # MOC uses -j (jump) with index
         # Format: mocp -j <index>
@@ -621,9 +626,8 @@ class MocController:
 
     def set_volume(self, volume: float):
         """Set volume as a float 0.0–1.0."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         vol_percent = int(max(0.0, min(1.0, volume)) * 100)
         self._run("--volume", str(vol_percent))
 
@@ -633,40 +637,35 @@ class MocController:
 
         MOC uses `--seek N` for relative seek in seconds.
         """
-        if not self.is_available():
+        if not self._server_available:
             return
         seconds = int(delta_seconds)
         if seconds == 0:
             return
-        self.ensure_server()
         self._run("--seek", str(seconds))
 
     def enable_autonext(self):
         """Enable autonext (autoplay) in MOC."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--on=autonext")
 
     def disable_autonext(self):
         """Disable autonext (autoplay) in MOC."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--off=autonext")
 
     def enable_shuffle(self):
         """Enable shuffle mode in MOC."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--on=shuffle")
 
     def disable_shuffle(self):
         """Disable shuffle mode in MOC."""
-        if not self.is_available():
+        if not self._server_available:
             return
-        self.ensure_server()
         self._run("--off=shuffle")
 
     def get_shuffle_state(self) -> Optional[bool]:
@@ -688,48 +687,22 @@ class MocController:
     # ------------------------------------------------------------------
     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1, start_playback: bool = False):
         """
-        Replace MOC's playlist with the given tracks.
+        Replace MOC's playlist with the given tracks by writing directly to M3U file.
 
         Args:
             tracks: List of tracks to become the new playlist.
             current_index: Index of the track that should start playing (if start_playback is True).
             start_playback: If True and current_index is valid, start playback of that track.
         """
-        if not self.is_available():
+        if not self._server_available:
             return
         
-        # Ensure server is running and ready
-        success, was_already_running = self.ensure_server()
-        if not success:
-            logger.warning("Cannot set playlist - MOC server not available")
-            return
+        # Build track list for M3U file (extinf_line, file_path pairs)
+        # For now, we don't generate EXTINF lines - MOC will handle that
+        track_list = []
+        valid_tracks = []
         
-        # If server was just started, wait a bit and verify it's ready
-        if not was_already_running:
-            time.sleep(0.2)  # Give server time to fully initialize
-            # Verify server is ready by checking status
-            verify_status = self.get_status(force_refresh=True)
-            if not verify_status:
-                logger.warning("MOC server started but not ready for playlist operations")
-                # Try one more time after a longer wait
-                time.sleep(0.3)
-                verify_status = self.get_status(force_refresh=True)
-                if not verify_status:
-                    logger.error("MOC server not responding after initialization")
-                    return
-
-        # Clear existing playlist
-        clear_result = self._run("-c", capture_output=True)  # equivalent to --clear
-        if clear_result.returncode != 0:
-            logger.warning("Failed to clear MOC playlist: %s", clear_result.stderr)
-
-        # Validate and add tracks to MOC playlist
-        # Track which tracks were successfully added (by original index)
-        # We need to map original indices to MOC playlist indices since some tracks might fail to add
-        successfully_added = {}  # Maps original index -> MOC playlist index
-        moc_playlist_index = 0
-        
-        for idx, track in enumerate(tracks):
+        for track in tracks:
             if not track or not track.file_path:
                 continue
             # Validate that file exists
@@ -737,79 +710,47 @@ class MocController:
             if not file_path.exists() or not file_path.is_file():
                 logger.warning("Track file does not exist: %s", track.file_path)
                 continue
-            # Use absolute path for MOC
+            # Use absolute path
             abs_path = str(file_path.resolve())
-            # Append to MOC playlist
-            result = self._run("-a", abs_path, capture_output=True)
-            if result.returncode == 0:
-                successfully_added[idx] = moc_playlist_index
-                moc_playlist_index += 1
-            else:
-                # Log more details about the failure
-                error_msg = f"Failed to add track to MOC playlist: {abs_path}"
-                if result.stderr:
-                    error_msg += f" - Error: {result.stderr.strip()}"
-                if result.stdout:
-                    error_msg += f" - Output: {result.stdout.strip()}"
-                logger.warning(error_msg)
-                
-                # Check if MOC server is still responsive
-                status = self.get_status(force_refresh=False)
-                if not status:
-                    logger.warning("MOC server may have stopped - attempting to restart")
-                    # Reset server availability flag to force restart
-                    self._server_available = False
-                    success, _ = self.ensure_server()
-                    if success:
-                        time.sleep(0.2)  # Wait for server to be ready
-                        # Retry once after ensuring server is running
-                        retry_result = self._run("-a", abs_path, capture_output=True)
-                        if retry_result.returncode == 0:
-                            successfully_added[idx] = moc_playlist_index
-                            moc_playlist_index += 1
-                            logger.debug("Successfully added track after server restart: %s", abs_path)
-                        else:
-                            logger.warning("Retry failed for track: %s", abs_path)
-                    else:
-                        logger.error("Could not restart MOC server")
-                else:
-                    # Server is running but track add failed - might be a file issue
-                    # Don't retry in this case, just log and continue
-                    logger.debug("Server is running but track add failed - likely file format issue")
-
+            track_list.append((None, abs_path))  # No EXTINF line for now
+            valid_tracks.append(track)
+        
+        # Write entire playlist to M3U file
+        if not self._write_m3u_playlist(track_list):
+            logger.error("Failed to write playlist to M3U file")
+            return
+        
         # Optionally start playback from the selected track
-        if start_playback and 0 <= current_index < len(tracks):
-            if current_index in successfully_added:
-                track = tracks[current_index]
-                if track and track.file_path:
-                    file_path = Path(track.file_path)
-                    if file_path.exists() and file_path.is_file():
-                        abs_path = str(file_path.resolve())
-                        # Check if MOC is already paused on this track - if so, just resume instead of restarting
-                        status = self.get_status(force_refresh=False)
-                        if status:
-                            moc_state = status.get("state", "STOP")
-                            moc_file = status.get("file_path")
-                            if moc_state == "PAUSE" and moc_file:
-                                moc_file_abs = str(Path(moc_file).resolve())
-                                if moc_file_abs == abs_path:
-                                    # MOC is already paused on this track - just resume, don't restart
-                                    logger.debug("MOC is paused on target track - using --unpause to resume instead of restarting")
-                                    self._run("--unpause", capture_output=False)
-                                    return
-                        
-                        # Use --playit to play the specific file (works even if it's in playlist)
-                        # This will restart from the beginning
-                        result = self._run("--playit", abs_path, capture_output=True)
-                        if result.returncode != 0:
-                            # Fallback: use jump with 0-based index
-                            moc_index = successfully_added[current_index]
-                            self._run("-j", str(moc_index), capture_output=False)
-                            self._run("-p", capture_output=False)
+        if start_playback and 0 <= current_index < len(valid_tracks):
+            track = valid_tracks[current_index]
+            if track and track.file_path:
+                file_path = Path(track.file_path)
+                if file_path.exists() and file_path.is_file():
+                    abs_path = str(file_path.resolve())
+                    # Check if MOC is already paused on this track - if so, just resume instead of restarting
+                    status = self.get_status(force_refresh=False)
+                    if status:
+                        moc_state = status.get("state", "STOP")
+                        moc_file = status.get("file_path")
+                        if moc_state == "PAUSE" and moc_file:
+                            moc_file_abs = str(Path(moc_file).resolve())
+                            if moc_file_abs == abs_path:
+                                # MOC is already paused on this track - just resume, don't restart
+                                logger.debug("MOC is paused on target track - using --unpause to resume instead of restarting")
+                                self._run("--unpause", capture_output=False)
+                                return
+                    
+                    # Use --playit to play the specific file (works even if it's in playlist)
+                    # This will restart from the beginning
+                    result = self._run("--playit", abs_path, capture_output=True)
+                    if result.returncode != 0:
+                        # Fallback: use jump with 0-based index
+                        self._run("-j", str(current_index), capture_output=False)
+                        self._run("-p", capture_output=False)
 
     def play_file(self, file_path: str):
         """Play a specific file via MOC, keeping the playlist intact."""
-        if not self.is_available():
+        if not self._server_available:
             return
         if not file_path:
             logger.error("Cannot play file - file path is empty")
@@ -821,7 +762,6 @@ class MocController:
             logger.error("Cannot play file - file does not exist: %s", file_path)
             return
         
-        self.ensure_server()
         abs_path = str(path.resolve())
         result = self._run("--playit", abs_path, capture_output=True)
         if result.returncode != 0:
