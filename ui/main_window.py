@@ -122,34 +122,24 @@ class MainWindow(Gtk.ApplicationWindow):
         suffix = Path(track.file_path).suffix.lower()
         return suffix in VIDEO_EXTENSIONS
     
-    def _should_use_moc(self, track: Optional[TrackMetadata]) -> bool:
-        """
-        Return True if playback should use MOC instead of internal player.
-        
-        Architecture Note: This application uses a dual playback engine approach:
-        - MOC (Music On Console): Handles audio file playback (MP3, FLAC, OGG, etc.)
-          - Provides robust audio handling, gapless playback, and format support
-          - Used when MOC is available and track is not a video container
-        - GStreamer (internal player): Handles video container playback (MP4, MKV, WebM, etc.)
-          - Required for video files as MOC doesn't support video containers
-          - Also serves as fallback if MOC is unavailable
-        
-        This separation allows leveraging the best tool for each use case.
-        """
-        if not self.use_moc:
-            return False
-        return self.moc_sync.should_use_moc(track)
+    def _normalize_path(self, file_path: Optional[str]) -> Optional[str]:
+        """Normalize a file path to absolute resolved path for comparison."""
+        if not file_path:
+            return None
+        try:
+            return str(Path(file_path).resolve())
+        except (OSError, ValueError):
+            return file_path
     
-    def _stop_internal_player_if_needed(self):
-        """Stop internal GStreamer player if it's active (e.g., when switching to MOC)."""
+    def _stop_internal_player(self):
+        """Stop internal GStreamer player if it's active."""
         if self.player.is_playing or self.player.current_track:
             self.player.stop()
     
     def _stop_all_players(self):
         """Stop all players (MOC and internal) before starting a new track."""
-        # Stop internal player if playing
-        if self.player.is_playing or self.player.current_track:
-            self.player.stop()
+        # Stop internal player
+        self._stop_internal_player()
         
         # Stop MOC if playing (use moc_sync interface)
         if self.use_moc:
@@ -407,6 +397,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.player_controls.connect('seek-changed', self._on_seek)
         self.player_controls.connect('volume-changed', self._on_volume_changed)
         self.player_controls.connect('shuffle-toggled', self._on_shuffle_toggled)
+        self.player_controls.connect('autonext-toggled', self._on_autonext_toggled)
     
     def _reattach_panel(self, panel_id: str):
         """Reattach a detached panel to its original position."""
@@ -490,6 +481,8 @@ class MainWindow(Gtk.ApplicationWindow):
         """Initialize MOC server and settings (called after startup delay)."""
         if self.use_moc:
             self.moc_sync.initialize()
+            # Sync autonext button state after initialization
+            self._sync_autonext_button_state()
         return False  # Don't repeat
     
     def _on_moc_track_finished(self):
@@ -501,6 +494,12 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_moc_shuffle_changed(self, shuffle_enabled: bool):
         """Handle shuffle state change from MOC."""
         self.player_controls.shuffle_button.set_active(shuffle_enabled)
+    
+    def _sync_autonext_button_state(self):
+        """Sync autonext button state with MOC state."""
+        if self.use_moc:
+            autonext_enabled = self.moc_sync.get_autonext_enabled()
+            self.player_controls.autonext_button.set_active(autonext_enabled)
     
     def _update_mpris2_navigation_capabilities(self):
         """Update MPRIS2 CanGoNext and CanGoPrevious based on playlist state."""
@@ -614,14 +613,18 @@ class MainWindow(Gtk.ApplicationWindow):
         # Reset end-detection flag for new track (handled by moc_sync.play_track())
         
         # Decide which player to use based on file type
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
-            self._stop_internal_player_if_needed()
+            self._stop_internal_player()
             self.moc_sync.play_track()
+            # Update player controls state immediately (will be confirmed by moc_sync.update_status())
+            self.player_controls.set_playing(True)
         else:
             # Use internal player for video files
             self.player.load_track(track)
             self.player.play()
+            # Update player controls state immediately
+            self.player_controls.set_playing(True)
             
             # Sync MOC playlist (but don't play in MOC for video files)
             if self.use_moc:
@@ -645,7 +648,7 @@ class MainWindow(Gtk.ApplicationWindow):
             """Handle seek from MPRIS2 (offset in microseconds)."""
             # Get current position and add offset
             track = self.playlist_manager.get_current_track()
-            if self._should_use_moc(track):
+            if not self._is_video_track(track):
                 # For MOC, get position from moc_sync
                 current_pos = self.moc_sync.get_position() if hasattr(self.moc_sync, 'get_position') else 0.0
             else:
@@ -682,26 +685,26 @@ class MainWindow(Gtk.ApplicationWindow):
         Returns:
             True if the track is currently playing, False otherwise
         """
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Check if MOC is playing this track
-            self._stop_internal_player_if_needed()
+            self._stop_internal_player()
             moc_status = self.moc_controller.get_status(force_refresh=False)
             if moc_status:
                 moc_state = moc_status.get("state", "STOP")
                 moc_file = moc_status.get("file_path")
-                # Normalize paths for comparison (resolve to absolute paths)
+                # Normalize paths for comparison
                 if moc_file and track.file_path:
-                    moc_file_abs = str(Path(moc_file).resolve())
-                    track_file_abs = str(Path(track.file_path).resolve())
-                    if moc_file_abs == track_file_abs:
+                    moc_file_abs = self._normalize_path(moc_file)
+                    track_file_abs = self._normalize_path(track.file_path)
+                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
                         return moc_state == "PLAY"
             return False
         else:
             # Check if internal player is playing this track
             if self.player.current_track and self.player.is_playing:
-                current_file_abs = str(Path(self.player.current_track.file_path).resolve())
-                track_file_abs = str(Path(track.file_path).resolve())
-                if current_file_abs == track_file_abs:
+                current_file_abs = self._normalize_path(self.player.current_track.file_path)
+                track_file_abs = self._normalize_path(track.file_path)
+                if current_file_abs and track_file_abs and current_file_abs == track_file_abs:
                     return True
             return False
     
@@ -715,26 +718,26 @@ class MainWindow(Gtk.ApplicationWindow):
         Returns:
             True if the track is paused and can be resumed, False otherwise
         """
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Check if MOC is paused on this track
-            self._stop_internal_player_if_needed()
+            self._stop_internal_player()
             moc_status = self.moc_controller.get_status(force_refresh=True)
             if moc_status:
                 moc_state = moc_status.get("state", "STOP")
                 moc_file = moc_status.get("file_path")
-                # Normalize paths for comparison (resolve to absolute paths)
+                # Normalize paths for comparison
                 if moc_file and track.file_path:
-                    moc_file_abs = str(Path(moc_file).resolve())
-                    track_file_abs = str(Path(track.file_path).resolve())
-                    if moc_file_abs == track_file_abs:
+                    moc_file_abs = self._normalize_path(moc_file)
+                    track_file_abs = self._normalize_path(track.file_path)
+                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
                         return moc_state == "PAUSE"
             return False
         else:
             # Check if internal player is paused on this track
             if self.player.current_track:
-                current_file_abs = str(Path(self.player.current_track.file_path).resolve())
-                track_file_abs = str(Path(track.file_path).resolve())
-                if current_file_abs == track_file_abs:
+                current_file_abs = self._normalize_path(self.player.current_track.file_path)
+                track_file_abs = self._normalize_path(track.file_path)
+                if current_file_abs and track_file_abs and current_file_abs == track_file_abs:
                     return not self.player.is_playing
             return False
     
@@ -745,23 +748,22 @@ class MainWindow(Gtk.ApplicationWindow):
         Args:
             track: The track to resume
         """
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Resume MOC playback
-            self._stop_internal_player_if_needed()
+            self._stop_internal_player()
             self.moc_sync.play()
-            # Update metadata panel when resuming
-            self.metadata_panel.set_track(track)
-            # Update MPRIS2 metadata
-            if self.mpris2:
-                self.mpris2.update_metadata(track)
+            # Update player controls state immediately (will be confirmed by moc_sync.update_status())
+            self.player_controls.set_playing(True)
         else:
             # Resume internal player playback
             self.player.play()
-            # Update metadata panel when resuming
-            self.metadata_panel.set_track(track)
-            # Update MPRIS2 metadata
-            if self.mpris2:
-                self.mpris2.update_metadata(track)
+            # Update player controls state immediately
+            self.player_controls.set_playing(True)
+        
+        # Update metadata panel and MPRIS2 when resuming
+        self.metadata_panel.set_track(track)
+        if self.mpris2:
+            self.mpris2.update_metadata(track)
     
     def _get_selected_track_index(self) -> int:
         """
@@ -829,22 +831,29 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_pause(self):
         """Handle pause button click - route to appropriate player."""
         track = self.playlist_manager.get_current_track()
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
             self.moc_sync.pause()
+            # Update player controls state immediately (will be confirmed by moc_sync.update_status())
+            self.player_controls.set_playing(False)
         else:
             # Use internal player for video files
             self.player.pause()
+            # Update player controls state immediately
+            self.player_controls.set_playing(False)
     
     def _on_stop(self):
         """Handle stop button click - route to appropriate player."""
         track = self.playlist_manager.get_current_track()
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
             self.moc_sync.stop()
         else:
             # Use internal player for video files
             self.player.stop()
+        
+        # Update player controls state to show play button (for both MOC and internal player)
+        self.player_controls.set_playing(False)
         
         # Update MPRIS2 playback status
         if self.mpris2:
@@ -855,7 +864,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_next(self):
         """Handle next button click - route to appropriate player."""
         track = self.playlist_manager.get_current_track()
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
             self.moc_sync.next_track()
         else:
@@ -873,7 +882,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_prev(self):
         """Handle previous button click - route to appropriate player."""
         track = self.playlist_manager.get_current_track()
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
             self.moc_sync.previous_track()
         else:
@@ -888,16 +897,16 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_seek(self, controls, position: float):
         """Handle seek operation - route to appropriate player."""
         track = self.playlist_manager.get_current_track()
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
-            self.moc_sync.seek(position)
+            # Force seek since this is user-initiated (from slider interaction)
+            self.moc_sync.seek(position, force=True)
         else:
             # Use internal player for video files
             self.player.seek(position)
         
-        # Update position display immediately for visual feedback
-        duration = self._get_current_duration()
-        self.player_controls.update_progress(position, duration)
+        # Note: Progress will be updated by the position update cycle
+        # Don't manually update here to avoid interfering with drag gesture
     
     def _on_volume_changed(self, controls, volume: float):
         """Handle volume change from UI slider - control system volume directly."""
@@ -911,7 +920,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle player state change - only for internal player (video files)."""
         # Only update if we're using internal player (video files)
         track = self.playlist_manager.get_current_track()
-        if track and not self._should_use_moc(track):
+        if track and self._is_video_track(track):
             self.player_controls.set_playing(is_playing)
             # Update MPRIS2
             if self.mpris2:
@@ -923,7 +932,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle player position change - only for internal player (video files)."""
         # Only update if we're using internal player (video files)
         track = self.playlist_manager.get_current_track()
-        if track and not self._should_use_moc(track):
+        if track and self._is_video_track(track):
             self.player_controls.update_progress(position, duration)
     
     def _on_track_loaded(self):
@@ -944,7 +953,7 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Sync MOC after track is loaded (only if using MOC for this track)
         track = self.playlist_manager.get_current_track()
-        if self.use_moc and track and self._should_use_moc(track):
+        if self.use_moc and track and not self._is_video_track(track):
             self.moc_sync.sync_enabled = True
             self.moc_sync.sync_playlist_for_playback()
             # Ensure autonext and shuffle are set correctly
@@ -982,7 +991,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _get_current_duration(self) -> float:
         """Get current track duration from the active player."""
         track = self.playlist_manager.get_current_track()
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # Use cached duration if available, otherwise get from MOC
             return self.moc_sync.get_cached_duration()
         else:
@@ -998,7 +1007,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.mpris2.update_position(0.0)
             return True
         
-        if self._should_use_moc(track):
+        if not self._is_video_track(track):
             # For MOC, position updates are handled by _update_moc_status()
             # to avoid duplicate status calls. Only update slider if we have cached position.
             position = self.moc_sync.get_cached_position()
@@ -1041,6 +1050,11 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle shuffle toggle state changes - delegate to moc_sync."""
         if self.use_moc:
             self.moc_sync.set_shuffle(active)
+    
+    def _on_autonext_toggled(self, controls, active: bool):
+        """Handle autonext toggle state changes - delegate to moc_sync."""
+        if self.use_moc:
+            self.moc_sync.set_autonext_enabled(active)
 
     def _play_random_track(self):
         """Play a random track from the current playlist (for video files only)."""
@@ -1153,11 +1167,15 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_playlist_clear(self, view):
         """Handle clearing playlist."""
         self.player.stop()
-        self.playlist_manager.clear()
-        self._update_playlist_view()
         if self.use_moc:
             self.moc_sync.stop()
             self.moc_sync.sync_playlist_to_moc(start_playback=False)
+        
+        # Update player controls state to show play button
+        self.player_controls.set_playing(False)
+        
+        self.playlist_manager.clear()
+        self._update_playlist_view()
 
     def _on_playlist_save(self, view):
         """Handle saving playlist."""
