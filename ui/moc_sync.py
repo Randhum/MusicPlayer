@@ -147,7 +147,7 @@ class MocSyncHelper:
             return
         
         track = self.playlist_manager.get_track_at_index_file(index)
-        if track and is_video_track(track):
+        if track and self.is_video_track(track):
             return  # Don't sync video tracks to MOC
         
         # Use MOC command to jump (this updates MOC's internal state)
@@ -677,10 +677,20 @@ class MocSyncHelper:
         self.playlist_view.set_playlist(self.playlist_manager.get_playlist(), -1)
     
     def next_track(self):
-        """Advance to next track - relies on MOC's shuffle when enabled."""
-        # When MOC is available, let MOC handle shuffle - just call next
-        # MOC will automatically shuffle if shuffle is enabled
-        self.moc_controller.next()
+        """Go to next track."""
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
+        
+        if current_index < len(tracks) - 1:
+            new_index = current_index + 1
+            self.playlist_manager.set_current_index(new_index)
+            self.playlist_view.set_playlist(tracks, new_index)
+            self.play_track()
+        else:
+            # No next track - stop playback
+            self.moc_controller.stop()
+            self.playlist_manager.set_current_index(-1)
+            self.playlist_view.set_playlist(tracks, -1)
     
     def previous_track(self):
         """Go to previous track."""
@@ -724,6 +734,11 @@ class MocSyncHelper:
         else:
             self.moc_controller.disable_shuffle()
         
+        # Update playlist view to ensure current track is highlighted and visible
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
+        self.playlist_view.set_playlist(tracks, current_index)
+        
         # Update metadata panel with new track
         self.metadata_panel.set_track(track)
         # Update MPRIS2 metadata
@@ -735,14 +750,11 @@ class MocSyncHelper:
     
     def set_shuffle(self, enabled: bool):
         """Set shuffle mode and sync with MOC."""
-        self.set_shuffle_enabled(enabled)
-        
+        self.shuffle_enabled = enabled
         if enabled:
             self.moc_controller.enable_shuffle()
         else:
             self.moc_controller.disable_shuffle()
-        
-        # Notify UI of shuffle change
         if self.on_shuffle_changed:
             self.on_shuffle_changed(enabled)
     
@@ -753,7 +765,7 @@ class MocSyncHelper:
     def get_autonext_enabled(self) -> bool:
         """Get current autonext state from MOC."""
         autonext_state = self.moc_controller.get_autonext_state()
-        return autonext_state if autonext_state is not None else True  # Default to enabled
+        return autonext_state if autonext_state is not None else True
     
     def set_autonext_enabled(self, enabled: bool):
         """Set autonext state in MOC."""
@@ -764,8 +776,7 @@ class MocSyncHelper:
     
     def toggle_autonext(self) -> bool:
         """Toggle autonext state and return new state."""
-        current_state = self.get_autonext_enabled()
-        new_state = not current_state
+        new_state = not self.get_autonext_enabled()
         self.set_autonext_enabled(new_state)
         return new_state
     
@@ -853,6 +864,10 @@ class MocSyncHelper:
                 self.reset_end_detection()
             # Force refresh status cache after seek
             status_after = self.moc_controller.get_status(force_refresh=True)
+            if status_after:
+                # Update cached position after seek
+                new_position = float(status_after.get("position", position))
+                self.last_position = new_position
             logger.debug("Seeked to position %.2f (delta: %.2f, forced: %s)", position, delta, force)
         else:
             logger.debug("Seek skipped - delta too small: %.2f seconds", abs(delta))
