@@ -47,7 +47,7 @@ class MocController:
     # ------------------------------------------------------------------
     def is_available(self) -> bool:
         """Return True if `mocp` is available in PATH."""
-        return self._mocp_path is not None
+        return self._server_available is not None
 
     def _run(self, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
         """

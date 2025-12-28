@@ -236,11 +236,24 @@ class PlayerControls(Gtk.Box):
             GLib.source_remove(self._seek_timeout_id)
             self._seek_timeout_id = None
         
-        # User finished interacting
+        # User finished interacting - reset BEFORE applying seek so update_progress() can update labels
         self._user_interacting = False
         
         # Seek to the current slider value immediately
         self._apply_seek()
+        
+        # Force update labels immediately after seek (in case update_progress wasn't called yet)
+        # This ensures labels reflect the seeked position right away
+        if self._duration > 0:
+            value = self.progress_scale.get_value()
+            if value >= 99.9999:
+                position = self._duration
+            else:
+                position = (value / 100.0) * self._duration
+            self.time_label.set_text(self._format_time(position))
+            remaining = max(0.0, self._duration - position)
+            self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
+        
     
     def _apply_seek(self):
         """Apply seek to current slider value."""
@@ -256,7 +269,7 @@ class PlayerControls(Gtk.Box):
             
             # Ensure position is within valid range
             position = max(0.0, min(self._duration, position))
-            
+
             # Emit seek signal - this will be handled by main_window._on_seek()
             self.emit('seek-changed', position)
     

@@ -1,168 +1,181 @@
-"""Playback controller - handles all playback operations."""
+"""Playback controller - handles all playback logic and state management."""
 
 from pathlib import Path
 from typing import Optional, Callable
 
+from typing import TYPE_CHECKING
+
+from core.audio_player import AudioPlayer, VIDEO_EXTENSIONS
 from core.metadata import TrackMetadata
+from core.moc_controller import MocController
+from core.playlist_manager import PlaylistManager
+from ui.components import player_controls
+from ui.moc_sync import MocSyncHelper
 from core.logging import get_logger
+
+if TYPE_CHECKING:
+    from ui.components.player_controls import PlayerControls
 
 logger = get_logger(__name__)
 
 
 class PlaybackController:
-    """Controller for managing playback operations."""
+    """
+    Central controller for all playback operations.
+    
+    Handles:
+    - Playing, pausing, stopping tracks
+    - Resuming paused tracks
+    - Seeking
+    - Track navigation (next/previous)
+    - Player selection (MOC vs internal player)
+    """
     
     def __init__(
         self,
-        playlist_manager,
-        moc_sync,
-        player,
-        player_controls,
-        metadata_panel,
-        playlist_view,
-        mpris2,
-        is_video_track: Callable,
-        normalize_path: Callable,
-        update_playlist_view: Callable,
-        update_mpris2_navigation: Callable,
+        playlist_manager: PlaylistManager,
+        moc_sync: MocSyncHelper,
+        player: AudioPlayer,
+        moc_controller: MocController,
+        player_controls: 'PlayerControls',
+        is_video_track: Callable[[Optional[TrackMetadata]], bool],
+        normalize_path: Callable[[Optional[str]], Optional[str]],
+        on_track_changed: Optional[Callable[[TrackMetadata], None]] = None,
+        on_playback_state_changed: Optional[Callable[[bool], None]] = None,
     ):
         """
         Initialize playback controller.
         
         Args:
-            playlist_manager: PlaylistManager instance
-            moc_sync: MocSyncHelper instance
-            player: AudioPlayer instance
-            player_controls: PlayerControls instance
-            metadata_panel: MetadataPanel instance
-            playlist_view: PlaylistView instance
-            mpris2: MPRIS2Manager instance
+            playlist_manager: Manages the playlist
+            moc_sync: MOC synchronization helper
+            player: Internal GStreamer player
+            moc_controller: MOC controller for status queries
+            player_controls: UI component for player controls
             is_video_track: Function to check if track is video
             normalize_path: Function to normalize file paths
-            update_playlist_view: Function to update playlist view
-            update_mpris2_navigation: Function to update MPRIS2 navigation
+            on_track_changed: Callback when track changes
+            on_playback_state_changed: Callback when playback state changes
         """
         self.playlist_manager = playlist_manager
         self.moc_sync = moc_sync
         self.player = player
+        self.moc_controller = moc_controller
         self.player_controls = player_controls
-        self.metadata_panel = metadata_panel
-        self.playlist_view = playlist_view
-        self.mpris2 = mpris2
-        self.is_video_track = is_video_track
-        self.normalize_path = normalize_path
-        self.update_playlist_view = update_playlist_view
-        self.update_mpris2_navigation = update_mpris2_navigation
+        self._is_video_track = is_video_track
+        self._normalize_path = normalize_path
+        self.on_track_changed = on_track_changed
+        self.on_playback_state_changed = on_playback_state_changed
     
-    def play(self, selected_track_index: Optional[int] = None):
+    def is_track_playing(self, track: TrackMetadata) -> bool:
         """
-        Handle play button click.
+        Check if a track is currently playing.
         
         Args:
-            selected_track_index: Optional index of selected track in playlist
-        """
-        # Step 1: Check if we can resume a paused track
-        current_track = self.playlist_manager.get_current_track()
-        
-        if current_track:
-            # Check if this track is already playing - do nothing
-            if self._is_track_playing(current_track):
-                return
+            track: The track to check
             
-            # Check if this track is paused and can be resumed
-            if self._can_resume_track(current_track):
-                self.resume(current_track)
-                return
+        Returns:
+            True if the track is currently playing, False otherwise
+        """
+        if not self._is_video_track(track):
+            # Check if MOC is playing this track
+            moc_status = self.moc_controller.get_status(force_refresh=False)
+            if moc_status:
+                moc_state = moc_status.get("state", "STOP")
+                moc_file = moc_status.get("file_path")
+                # Normalize paths for comparison
+                if moc_file and track.file_path:
+                    moc_file_abs = self._normalize_path(moc_file)
+                    track_file_abs = self._normalize_path(track.file_path)
+                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
+                        return moc_state == "PLAY"
+            return False
+        else:
+            # Check if internal player is playing this track
+            if self.player.current_track and self.player.is_playing:
+                current_file_abs = self._normalize_path(self.player.current_track.file_path)
+                track_file_abs = self._normalize_path(track.file_path)
+                if current_file_abs and track_file_abs and current_file_abs == track_file_abs:
+                    return True
+            return False
+    
+    def can_resume_track(self, track: TrackMetadata) -> bool:
+        """
+        Check if a track is currently paused and can be resumed.
         
-        # Step 2: Check if there's a selected track in the playlist
-        if selected_track_index is not None and selected_track_index >= 0:
-            playlist = self.playlist_manager.get_playlist()
-            if 0 <= selected_track_index < len(playlist):
-                self.playlist_manager.set_current_index(selected_track_index)
-                self.update_playlist_view()
-                self.play_current_track()
-                return
+        Args:
+            track: The track to check
+            
+        Returns:
+            True if the track is paused and can be resumed, False otherwise
+        """
+        if not self._is_video_track(track):
+            # Check if MOC is paused on this track
+            moc_status = self.moc_controller.get_status(force_refresh=True)
+            if moc_status:
+                moc_state = moc_status.get("state", "STOP")
+                moc_file = moc_status.get("file_path")
+                # Normalize paths for comparison
+                if moc_file and track.file_path:
+                    moc_file_abs = self._normalize_path(moc_file)
+                    track_file_abs = self._normalize_path(track.file_path)
+                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
+                        return moc_state == "PAUSE"
+            return False
+        else:
+            # Check if internal player is paused on this track
+            if self.player.current_track:
+                current_file_abs = self._normalize_path(self.player.current_track.file_path)
+                track_file_abs = self._normalize_path(track.file_path)
+                if current_file_abs and track_file_abs and current_file_abs == track_file_abs:
+                    return not self.player.is_playing
+            return False
+    
+    def resume_track(self, track: TrackMetadata):
+        """
+        Resume playback of a paused track.
         
-        # Step 3: Play current track (if exists)
-        if current_track:
-            self.play_current_track()
-    
-    def pause(self):
-        """Handle pause button click."""
-        track = self.playlist_manager.get_current_track()
-        if not self.is_video_track(track):
-            # Use MOC for audio files
-            self.moc_sync.pause()
-            self.player_controls.set_playing(False)
-        else:
-            # Use internal player for video files
-            self.player.pause()
-            self.player_controls.set_playing(False)
-    
-    def stop(self):
-        """Handle stop button click."""
-        track = self.playlist_manager.get_current_track()
-        if not self.is_video_track(track):
-            # Use MOC for audio files
-            self.moc_sync.stop()
-        else:
-            # Use internal player for video files
-            self.player.stop()
+        Args:
+            track: The track to resume
+        """
+        # Reset user interaction state to ensure duration labels update properly
+        if hasattr(self.player_controls, '_user_interacting'):
+            self.player_controls._user_interacting = False
         
-        # Update player controls state
-        self.player_controls.set_playing(False)
+        if not self._is_video_track(track):
+            # Resume MOC playback
+            self._stop_internal_player()
+            self.moc_sync.play()
+            # Update player controls with current position after resume
+            # This ensures UI reflects any seeks done while paused
+            position = self.moc_sync.get_cached_position()
+            duration = self.moc_sync.get_cached_duration()
+            if duration > 0:
+                self.player_controls.update_progress(position, duration)
+            elif position > 0:
+                self.player_controls.update_progress(position, 0.0)
+        else:
+            # Resume internal player playback
+            self.player.play()
+            # Update player controls with current position after resume
+            position = self.player.get_position()
+            duration = self.player.get_duration()
+            if duration > 0:
+                self.player_controls.update_progress(position, duration)
+            elif position > 0:
+                self.player_controls.update_progress(position, 0.0)
         
-        # Update MPRIS2 playback status
-        if self.mpris2:
-            self.mpris2.update_playback_status(False, is_paused=False)
-        self.update_playlist_view()
-        self.update_mpris2_navigation()
-    
-    def next(self):
-        """Handle next button click."""
-        track = self.playlist_manager.get_current_track()
-        if not self.is_video_track(track):
-            # Use MOC for audio files
-            self.moc_sync.next_track()
-        else:
-            # Use internal player for video files
-            if self.moc_sync.get_shuffle_enabled():
-                self._play_random_track()
-            else:
-                next_track = self.playlist_manager.get_next_track()
-                if next_track:
-                    self.update_playlist_view()
-                    self.play_current_track()
-        # Update MPRIS2 navigation capabilities after track change
-        self.update_mpris2_navigation()
-    
-    def previous(self):
-        """Handle previous button click."""
-        track = self.playlist_manager.get_current_track()
-        if not self.is_video_track(track):
-            # Use MOC for audio files
-            self.moc_sync.previous_track()
-        else:
-            # Use internal player for video files
-            prev_track = self.playlist_manager.get_previous_track()
-            if prev_track:
-                self.update_playlist_view()
-                self.play_current_track()
-        # Update MPRIS2 navigation capabilities after track change
-        self.update_mpris2_navigation()
-    
-    def seek(self, position: float):
-        """Handle seek operation."""
-        track = self.playlist_manager.get_current_track()
-        if not self.is_video_track(track):
-            # Use MOC for audio files - force seek since this is user-initiated
-            self.moc_sync.seek(position, force=True)
-        else:
-            # Use internal player for video files
-            self.player.seek(position)
+        # Update UI state immediately
+        self.player_controls.set_playing(True)
+        
+        if self.on_playback_state_changed:
+            self.on_playback_state_changed(True)
+        
+        if self.on_track_changed:
+            self.on_track_changed(track)
     
     def play_current_track(self):
-        """Play the current track from playlist."""
+        """Play the current track from playlist - use MOC for audio, internal player for video."""
         track = self.playlist_manager.get_current_track()
         if not track:
             return
@@ -184,103 +197,159 @@ class PlaybackController:
         self.player_controls.update_progress(0.0, 0.0)
         
         # Decide which player to use based on file type
-        if not self.is_video_track(track):
-            # Use MOC for audio files
+        if not self._is_video_track(track):
+            # Use MOC for audio files - delegate to moc_sync
             self._stop_internal_player()
             self.moc_sync.play_track()
-            self.player_controls.set_playing(True)
         else:
             # Use internal player for video files
             self.player.load_track(track)
             self.player.play()
-            self.player_controls.set_playing(True)
             
             # Sync MOC playlist (but don't play in MOC for video files)
-            if hasattr(self.moc_sync, 'sync_enabled'):
-                self.moc_sync.sync_enabled = True
-                self.moc_sync.sync_playlist_to_moc(start_playback=False)
+            self.moc_sync.sync_enabled = True
+            self.moc_sync.sync_playlist_to_moc(start_playback=False)
         
-        self.metadata_panel.set_track(track)
+        # Update UI state immediately
+        self.player_controls.set_playing(True)
         
-        # Update MPRIS2 metadata and navigation capabilities
-        if self.mpris2:
-            self.mpris2.update_metadata(track)
-            self.update_mpris2_navigation()
+        if self.on_playback_state_changed:
+            self.on_playback_state_changed(True)
+        
+        if self.on_track_changed:
+            self.on_track_changed(track)
     
-    def resume(self, track: TrackMetadata):
+    def play(self, selected_index: Optional[int] = None):
         """
-        Resume playback of a paused track.
+        Handle play action - resume, play selected, or play current.
         
         Args:
-            track: The track to resume
+            selected_index: Optional index of selected track to play
         """
+        # Step 1: Check if we can resume a paused track
+        current_track = self.playlist_manager.get_current_track()
+        
+        if current_track:
+            # Check if this track is already playing - do nothing
+            if self.is_track_playing(current_track):
+                return
+            
+            # Check if this track is paused and can be resumed
+            if self.can_resume_track(current_track):
+                self.resume_track(current_track)
+                return
+        
+        # Step 2: Check if there's a selected track in the playlist
+        if selected_index is not None and selected_index >= 0:
+            playlist = self.playlist_manager.get_playlist()
+            if 0 <= selected_index < len(playlist):
+                self.playlist_manager.set_current_index(selected_index)
+                self.play_current_track()
+                return
+        
+        # Step 3: Play current track (if exists)
+        if current_track:
+            self.play_current_track()
+    
+    def pause(self):
+        """Handle pause action."""
         # Reset user interaction state to ensure duration labels update properly
-        self.player_controls._user_interacting = False
+        if hasattr(self.player_controls, '_user_interacting'):
+            self.player_controls._user_interacting = False
         
-        if not self.is_video_track(track):
-            # Resume MOC playback
-            self._stop_internal_player()
-            self.moc_sync.play()
-            self.player_controls.set_playing(True)
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Use MOC for audio files
+            self.moc_sync.pause()
         else:
-            # Resume internal player playback
-            self.player.play()
-            self.player_controls.set_playing(True)
+            # Use internal player for video files
+            self.player.pause()
         
-        # Update metadata panel and MPRIS2 when resuming
-        self.metadata_panel.set_track(track)
-        if self.mpris2:
-            self.mpris2.update_metadata(track)
+        # Update UI state immediately
+        self.player_controls.set_playing(False)
+        
+        if self.on_playback_state_changed:
+            self.on_playback_state_changed(False)
     
-    def _is_track_playing(self, track: TrackMetadata) -> bool:
-        """Check if a track is currently playing."""
-        if not self.is_video_track(track):
-            # Check if MOC is playing this track
-            self._stop_internal_player()
-            moc_status = self.moc_sync.moc_controller.get_status(force_refresh=False)
-            if moc_status:
-                moc_state = moc_status.get("state", "STOP")
-                moc_file = moc_status.get("file_path")
-                # Normalize paths for comparison
-                if moc_file and track.file_path:
-                    moc_file_abs = self.normalize_path(moc_file)
-                    track_file_abs = self.normalize_path(track.file_path)
-                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
-                        return moc_state == "PLAY"
-            return False
+    def stop(self):
+        """Handle stop action."""
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Use MOC for audio files
+            self.moc_sync.stop()
         else:
-            # Check if internal player is playing this track
-            if self.player.current_track and self.player.is_playing:
-                current_file_abs = self.normalize_path(self.player.current_track.file_path)
-                track_file_abs = self.normalize_path(track.file_path)
-                if current_file_abs and track_file_abs and current_file_abs == track_file_abs:
-                    return True
-            return False
+            # Use internal player for video files
+            self.player.stop()
+        
+        # Update UI state immediately
+        self.player_controls.set_playing(False)
+        
+        if self.on_playback_state_changed:
+            self.on_playback_state_changed(False)
     
-    def _can_resume_track(self, track: TrackMetadata) -> bool:
-        """Check if a track is currently paused and can be resumed."""
-        if not self.is_video_track(track):
-            # Check if MOC is paused on this track
-            self._stop_internal_player()
-            moc_status = self.moc_sync.moc_controller.get_status(force_refresh=True)
-            if moc_status:
-                moc_state = moc_status.get("state", "STOP")
-                moc_file = moc_status.get("file_path")
-                # Normalize paths for comparison
-                if moc_file and track.file_path:
-                    moc_file_abs = self.normalize_path(moc_file)
-                    track_file_abs = self.normalize_path(track.file_path)
-                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
-                        return moc_state == "PAUSE"
-            return False
+    def next(self):
+        """Handle next track action."""
+        track = self.playlist_manager.get_current_track()
+        if self.moc_sync.use_moc and not self._is_video_track(track):
+                # Use MOC for audio files
+                # moc_sync.next_track() handles checking for next track and stopping if needed
+                self.moc_sync.next_track()
         else:
-            # Check if internal player is paused on this track
-            if self.player.current_track:
-                current_file_abs = self.normalize_path(self.player.current_track.file_path)
-                track_file_abs = self.normalize_path(track.file_path)
-                if current_file_abs and track_file_abs and current_file_abs == track_file_abs:
-                    return not self.player.is_playing
-            return False
+            # Get next track (this updates current_index internally)
+            next_track = self.playlist_manager.get_next_track()
+            if next_track:
+                self.play_current_track()
+            else:
+                # No next track - stop playback
+                logger.debug("No next track available, stopping playback")
+                self.stop()
+    
+    def previous(self):
+        """Handle previous track action."""
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Use MOC for audio files
+            self.moc_sync.previous_track()
+        else:
+            # Use internal player for video files
+            prev_track = self.playlist_manager.get_previous_track()
+            if prev_track:
+                self.play_current_track()
+    
+    def seek(self, position: float):
+        """
+        Handle seek action.
+        
+        Args:
+            position: Position in seconds to seek to
+        """
+        # Ensure user interaction flag is reset so update_progress can update labels
+        if hasattr(self.player_controls, '_user_interacting'):
+            self.player_controls._user_interacting = False
+        
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Use MOC for audio files - force seek since this is user-initiated
+            # Get duration before seeking
+            duration = self.moc_sync.get_cached_duration()
+            # Perform the seek
+            self.moc_sync.seek(position, force=True)
+            # Update player controls immediately with new position
+            # This ensures UI reflects the seek even if MOC is paused
+            if duration > 0:
+                self.player_controls.update_progress(position, duration)
+            else:
+                # If duration not available yet, update position only
+                self.player_controls.update_progress(position, 0.0)
+        else:
+            # Use internal player for video files
+            duration = self.player.get_duration()
+            self.player.seek(position)
+            # Update player controls immediately with new position
+            if duration > 0:
+                self.player_controls.update_progress(position, duration)
+            else:
+                self.player_controls.update_progress(position, 0.0)
     
     def _stop_internal_player(self):
         """Stop internal GStreamer player if it's active."""
@@ -293,10 +362,9 @@ class PlaybackController:
         self._stop_internal_player()
         
         # Stop MOC if playing
-        if hasattr(self.moc_sync, 'stop'):
-            self.moc_sync.stop()
+        self.moc_sync.stop()
     
-    def _play_random_track(self):
+    def play_random_track(self):
         """Play a random track from the current playlist (for video files only)."""
         import random
         tracks = self.playlist_manager.get_playlist()
@@ -311,6 +379,5 @@ class PlaybackController:
                 return
             new_index = random.choice(indices)
         self.playlist_manager.set_current_index(new_index)
-        self.update_playlist_view()
         self.play_current_track()
 
