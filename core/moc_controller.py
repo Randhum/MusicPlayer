@@ -1,63 +1,33 @@
-"""Integration with MOC (Music On Console) via the `mocp` CLI.
-
-This module lets us:
-- Read the current MOC playlist from ~/.moc/playlist.m3u
-- Control playback (play/pause/stop/next/prev)
-- Sync volume
-- Query current status (state, track, position, duration, volume)
-"""
+"""MOC (Music On Console) integration via mocp CLI."""
 
 from __future__ import annotations
-
-import json
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
 from core.config import get_config
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 
 logger = get_logger(__name__)
 
-
 class MocController:
-    """Minimal wrapper around `mocp` for playlist and playback control."""
-
     def __init__(self):
         self._mocp_path: Optional[str] = shutil.which("mocp")
-        # Get playlist path from config
-        config = get_config()
-        self._playlist_path: Path = config.moc_playlist_path
-        # Track whether server is available (we know it's running or we started it)
-        # This avoids spamming `mocp --server` on every status poll.
+        self._playlist_path: Path = get_config().moc_playlist_path
         self._server_available: bool = False
-        # Status caching to reduce MOC server load
         self._status_cache: Optional[Dict] = None
         self._status_cache_time: float = 0.0
-        self._status_cache_ttl: float = 0.4  # Cache for 400ms (matches polling interval better)
-        # Error tracking for backoff
+        self._status_cache_ttl: float = 0.4
         self._last_error_time: float = 0.0
-        self._error_backoff: float = 1.0  # Start with 1 second backoff
+        self._error_backoff: float = 1.0
 
-    # ------------------------------------------------------------------
-    # Availability / helpers
-    # ------------------------------------------------------------------
     def is_available(self) -> bool:
-        """Return True if `mocp` is available in PATH."""
         return self._server_available is not None
 
     def _run(self, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
-        """
-        Run `mocp` with the given arguments.
-        
-        Handles errors gracefully and prevents overwhelming the MOC server.
-        Uses ensure_server() to verify and restart server on connection errors.
-        """
         if not self._mocp_path:
-            # Simulate a failed process
             return subprocess.CompletedProcess(args=["mocp", *args], returncode=127, stdout="", stderr="mocp not found")
 
         cmd = [self._mocp_path, *args]
@@ -131,19 +101,6 @@ class MocController:
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
     def ensure_server(self) -> Tuple[bool, bool]:
-        """
-        Ensure MOC server is running and verify it's active.
-        
-        Calls `mocp --server` and verifies the server has started or is already running.
-        If verification fails, tries to restart the server once.
-        
-        Returns:
-            tuple: (success: bool, was_already_running: bool)
-                - success: True if server is now active, False if startup failed
-                - was_already_running: True if server was already running, False if it was started
-        """
-        
-        # If we already know server is available, return early (most common case)
         if self._server_available:
             return True, True
         
@@ -550,52 +507,36 @@ class MocController:
     # ------------------------------------------------------------------
     # Controls
     # ------------------------------------------------------------------
+    def _check_server(self):
+        """Helper: check if server is available."""
+        return self._server_available
+    
     def play(self):
-        """Start / resume playback."""
-        if not self._server_available:
+        if not self._check_server():
             return
-        # Check if MOC is paused - if so, use --unpause to resume from paused position
-        # Otherwise, use --play to start playback
         status = self.get_status(force_refresh=False)
-        if status and status.get("state") == "PAUSE":
-            # MOC is paused - use --unpause to resume from paused position
-            self._run("--unpause")
-        else:
-            # MOC is stopped or not playing - use --play to start
-            self._run("--play")
+        self._run("--unpause" if status and status.get("state") == "PAUSE" else "--play")
 
     def pause(self):
-        """Pause playback."""
-        if not self._server_available:
-            return
-        self._run("--pause")
+        if self._check_server():
+            self._run("--pause")
 
     def stop(self):
-        """Stop playback."""
-        if not self._server_available:
-            return
-        self._run("--stop")
+        if self._check_server():
+            self._run("--stop")
 
     def shutdown(self):
-        """Completely stop the MOC server (equivalent to `mocp --exit`)."""
-        if not self._server_available:
-            return
-        # We don't call ensure_server() here on purpose – if the server is not
-        # running, there is nothing to shut down.
-        self._run("--exit")
-        self._server_available = False
+        if self._check_server():
+            self._run("--exit")
+            self._server_available = False
 
     def next(self):
-        """Skip to next track."""
-        if not self._server_available:
-            return
-        self._run("--next")
+        if self._check_server():
+            self._run("--next")
 
     def previous(self):
-        """Go back to previous track."""
-        if not self._server_available:
-            return
-        self._run("--previous")
+        if self._check_server():
+            self._run("--previous")
     
     def jump_to_index(self, index: int, start_playback: bool = False):
         """

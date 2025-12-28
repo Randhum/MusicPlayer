@@ -113,6 +113,7 @@ class PlayerControls(Gtk.Box):
         self.shuffle_button.connect('toggled', self._on_shuffle_toggled)
         controls_box.append(self.shuffle_button)
         
+        
         # Autonext toggle
         self.autonext_button = Gtk.ToggleButton()
         autonext_image = Gtk.Image.new_from_icon_name("media-playlist-repeat-symbolic")
@@ -122,7 +123,7 @@ class PlayerControls(Gtk.Box):
         self.autonext_button.set_active(True)  # Default to enabled
         self.autonext_button.connect('toggled', self._on_autonext_toggled)
         controls_box.append(self.autonext_button)
-        
+
         # Volume control
         volume_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         volume_box.set_halign(Gtk.Align.END)
@@ -230,47 +231,29 @@ class PlayerControls(Gtk.Box):
         self._user_interacting = True
     
     def _on_progress_released(self, gesture, n_press, x, y):
-        """Handle button release on progress bar - user finished interacting, seek to position."""
+        """Handle button release - update UI immediately, then seek."""
         # Cancel any pending seek timeout
         if self._seek_timeout_id:
             GLib.source_remove(self._seek_timeout_id)
             self._seek_timeout_id = None
         
-        # User finished interacting - reset BEFORE applying seek so update_progress() can update labels
-        self._user_interacting = False
-        
-        # Seek to the current slider value immediately
-        self._apply_seek()
-        
-        # Force update labels immediately after seek (in case update_progress wasn't called yet)
-        # This ensures labels reflect the seeked position right away
+        # Calculate position from current slider value
         if self._duration > 0:
             value = self.progress_scale.get_value()
-            if value >= 99.9999:
-                position = self._duration
-            else:
-                position = (value / 100.0) * self._duration
-            self.time_label.set_text(self._format_time(position))
-            remaining = max(0.0, self._duration - position)
-            self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
-        
-    
-    def _apply_seek(self):
-        """Apply seek to current slider value."""
-        if self._duration > 0:
-            value = self.progress_scale.get_value()
-            # Calculate position from slider value
-            # Clamp value to valid range first
             value = max(0.0, min(100.0, value))
             if value >= 99.9999:
                 position = self._duration
             else:
                 position = (value / 100.0) * self._duration
-            
-            # Ensure position is within valid range
             position = max(0.0, min(self._duration, position))
-
-            # Emit seek signal - this will be handled by main_window._on_seek()
+            
+            # Update UI immediately (scale is already at correct position, just update labels)
+            self._user_interacting = False
+            self.time_label.set_text(self._format_time(position))
+            remaining = max(0.0, self._duration - position)
+            self.time_remaining_label.set_text(f"-{self._format_time(remaining)}")
+            
+            # Emit seek signal to actually perform the seek (UI already updated)
             self.emit('seek-changed', position)
     
     def _on_progress_value_changed(self, scale):
@@ -302,8 +285,16 @@ class PlayerControls(Gtk.Box):
         """Handle seek timeout - apply seek after user stops dragging."""
         self._seek_timeout_id = None
         # Only seek if user is still interacting (they paused dragging)
-        if self._user_interacting:
-            self._apply_seek()
+        if self._user_interacting and self._duration > 0:
+            value = self.progress_scale.get_value()
+            value = max(0.0, min(100.0, value))
+            if value >= 99.9999:
+                position = self._duration
+            else:
+                position = (value / 100.0) * self._duration
+            position = max(0.0, min(self._duration, position))
+            # Emit seek signal
+            self.emit('seek-changed', position)
         return False  # Don't repeat
     
     def _on_volume_changed(self, scale):

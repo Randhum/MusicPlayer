@@ -51,6 +51,7 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Initialize core components
         self.library = MusicLibrary()
+        # Create player instance (only for PlaybackController's internal use - do not access directly)
         self.player = AudioPlayer()
         self.playlist_manager = PlaylistManager()
         # Initialize BT manager with this window for pairing dialogs
@@ -67,15 +68,6 @@ class MainWindow(Gtk.ApplicationWindow):
         
         # Initialize dock manager
         self.dock_manager = DockManager(self)
-        
-        # Setup player callbacks
-        self.player.on_state_changed = self._on_player_state_changed
-        self.player.on_position_changed = self._on_player_position_changed
-        self.player.on_track_finished = self._on_track_finished
-        self.player.on_track_loaded = self._on_track_loaded
-        
-        # Setup MPRIS2 callbacks (after player callbacks are set)
-        self._setup_mpris2()
         
         # Create UI with dockable panels (needed before MOC sync helper)
         self._create_ui()
@@ -106,6 +98,15 @@ class MainWindow(Gtk.ApplicationWindow):
             on_track_changed=self._on_playback_track_changed,
             on_playback_state_changed=self._on_playback_state_changed
         )
+        
+        # Setup playback controller callbacks (delegates to internal player for video tracks)
+        self.playback_controller.on_state_changed = self._on_player_state_changed
+        self.playback_controller.on_position_changed = self._on_player_position_changed
+        self.playback_controller.on_track_finished = self._on_track_finished
+        self.playback_controller.on_track_loaded = self._on_track_loaded
+        
+        # Setup MPRIS2 callbacks (after playback controller callbacks are set)
+        self._setup_mpris2()
         
         # Load saved layout
         GLib.idle_add(self.dock_manager.load_layout)
@@ -252,7 +253,6 @@ class MainWindow(Gtk.ApplicationWindow):
         main_box.append(self.player_controls)
     
     def _apply_css(self):
-        """Apply custom CSS styling."""
         css_provider = Gtk.CssProvider()
         css_provider.load_from_string("""
             .dock-header {
@@ -264,75 +264,50 @@ class MainWindow(Gtk.ApplicationWindow):
                 min-height: 32px;
                 padding: 4px;
             }
-            
-            /* Touch-friendly tree views */
-            .library-tree row {
-                min-height: 48px;
-                padding: 8px;
-            }
-            
+            .library-tree row,
             .playlist-tree row {
                 min-height: 48px;
                 padding: 8px;
             }
-            
-            /* Touch-friendly buttons */
             button {
                 min-height: 36px;
                 padding: 8px 12px;
             }
-            
-            /* Touch-friendly entry fields */
             entry {
                 min-height: 36px;
                 padding: 8px;
             }
-            
-            /* Touch-friendly scales */
             scale {
                 min-height: 30px;
             }
-            
             scale slider {
                 min-width: 20px;
                 min-height: 20px;
             }
-            
             scale trough {
                 min-height: 8px;
             }
-            
-            /* Album art placeholder styling */
             .album-art-placeholder {
                 background: #667eea;
                 border-radius: 12px;
                 opacity: 0.85;
             }
-            
             .placeholder-icon {
                 opacity: 0.7;
                 color: white;
             }
-            
             .placeholder-text {
                 color: white;
                 font-size: 12px;
                 font-weight: 500;
                 opacity: 0.95;
             }
-            
             .album-art {
                 border-radius: 12px;
                 box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             }
         """)
-        
-        display = self.get_display()
-        Gtk.StyleContext.add_provider_for_display(
-            display,
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
-        )
+        Gtk.StyleContext.add_provider_for_display(self.get_display(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     
     def _create_top_bar(self, parent: Gtk.Box):
         """Create the top bar with search."""
@@ -450,7 +425,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_close(self, window):
         """Handle window close."""
         self.dock_manager.cleanup()
-        self.player.cleanup()
+        self.playback_controller.cleanup()
         # Cleanup MPRIS2
         if hasattr(self, 'mpris2') and self.mpris2:
             self.mpris2.cleanup()
@@ -493,8 +468,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Initialize MOC server and settings (called after startup delay)."""
         if self.use_moc:
             self.moc_sync.initialize()
-            # Sync autonext button state after initialization
+            # Sync autonext and shuffle button states after initialization
             self._sync_autonext_button_state()
+            self._sync_shuffle_button_state()
         return False  # Don't repeat
     
     def _on_moc_track_finished(self):
@@ -505,13 +481,23 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_moc_shuffle_changed(self, shuffle_enabled: bool):
         """Handle shuffle state change from MOC."""
-        self.player_controls.shuffle_button.set_active(shuffle_enabled)
+        # Only update if state is different to avoid interfering with user interaction
+        if self.player_controls.shuffle_button.get_active() != shuffle_enabled:
+            self.player_controls.shuffle_button.set_active(shuffle_enabled)
     
     def _sync_autonext_button_state(self):
         """Sync autonext button state with MOC state."""
         if self.use_moc:
             autonext_enabled = self.moc_sync.get_autonext_enabled()
             self.player_controls.autonext_button.set_active(autonext_enabled)
+    
+    def _sync_shuffle_button_state(self):
+        """Sync shuffle button state with MOC state."""
+        if self.use_moc:
+            # Query shuffle state directly from moc_controller
+            shuffle_enabled = self.moc_controller.get_shuffle_state()
+            if shuffle_enabled is not None:
+                self.player_controls.shuffle_button.set_active(shuffle_enabled)
     
     def _update_mpris2_navigation_capabilities(self):
         """Update MPRIS2 CanGoNext and CanGoPrevious based on playlist state."""
@@ -550,47 +536,34 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle search entry changes."""
         query = entry.get_text()
         if query:
-            results = self.library.search(query)
             self.playlist_manager.clear()
-            self.playlist_manager.add_tracks(results)
-            self._update_playlist_view()
+            self.playlist_manager.add_tracks(self.library.search(query))
         else:
             self.playlist_manager.clear()
-            self._update_playlist_view()
+        self._update_playlist_view()
+        self._sync_moc_playlist()
+    
+    def _sync_moc_playlist(self):
+        """Helper: sync MOC playlist after changes."""
         if self.use_moc:
-            # Re-enable sync and sync playlist when user searches
             self.moc_sync.sync_enabled = True
             self.moc_sync.sync_playlist_to_moc(start_playback=False)
-            # Reset shuffle tracking when playlist changes
-            self.moc_sync.reset_shuffle_tracking()
     
     def _on_track_selected(self, browser, track: TrackMetadata):
-        """Handle track selection from library browser."""
         self.playlist_manager.clear()
         self.playlist_manager.add_track(track)
         self.playlist_manager.set_current_index(0)
         self._update_playlist_view()
-        # Reset shuffle tracking when playlist changes
-        if self.use_moc:
-            self.moc_sync.reset_shuffle_tracking()
-            # Re-enable sync and sync playlist when user explicitly selects a track
-            self.moc_sync.sync_enabled = True
-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
+        self._sync_moc_playlist()
         self.playback_controller.play_current_track()
         self._update_playlist_view()
     
     def _on_album_selected(self, browser, tracks: List[TrackMetadata]):
-        """Handle album selection from library browser."""
         self.playlist_manager.clear()
         self.playlist_manager.add_tracks(tracks)
         self.playlist_manager.set_current_index(0)
         self._update_playlist_view()
-        # Reset shuffle tracking when playlist changes
-        if self.use_moc:
-            self.moc_sync.reset_shuffle_tracking()
-            # Re-enable sync and sync playlist when user explicitly selects an album
-            self.moc_sync.sync_enabled = True
-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
+        self._sync_moc_playlist()
         self.playback_controller.play_current_track()
         self._update_playlist_view()
     
@@ -633,8 +606,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 # For MOC, get position from moc_sync
                 current_pos = self.moc_sync.get_cached_position()
             else:
-                # For internal player, get from player
-                current_pos = self.player.get_position()
+                # For internal player, get from playback_controller
+                current_pos = self.playback_controller.get_current_position()
             
             offset_seconds = offset_microseconds / 1_000_000.0
             new_position = max(0.0, current_pos + offset_seconds)
@@ -696,11 +669,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_mpris2_navigation_capabilities()
     
     def _on_next(self):
-        """Handle next button click - delegate to playback controller."""
         self.playback_controller.next()
         self._update_playlist_view()
-        print("onn ext  ")
-        # Update MPRIS2 navigation capabilities after track change
         self._update_mpris2_navigation_capabilities()
     
     def _on_prev(self):
@@ -744,8 +714,8 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle track loaded - update duration and sync MOC."""
         # Wait a bit for GStreamer to determine duration, then update
         def update_after_load():
-            duration = self.player.get_duration()
-            position = self.player.get_position()
+            duration = self.playback_controller.get_current_duration()
+            position = self.playback_controller.get_current_position()
             # Update progress even if duration is 0 (will be updated when available)
             self.player_controls.update_progress(position, duration)
             # If duration is still 0, try again after a short delay
@@ -784,24 +754,18 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.playback_controller.play_current_track()
                 else:
                     # Shouldn't happen, but handle gracefully
-                    self.player.stop()
+                    self.playback_controller.stop()
                     self.playlist_manager.set_current_index(-1)
                     self._update_playlist_view()
         else:
             # End of playlist reached
-            self.player.stop()
+            self.playback_controller.stop()
             self.playlist_manager.set_current_index(-1)
             self._update_playlist_view()
     
     def _get_current_duration(self) -> float:
-        """Get current track duration from the active player."""
-        track = self.playlist_manager.get_current_track()
-        if not self._is_video_track(track):
-            # Use cached duration if available, otherwise get from MOC
-            return self.moc_sync.get_cached_duration()
-        else:
-            # Get duration from internal player
-            return self.player.get_duration()
+        """Get current track duration - delegate to playback_controller."""
+        return self.playback_controller.get_current_duration()
     
     def _update_position(self):
         """Periodically update position display - from active player."""
@@ -813,22 +777,17 @@ class MainWindow(Gtk.ApplicationWindow):
             return True
         
         if not self._is_video_track(track):
-            # For MOC, position updates are handled by _update_moc_status()
-            # to avoid duplicate status calls. Only update slider if we have cached position.
-            position = self.moc_sync.get_cached_position()
-            duration = self.moc_sync.get_cached_duration()
-            if duration > 0:
-                self.player_controls.update_progress(position, duration)
-            elif position > 0:
-                self.player_controls.update_progress(position, 0.0)
-            # Update MPRIS2 position
+            # For MOC, position updates are handled by _update_moc_status() via update_status()
+            # Don't call update_progress() here to avoid conflicts and stale position data
+            # Only update MPRIS2 position
             if self.mpris2:
+                position = self.moc_sync.get_cached_position()
                 self.mpris2.update_position(position)
         else:
             # Update from internal player for video files
-            if self.player.is_playing:
-                position = self.player.get_position()
-                duration = self.player.get_duration()
+            if self.playback_controller.is_playing():
+                position = self.playback_controller.get_current_position()
+                duration = self.playback_controller.get_current_duration()
                 # Always update progress to keep slider in sync
                 if duration > 0:
                     self.player_controls.update_progress(position, duration)
@@ -841,7 +800,7 @@ class MainWindow(Gtk.ApplicationWindow):
             else:
                 # Player not playing - update MPRIS2 with current position
                 if self.mpris2:
-                    position = self.player.get_position()
+                    position = self.playback_controller.get_current_position()
                     self.mpris2.update_position(position)
         return True
 
@@ -899,52 +858,33 @@ class MainWindow(Gtk.ApplicationWindow):
             logger.debug("  Paired: %s, Connected: %s", device.paired, device.connected)
             logger.info("Note: Enable speaker mode to connect to devices")
     
-    def _on_add_track(self, browser, track: TrackMetadata):
-        """Handle 'Add to Playlist' from library browser context menu."""
-        # Get current playlist length to determine index
-        index = self.playlist_manager.get_playlist_length_file()
-        # Add directly to files using index
-        self.moc_sync.sync_add_track_file(index, track)
-        # Reload from file to update in-memory cache and UI
+    def _sync_playlist_file_op(self, op):
+        """Helper: execute playlist file operation and refresh UI."""
+        op()
         self.playlist_manager.load_playlist_from_file()
         self._update_playlist_view()
     
+    def _on_add_track(self, browser, track: TrackMetadata):
+        index = self.playlist_manager.get_playlist_length_file()
+        self._sync_playlist_file_op(lambda: self.moc_sync.sync_add_track_file(index, track))
+    
     def _on_add_album(self, browser, tracks):
-        """Handle 'Add Album to Playlist' from library browser context menu."""
-        # Add each track at the appropriate index
         start_index = self.playlist_manager.get_playlist_length_file()
         for i, track in enumerate(tracks):
             self.moc_sync.sync_add_track_file(start_index + i, track)
-        # Reload from file to update in-memory cache and UI
         self.playlist_manager.load_playlist_from_file()
         self._update_playlist_view()
     
     def _on_playlist_remove_track(self, view, index: int):
-        """Handle track removal from playlist."""
-        # Remove directly from files using index
-        self.moc_sync.sync_remove_track_file(index)
-        # Reload from file to update in-memory cache and UI
-        self.playlist_manager.load_playlist_from_file()
-        self._update_playlist_view()
+        self._sync_playlist_file_op(lambda: self.moc_sync.sync_remove_track_file(index))
     
     def _on_playlist_move_up(self, view, index: int):
-        """Handle moving track up in playlist."""
         if index > 0:
-            # Move directly in files using indexes
-            self.moc_sync.sync_move_track_file(index, index - 1)
-            # Reload from file to update in-memory cache and UI
-            self.playlist_manager.load_playlist_from_file()
-            self._update_playlist_view()
+            self._sync_playlist_file_op(lambda: self.moc_sync.sync_move_track_file(index, index - 1))
     
     def _on_playlist_move_down(self, view, index: int):
-        """Handle moving track down in playlist."""
-        playlist_length = self.playlist_manager.get_playlist_length_file()
-        if index < playlist_length - 1:
-            # Move directly in files using indexes
-            self.moc_sync.sync_move_track_file(index, index + 1)
-            # Reload from file to update in-memory cache and UI
-            self.playlist_manager.load_playlist_from_file()
-            self._update_playlist_view()
+        if index < self.playlist_manager.get_playlist_length_file() - 1:
+            self._sync_playlist_file_op(lambda: self.moc_sync.sync_move_track_file(index, index + 1))
     
     def _on_playlist_refresh(self, view):
         """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
@@ -953,7 +893,7 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_playlist_clear(self, view):
         """Handle clearing playlist."""
-        self.player.stop()
+        self.playback_controller.stop()
         if self.use_moc:
             self.moc_sync.stop()
             self.moc_sync.sync_playlist_to_moc(start_playback=False)
@@ -964,106 +904,60 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_manager.clear()
         self._update_playlist_view()
 
+    def _create_dialog_content(self, content):
+        """Helper: set dialog content margins."""
+        for attr in ['top', 'bottom', 'start', 'end']:
+            getattr(content, f'set_margin_{attr}')(10)
+    
     def _on_playlist_save(self, view):
-        """Handle saving playlist."""
         dialog = Gtk.Dialog(title="Save Playlist", transient_for=self, modal=True)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button("Save", Gtk.ResponseType.OK)
-        
         content = dialog.get_content_area()
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-        
-        label = Gtk.Label(label="Playlist name:")
-        content.append(label)
-        
+        self._create_dialog_content(content)
+        content.append(Gtk.Label(label="Playlist name:"))
         entry = Gtk.Entry()
         entry.set_placeholder_text("My Playlist")
         content.append(entry)
-        
-        dialog.connect('response', lambda d, r: self._on_save_dialog_response(d, r, entry))
+        dialog.connect('response', lambda d, r: (self.playlist_manager.save_playlist(entry.get_text().strip()) if r == Gtk.ResponseType.OK and entry.get_text().strip() else None, d.close())[1])
         dialog.present()
-
-    
-    def _on_save_dialog_response(self, dialog, response, entry):
-        """Handle save dialog response."""
-        if response == Gtk.ResponseType.OK:
-            name = entry.get_text().strip()
-            if name:
-                self.playlist_manager.save_playlist(name)
-        dialog.close()
     
     def _on_playlist_load(self, view):
-        """Handle loading a saved playlist."""
         playlists = self.playlist_manager.list_playlists()
-        
         if not playlists:
-            # Show a message dialog if no playlists exist
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                modal=True,
-                message_type=Gtk.MessageType.INFO,
-                buttons=Gtk.ButtonsType.OK,
-                text="No Saved Playlists",
-            )
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK, text="No Saved Playlists")
             dialog.set_detail_text("There are no saved playlists to load.")
             dialog.connect('response', lambda d, r: d.close())
             dialog.present()
             return
-        
-        # Create dialog with playlist selection
         dialog = Gtk.Dialog(title="Load Playlist", transient_for=self, modal=True)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button("Load", Gtk.ResponseType.OK)
-        
         content = dialog.get_content_area()
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-        
-        label = Gtk.Label(label="Select a playlist to load:")
-        content.append(label)
-        
-        # Create list store and tree view for playlist selection
+        self._create_dialog_content(content)
+        content.append(Gtk.Label(label="Select a playlist to load:"))
         store = Gtk.ListStore(str)
-        for playlist_name in playlists:
-            store.append([playlist_name])
-        
+        for name in playlists:
+            store.append([name])
         tree_view = Gtk.TreeView(model=store)
         tree_view.set_headers_visible(False)
-        
-        renderer = Gtk.CellRendererText()
-        column = Gtk.TreeViewColumn("Playlist", renderer, text=0)
-        tree_view.append_column(column)
-        
-        # Select first item by default
-        selection = tree_view.get_selection()
+        tree_view.append_column(Gtk.TreeViewColumn("Playlist", Gtk.CellRendererText(), text=0))
         if playlists:
-            path = Gtk.TreePath.new_from_string("0")
-            selection.select_path(path)
-        
+            tree_view.get_selection().select_path(Gtk.TreePath.new_from_string("0"))
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scrolled.set_min_content_height(200)
         scrolled.set_min_content_width(300)
         scrolled.set_child(tree_view)
         content.append(scrolled)
-        
-        def on_response(d, response_id):
-            if response_id == Gtk.ResponseType.OK:
-                selection = tree_view.get_selection()
-                model, tree_iter = selection.get_selected()
-                if tree_iter:
-                    playlist_name = model[tree_iter][0]
-                    if self.playlist_manager.load_playlist(playlist_name):
-                        self._update_playlist_view()
-                        # Sync to MOC if using MOC
-                        if self.use_moc:
-                            self.moc_sync.sync_playlist_to_moc(start_playback=False)
-            dialog.close()
-        
+        def on_response(d, r):
+            if r == Gtk.ResponseType.OK:
+                sel = tree_view.get_selection()
+                m, it = sel.get_selected()
+                if it and self.playlist_manager.load_playlist(m[it][0]):
+                    self._update_playlist_view()
+                    if self.use_moc:
+                        self.moc_sync.sync_playlist_to_moc(start_playback=False)
+            d.close()
         dialog.connect('response', on_response)
         dialog.present()

@@ -66,6 +66,19 @@ class PlaybackController:
         self._normalize_path = normalize_path
         self.on_track_changed = on_track_changed
         self.on_playback_state_changed = on_playback_state_changed
+        
+        # Expose player callbacks for main_window to set
+        # These forward to the internal player for video tracks
+        self.on_state_changed = None
+        self.on_position_changed = None
+        self.on_track_finished = None
+        self.on_track_loaded = None
+        
+        # Setup player callbacks to forward to our callbacks
+        self.player.on_state_changed = lambda playing: self._on_player_state_changed(playing)
+        self.player.on_position_changed = lambda pos: self._on_player_position_changed(pos)
+        self.player.on_track_finished = lambda: self._on_player_track_finished()
+        self.player.on_track_loaded = lambda: self._on_player_track_loaded()
     
     def is_track_playing(self, track: TrackMetadata) -> bool:
         """
@@ -317,39 +330,71 @@ class PlaybackController:
                 self.play_current_track()
     
     def seek(self, position: float):
-        """
-        Handle seek action.
-        
-        Args:
-            position: Position in seconds to seek to
-        """
-        # Ensure user interaction flag is reset so update_progress can update labels
-        if hasattr(self.player_controls, '_user_interacting'):
-            self.player_controls._user_interacting = False
-        
+        """Handle seek action - UI already updated, just perform the seek."""
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - force seek since this is user-initiated
-            # Get duration before seeking
-            duration = self.moc_sync.get_cached_duration()
-            # Perform the seek
             self.moc_sync.seek(position, force=True)
-            # Update player controls immediately with new position
-            # This ensures UI reflects the seek even if MOC is paused
-            if duration > 0:
-                self.player_controls.update_progress(position, duration)
-            else:
-                # If duration not available yet, update position only
-                self.player_controls.update_progress(position, 0.0)
         else:
             # Use internal player for video files
-            duration = self.player.get_duration()
             self.player.seek(position)
-            # Update player controls immediately with new position
-            if duration > 0:
-                self.player_controls.update_progress(position, duration)
-            else:
-                self.player_controls.update_progress(position, 0.0)
+    
+    def get_current_duration(self) -> float:
+        """Get current track duration from the active player."""
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Use cached duration if available, otherwise get from MOC
+            return self.moc_sync.get_cached_duration()
+        else:
+            # Get duration from internal player
+            return self.player.get_duration()
+    
+    def get_current_position(self) -> float:
+        """Get current track position from the active player."""
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Get position from MOC
+            return self.moc_sync.get_cached_position()
+        else:
+            # Get position from internal player
+            return self.player.get_position()
+    
+    def is_playing(self) -> bool:
+        """Check if playback is currently active."""
+        track = self.playlist_manager.get_current_track()
+        if not self._is_video_track(track):
+            # Check MOC state
+            moc_status = self.moc_controller.get_status(force_refresh=False)
+            if moc_status:
+                return moc_status.get("state", "STOP") == "PLAY"
+            return False
+        else:
+            # Check internal player state
+            return self.player.is_playing
+    
+    def cleanup(self):
+        """Cleanup all playback resources."""
+        self.player.cleanup()
+    
+    def _on_player_state_changed(self, playing: bool):
+        """Forward player state change to callback."""
+        if self.on_state_changed:
+            self.on_state_changed(playing)
+    
+    def _on_player_position_changed(self, position: float):
+        """Forward player position change to callback."""
+        if self.on_position_changed:
+            self.on_position_changed(position)
+    
+    def _on_player_track_finished(self):
+        """Forward player track finished to callback."""
+        if self.on_track_finished:
+            self.on_track_finished()
+    
+    def _on_player_track_loaded(self):
+        """Forward player track loaded to callback."""
+        if self.on_track_loaded:
+            self.on_track_loaded()
     
     def _stop_internal_player(self):
         """Stop internal GStreamer player if it's active."""
