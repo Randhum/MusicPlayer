@@ -148,20 +148,27 @@ class LibraryBrowser(Gtk.Box):
                 self.store.append(None, [track_name, 'track', track])
     
     def _populate_tree(self, parent_iter, folder_tree, folder_name):
-        """Recursively populate tree view from folder structure."""
-        # Add folder node
-        folder_iter = self.store.append(parent_iter, [folder_name, 'folder', None])
+        """Iteratively populate tree view from folder structure (non-recursive)."""
+        # Use a stack to avoid recursion
+        stack = [(parent_iter, folder_tree, folder_name)]
         
-        # Add tracks in this folder
-        if 'tracks' in folder_tree:
-            for track in folder_tree['tracks']:
-                track_name = track.title or Path(track.file_path).stem
-                self.store.append(folder_iter, [track_name, 'track', track])
-        
-        # Add subfolders
-        for key, value in sorted(folder_tree.items()):
-            if key != 'tracks':
-                self._populate_tree(folder_iter, value, key)
+        while stack:
+            current_parent, current_tree, current_name = stack.pop()
+            
+            # Add folder node
+            folder_iter = self.store.append(current_parent, [current_name, 'folder', None])
+            
+            # Add tracks in this folder
+            if 'tracks' in current_tree:
+                for track in current_tree['tracks']:
+                    track_name = track.title or Path(track.file_path).stem
+                    self.store.append(folder_iter, [track_name, 'track', track])
+            
+            # Add subfolders to stack (reverse order to maintain sorted appearance)
+            subfolders = [(folder_iter, value, key) 
+                         for key, value in sorted(current_tree.items(), reverse=True)
+                         if key != 'tracks']
+            stack.extend(subfolders)
     
     def _on_click_pressed(self, gesture, n_press, x, y):
         """Handle click press - store path for potential expand/collapse."""
@@ -230,16 +237,22 @@ class LibraryBrowser(Gtk.Box):
                     self.emit('album-selected', tracks)
     
     def _collect_tracks(self, model, parent_iter, tracks):
-        """Recursively collect all tracks from a folder."""
-        child = model.iter_children(parent_iter)
-        while child:
-            _, child_type, child_data = model.get(child, 0, 1, 2)
-            if child_type == 'track' and isinstance(child_data, TrackMetadata):
-                tracks.append(child_data)
-            elif child_type == 'folder':
-                # Recursively collect from subfolders
-                self._collect_tracks(model, child, tracks)
-            child = model.iter_next(child)
+        """Iteratively collect all tracks from a folder (non-recursive)."""
+        # Use a stack to avoid recursion
+        stack = [parent_iter]
+        
+        while stack:
+            current_iter = stack.pop()
+            child = model.iter_children(current_iter)
+            
+            while child:
+                _, child_type, child_data = model.get(child, 0, 1, 2)
+                if child_type == 'track' and isinstance(child_data, TrackMetadata):
+                    tracks.append(child_data)
+                elif child_type == 'folder':
+                    # Add to stack for later processing
+                    stack.append(child)
+                child = model.iter_next(child)
     
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
