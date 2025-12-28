@@ -17,6 +17,7 @@ from core.moc_controller import MocController
 from core.mpris2 import MPRIS2Manager
 from core.music_library import MusicLibrary
 from core.playlist_manager import PlaylistManager
+from core.playback_controller import PlaybackController
 from core.system_volume import SystemVolume
 from ui.components.bluetooth_panel import BluetoothPanel
 from ui.components.library_browser import LibraryBrowser
@@ -842,9 +843,6 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_pause(self):
         """Handle pause button click - route to appropriate player."""
-        # Cancel any ongoing slider interaction (prevents seek after pause)
-        self.player_controls.cancel_user_interaction()
-        
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
@@ -859,9 +857,6 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_stop(self):
         """Handle stop button click - route to appropriate player."""
-        # Cancel any ongoing slider interaction (prevents seek after stop)
-        self.player_controls.cancel_user_interaction()
-        
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
@@ -881,7 +876,6 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_next(self):
         """Handle next button click - route to appropriate player."""
-        self.player_controls.cancel_user_interaction()
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
@@ -900,7 +894,6 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_prev(self):
         """Handle previous button click - route to appropriate player."""
-        self.player_controls.cancel_user_interaction()
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
