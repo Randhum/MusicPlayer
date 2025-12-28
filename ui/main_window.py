@@ -97,8 +97,14 @@ class MainWindow(Gtk.ApplicationWindow):
         # Load saved layout
         GLib.idle_add(self.dock_manager.load_layout)
         
-        # Start library scan
-        self.library.scan_library(callback=self._on_library_scan_complete)
+        # Populate UI immediately with cached data (non-blocking)
+        GLib.idle_add(self._populate_library_browser)
+        
+        # Start library scan in background (will update UI incrementally)
+        self.library.scan_library(
+            callback=self._on_library_scan_complete,
+            progress_callback=self._on_library_scan_progress
+        )
         
         # Start position update timer
         GLib.timeout_add(POSITION_UPDATE_INTERVAL, self._update_position)
@@ -463,9 +469,15 @@ class MainWindow(Gtk.ApplicationWindow):
             self.bt_manager.cleanup()
         return False  # Allow close to proceed
     
+    def _on_library_scan_progress(self, current: int, total: int):
+        """Called periodically during library scan to update UI incrementally."""
+        # Update library browser every 50 tracks or when complete
+        if current % 50 == 0 or current == total:
+            GLib.idle_add(self._populate_library_browser)
+    
     def _on_library_scan_complete(self):
         """Called when library scan is complete."""
-        # Use idle_add to populate browser incrementally (non-blocking)
+        # Final update of library browser
         GLib.idle_add(self._populate_library_browser)
         GLib.idle_add(self._update_playlist_view)
         # Delay MOC operations to ensure server is ready
@@ -830,6 +842,9 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_pause(self):
         """Handle pause button click - route to appropriate player."""
+        # Cancel any ongoing slider interaction (prevents seek after pause)
+        self.player_controls.cancel_user_interaction()
+        
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
@@ -844,6 +859,9 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_stop(self):
         """Handle stop button click - route to appropriate player."""
+        # Cancel any ongoing slider interaction (prevents seek after stop)
+        self.player_controls.cancel_user_interaction()
+        
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
@@ -863,6 +881,7 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_next(self):
         """Handle next button click - route to appropriate player."""
+        self.player_controls.cancel_user_interaction()
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync
@@ -881,6 +900,7 @@ class MainWindow(Gtk.ApplicationWindow):
     
     def _on_prev(self):
         """Handle previous button click - route to appropriate player."""
+        self.player_controls.cancel_user_interaction()
         track = self.playlist_manager.get_current_track()
         if not self._is_video_track(track):
             # Use MOC for audio files - delegate to moc_sync

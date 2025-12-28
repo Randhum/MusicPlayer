@@ -5,7 +5,7 @@ import os
 import threading
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from core.config import get_config
 from core.logging import get_logger
@@ -59,15 +59,20 @@ class MusicLibrary:
         # Load existing index
         self._load_index()
     
-    def scan_library(self, callback: Optional[Callable] = None) -> None:
-        """Scan music directories asynchronously."""
+    def scan_library(self, callback: Optional[Callable] = None, progress_callback: Optional[Callable[[int, int], None]] = None) -> None:
+        """Scan music directories asynchronously.
+        
+        Args:
+            callback: Called when scan completes
+            progress_callback: Called periodically with (current_count, total_estimated) during scan
+        """
         if self._scanning:
             return
         
         def scan_thread():
             self._scanning = True
             try:
-                self._do_scan()
+                self._do_scan(progress_callback=progress_callback)
                 if callback:
                     callback()
             finally:
@@ -76,8 +81,12 @@ class MusicLibrary:
         thread = threading.Thread(target=scan_thread, daemon=True)
         thread.start()
     
-    def _do_scan(self):
-        """Perform the actual scanning."""
+    def _do_scan(self, progress_callback: Optional[Callable[[int, int], None]] = None):
+        """Perform the actual scanning.
+        
+        Args:
+            progress_callback: Optional callback for progress updates (current, total)
+        """
         config = get_config()
         music_dirs = config.music_directories
         # Fallback to defaults if none configured
@@ -92,18 +101,71 @@ class MusicLibrary:
         folder_structure = defaultdict(list)
         music_root = None
         
+        # Count files first for progress estimation (quick pass)
+        total_files = 0
+        for music_dir in music_dirs:
+            if music_dir.exists() and music_dir.is_dir():
+                for root, dirs, files in os.walk(music_dir):
+                    for file in files:
+                        file_path = Path(root) / file
+                        if file_path.suffix.lower() in AUDIO_EXTENSIONS:
+                            total_files += 1
+        
+        processed_files = 0
+        
         for music_dir in music_dirs:
             if music_dir.exists() and music_dir.is_dir():
                 if music_root is None:
                     music_root = music_dir
-                tracks.extend(self._scan_directory(music_dir, folder_structure, music_dir))
+                new_tracks = self._scan_directory(music_dir, folder_structure, music_dir)
+                tracks.extend(new_tracks)
+                processed_files += len(new_tracks)
+                
+                # Update progress
+                if progress_callback and total_files > 0:
+                    progress_callback(processed_files, total_files)
+                
+                # Update library incrementally (every 100 tracks)
+                if len(tracks) > 0 and len(tracks) % 100 == 0:
+                    with self._lock:
+                        # Merge new tracks
+                        existing_paths = {t.file_path for t in self.tracks}
+                        new_unique = [t for t in tracks if t.file_path not in existing_paths]
+                        self.tracks.extend(new_unique)
+                        
+                        # Merge folder structure
+                        for path, path_tracks in folder_structure.items():
+                            existing_in_path = {t.file_path for t in self.folder_structure.get(path, [])}
+                            new_in_path = [t for t in path_tracks if t.file_path not in existing_in_path]
+                            if new_in_path:
+                                if path not in self.folder_structure:
+                                    self.folder_structure[path] = []
+                                self.folder_structure[path].extend(new_in_path)
+                        
+                        # Rebuild index periodically
+                        self._rebuild_index()
         
         with self._lock:
-            self.tracks = tracks
-            self.folder_structure = folder_structure
+            # Final update - merge any remaining tracks
+            existing_paths = {t.file_path for t in self.tracks}
+            new_unique = [t for t in tracks if t.file_path not in existing_paths]
+            self.tracks.extend(new_unique)
+            
+            # Merge folder structure
+            for path, path_tracks in folder_structure.items():
+                existing_in_path = {t.file_path for t in self.folder_structure.get(path, [])}
+                new_in_path = [t for t in path_tracks if t.file_path not in existing_in_path]
+                if new_in_path:
+                    if path not in self.folder_structure:
+                        self.folder_structure[path] = []
+                    self.folder_structure[path].extend(new_in_path)
+            
             self._music_root = music_root
             self._rebuild_index()
             self._save_index()
+        
+        if progress_callback:
+            progress_callback(len(self.tracks), len(self.tracks))
     
     def _scan_directory(self, directory: Path, folder_structure: Dict[str, List[TrackMetadata]], music_root: Path) -> List[TrackMetadata]:
         """Recursively scan a directory for audio files."""
@@ -138,6 +200,7 @@ class MusicLibrary:
                                 if cached_metadata:
                                     tracks.append(cached_metadata)
                                     folder_structure[rel_path].append(cached_metadata)
+                            
                         except Exception as e:
                             logger.error("Error processing %s: %s", file_path, e, exc_info=True)
         except Exception as e:
@@ -361,8 +424,41 @@ class MusicLibrary:
                 if file_path in self._file_cache:
                     del self._file_cache[file_path]
             
+            # Rebuild folder structure from tracks
+            folder_structure = defaultdict(list)
+            music_root = None
+            
+            for track in tracks:
+                if track.file_path:
+                    track_path = Path(track.file_path)
+                    if track_path.exists():
+                        # Try to determine music root from track paths
+                        if music_root is None:
+                            # Find common parent directory
+                            for music_dir in [Path.home() / 'Music', Path.home() / 'Musik']:
+                                try:
+                                    track_path.relative_to(music_dir)
+                                    music_root = music_dir
+                                    break
+                                except ValueError:
+                                    pass
+                        
+                        # Get relative path for folder structure
+                        if music_root:
+                            try:
+                                rel_path = str(track_path.parent.relative_to(music_root))
+                            except ValueError:
+                                rel_path = str(track_path.parent)
+                        else:
+                            rel_path = str(track_path.parent)
+                        
+                        folder_structure[rel_path].append(track)
+            
             with self._lock:
                 self.tracks = tracks
+                self.folder_structure = folder_structure
+                if music_root:
+                    self._music_root = music_root
                 self._rebuild_index()
             
         except Exception as e:
