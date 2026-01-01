@@ -10,6 +10,7 @@ gi.require_version('GLib', '2.0')
 from gi.repository import Gtk, GObject, Gdk, GLib
 
 from core.metadata import TrackMetadata
+from core.playlist_manager import PlaylistManager
 
 
 class PlaylistView(Gtk.Box):
@@ -26,8 +27,15 @@ class PlaylistView(Gtk.Box):
         'refresh-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
     
-    def __init__(self):
+    def __init__(self, playlist_manager: PlaylistManager):
+        """
+        Initialize playlist view.
+        
+        Args:
+            playlist_manager: PlaylistManager instance for data operations
+        """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        self.playlist_manager = playlist_manager
         
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -159,26 +167,122 @@ class PlaylistView(Gtk.Box):
         self.tracks: List[TrackMetadata] = []
         self.current_index: int = -1
     
+    # ============================================================================
+    # Public API - State Reading (Wrapper methods for PlaylistManager)
+    # ============================================================================
+    
+    def get_playlist(self) -> List[TrackMetadata]:
+        """Get the current playlist from PlaylistManager."""
+        return self.playlist_manager.get_playlist()
+    
+    def get_current_index(self) -> int:
+        """Get the current track index from PlaylistManager."""
+        return self.playlist_manager.get_current_index()
+    
+    def get_current_track(self) -> Optional[TrackMetadata]:
+        """Get the currently playing track from PlaylistManager."""
+        return self.playlist_manager.get_current_track()
+    
+    def get_next_track(self) -> Optional[TrackMetadata]:
+        """Get the next track from PlaylistManager."""
+        return self.playlist_manager.get_next_track()
+    
+    def get_previous_track(self) -> Optional[TrackMetadata]:
+        """Get the previous track from PlaylistManager."""
+        return self.playlist_manager.get_previous_track()
+    
+    # ============================================================================
+    # Public API - State Updates
+    # ============================================================================
+    
     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
-        """Set the playlist tracks."""
+        """
+        Set the playlist tracks and update the view.
+        
+        This method updates both the internal display state and the visual representation.
+        Note: This does NOT update PlaylistManager - use playlist operation methods for that.
+        """
         self.tracks = tracks
         self.current_index = current_index
         self._update_view()
     
+    def set_current_index(self, index: int):
+        """
+        Set the currently playing track index.
+        
+        Updates both PlaylistManager and the UI view.
+        """
+        self.playlist_manager.set_current_index(index)
+        self.current_index = index
+        self._update_selection()
+    
+    # ============================================================================
+    # Public API - Playlist Operations (Wrapper methods that update both data and UI)
+    # ============================================================================
+    
+    def add_track(self, track: TrackMetadata, position: Optional[int] = None):
+        """Add a track to the playlist (updates data and UI)."""
+        self.playlist_manager.add_track(track, position=position)
+        self._sync_view_from_manager()
+    
+    def add_tracks(self, tracks: List[TrackMetadata]):
+        """Add multiple tracks to the playlist (updates data and UI)."""
+        self.playlist_manager.add_tracks(tracks)
+        self._sync_view_from_manager()
+    
+    def remove_track(self, index: int):
+        """Remove a track from the playlist (updates data and UI)."""
+        self.playlist_manager.remove_track(index)
+        self._sync_view_from_manager()
+    
+    def move_track(self, from_index: int, to_index: int):
+        """Move a track in the playlist (updates data and UI)."""
+        self.playlist_manager.move_track(from_index, to_index)
+        self._sync_view_from_manager()
+    
+    def clear(self):
+        """Clear the playlist (updates data and UI)."""
+        self.playlist_manager.clear()
+        self._sync_view_from_manager()
+    
+    def save_playlist(self, name: str) -> bool:
+        """Save the current playlist."""
+        return self.playlist_manager.save_playlist(name)
+    
+    def load_playlist(self, name: str) -> bool:
+        """Load a saved playlist (updates data and UI)."""
+        result = self.playlist_manager.load_playlist(name)
+        if result:
+            self._sync_view_from_manager()
+        return result
+    
+    def list_playlists(self) -> List[str]:
+        """List all saved playlists."""
+        return self.playlist_manager.list_playlists()
+    
+    # ============================================================================
+    # UI Configuration
+    # ============================================================================
+    
     def set_moc_mode(self, enabled: bool):
         """Show or hide the Refresh button based on whether MOC mode is active."""
         self.refresh_button.set_visible(enabled)
+    
+    # ============================================================================
+    # Internal Methods
+    # ============================================================================
+    
+    def _sync_view_from_manager(self):
+        """Sync the view from PlaylistManager's current state."""
+        self.tracks = self.playlist_manager.get_playlist()
+        self.current_index = self.playlist_manager.get_current_index()
+        self._update_view()
     
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""
         has_tracks = len(self.tracks) > 0
         self.clear_button.set_sensitive(has_tracks)
         self.save_button.set_sensitive(has_tracks)
-    
-    def set_current_index(self, index: int):
-        """Set the currently playing track index."""
-        self.current_index = index
-        self._update_selection()
     
     def _update_view(self):
         """Update the tree view with current tracks."""

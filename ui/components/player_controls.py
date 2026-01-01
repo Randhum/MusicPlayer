@@ -137,6 +137,28 @@ class PlayerControls(Gtk.Box):
         self._seeking = False
         self._duration = 0.0
         self._updating_volume = False  # Flag to prevent feedback loop
+        
+        # Callback for playing current track (set by MainWindow)
+        self._play_current_track_callback = None
+    
+    def set_play_current_track_callback(self, callback):
+        """
+        Set callback function to play current track.
+        
+        Args:
+            callback: Function to call when play_current_track() is invoked
+        """
+        self._play_current_track_callback = callback
+    
+    def play_current_track(self):
+        """
+        Play the current track from the playlist.
+        
+        This method should be called when a track is activated (e.g., from PlaylistView).
+        It delegates to the callback set by MainWindow.
+        """
+        if self._play_current_track_callback:
+            self._play_current_track_callback()
     
     def set_playing(self, playing: bool):
         """Update button states based on playing status."""
@@ -203,27 +225,38 @@ class PlayerControls(Gtk.Box):
     
     def _on_progress_changed(self, scale):
         """Handle progress bar value change during seeking."""
+        # During drag, emit seek signal on every value change for responsive seeking
+        # The seek handler will throttle or batch operations as needed
         if self._seeking and self._duration > 0:
             value = scale.get_value()
             position = (value / 100.0) * self._duration
+            # Update time label to show target position during drag
+            self.time_label.set_text(self._format_time(position))
+            # Emit seek signal for every change during drag
             self.emit('seek-changed', position)
     
     def _on_progress_press(self, gesture, n_press, x, y):
         """Handle progress bar press - start seeking."""
         self._seeking = True
-        # Calculate position from click location and seek immediately
+        # Calculate position from click location and update slider immediately
         if self._duration > 0:
             allocation = self.progress_scale.get_allocation()
             width = allocation.width
             if width > 0:
                 percentage = max(0.0, min(100.0, (x / width) * 100.0))
                 self.progress_scale.set_value(percentage)
+                # Emit seek signal immediately on click
+                position = (percentage / 100.0) * self._duration
+                self.emit('seek-changed', position)
     
     def _on_progress_release(self, gesture, n_press, x, y):
-        """Handle progress bar release - seeking state will be reset after seek completes."""
-        # Don't reset _seeking here - let the seek handler do it after the operation completes
-        # This prevents slider from jumping during the seek operation
-        pass
+        """Handle progress bar release - perform final seek operation."""
+        # On release, emit the final seek position
+        # The seek handler will reset _seeking after the operation completes
+        if self._seeking and self._duration > 0:
+            value = self.progress_scale.get_value()
+            position = (value / 100.0) * self._duration
+            self.emit('seek-changed', position)
     
     def _on_volume_changed(self, scale):
         """Handle volume slider change."""

@@ -8,7 +8,7 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
-from core.bluetooth_manager import BluetoothManager
+from core.bluetooth_manager import BluetoothManager, BluetoothDevice
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -654,6 +654,244 @@ class BluetoothSink:
                                     return
         except Exception as e:
             logger.error("Error setting up PulseAudio routing: %s", e, exc_info=True)
+    
+    def control_playback(self, action: str) -> bool:
+        """
+        Control BT playback (AVRCP commands + local control).
+        
+        Args:
+            action: 'play', 'pause', 'stop', 'next', 'prev'
+            
+        Returns:
+            True if command was sent successfully
+        """
+        if not self.connected_device:
+            return False
+        
+        # Send AVRCP command to source device
+        avrcp_success = self._send_avrcp_command(action)
+        
+        # Control local playback (pause/resume stream)
+        local_success = self._control_local_playback(action)
+        
+        return avrcp_success or local_success
+    
+    def _send_avrcp_command(self, action: str) -> bool:
+        """
+        Send AVRCP command via MediaControl1 or MediaPlayer1 interface.
+        
+        According to BlueZ specification:
+        - MediaControl1 is typically at the device path itself
+        - MediaPlayer1 may be at a sub-path under the device
+        - Both interfaces support Play, Pause, Stop, Next, Previous methods
+        
+        Args:
+            action: 'play', 'pause', 'stop', 'next', 'prev'
+            
+        Returns:
+            True if command was sent successfully, False otherwise
+        """
+        try:
+            if not self.connected_device:
+                logger.debug("No connected device for AVRCP command")
+                return False
+            
+            # Find MediaControl1 or MediaPlayer1 interface for connected device
+            manager = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+                'org.freedesktop.DBus.ObjectManager'
+            )
+            objects = manager.GetManagedObjects()
+            
+            device_path = self.connected_device.path
+            
+            # First, try MediaControl1 interface (preferred for AVRCP)
+            # MediaControl1 is typically at the device path itself
+            for path, interfaces in objects.items():
+                if self.MEDIA_CONTROL_INTERFACE in interfaces:
+                    # Verify this control belongs to our device
+                    # MediaControl1 path should match device path exactly or be a sub-path
+                    if path == device_path or path.startswith(device_path + '/'):
+                        try:
+                            # Get MediaControl1 interface
+                            control_obj = self.bt_manager.bus.get_object(
+                                self.bt_manager.BLUEZ_SERVICE, path
+                            )
+                            control = dbus.Interface(
+                                control_obj, self.MEDIA_CONTROL_INTERFACE
+                            )
+                            
+                            # Map action to AVRCP command method
+                            method_map = {
+                                'play': control.Play,
+                                'pause': control.Pause,
+                                'stop': control.Stop,
+                                'next': control.Next,
+                                'prev': control.Previous,
+                            }
+                            
+                            if action not in method_map:
+                                logger.warning("Unknown AVRCP action: %s", action)
+                                return False
+                            
+                            # Execute the AVRCP command
+                            method_map[action]()
+                            logger.debug("Sent AVRCP %s command to %s via MediaControl1", 
+                                       action, self.connected_device.name)
+                            return True
+                            
+                        except dbus.exceptions.DBusException as e:
+                            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                            # Don't log as error - device may not support AVRCP
+                            logger.debug("AVRCP command %s failed via MediaControl1: %s", action, error_name)
+                            # Continue to try MediaPlayer1 or local control
+                        except Exception as e:
+                            logger.debug("Error sending AVRCP command via MediaControl1: %s", e)
+                            # Continue to try MediaPlayer1 or local control
+            
+            # If MediaControl1 not found or failed, try MediaPlayer1 interface
+            # MediaPlayer1 may be at a different path structure
+            for path, interfaces in objects.items():
+                if self.MEDIA_PLAYER_INTERFACE in interfaces:
+                    # Verify this player belongs to our device
+                    # MediaPlayer1 path should be under the device path
+                    if path.startswith(device_path + '/'):
+                        try:
+                            player_obj = self.bt_manager.bus.get_object(
+                                self.bt_manager.BLUEZ_SERVICE, path
+                            )
+                            player = dbus.Interface(
+                                player_obj, self.MEDIA_PLAYER_INTERFACE
+                            )
+                            
+                            # Map action to MediaPlayer1 command method
+                            method_map = {
+                                'play': player.Play,
+                                'pause': player.Pause,
+                                'stop': player.Stop,
+                                'next': player.Next,
+                                'prev': player.Previous,
+                            }
+                            
+                            if action not in method_map:
+                                return False
+                            
+                            # Execute the command
+                            method_map[action]()
+                            logger.debug("Sent AVRCP %s command to %s via MediaPlayer1", 
+                                       action, self.connected_device.name)
+                            return True
+                            
+                        except dbus.exceptions.DBusException as e:
+                            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                            logger.debug("AVRCP command %s failed via MediaPlayer1: %s", action, error_name)
+                            continue
+                        except Exception as e:
+                            logger.debug("Error sending AVRCP command via MediaPlayer1: %s", e)
+                            continue
+            
+            logger.debug("No AVRCP interface found for device %s (path: %s)", 
+                        self.connected_device.name, device_path)
+            return False
+            
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            logger.error("D-Bus error sending AVRCP command: %s", error_name)
+            return False
+        except Exception as e:
+            logger.error("Error sending AVRCP command: %s", e, exc_info=True)
+            return False
+    
+    def _control_local_playback(self, action: str) -> bool:
+        """
+        Control local BT audio stream (pause/resume) via MediaTransport1 interface.
+        
+        According to BlueZ specification:
+        - MediaTransport1.Suspend() pauses the A2DP stream locally
+        - MediaTransport1.Resume() resumes the A2DP stream locally
+        - This does not affect the source device's playback state
+        
+        Args:
+            action: 'play' (resume), 'pause' (suspend), 'stop' (suspend)
+            
+        Returns:
+            True if command was executed successfully, False otherwise
+        """
+        try:
+            if not self.connected_device:
+                logger.debug("No connected device for local playback control")
+                return False
+            
+            # Only play/pause/stop have local transport equivalents
+            if action not in ('play', 'pause', 'stop'):
+                logger.debug("Action %s has no local transport equivalent", action)
+                return False
+            
+            # Find MediaTransport1 interface for connected device
+            manager = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+                'org.freedesktop.DBus.ObjectManager'
+            )
+            objects = manager.GetManagedObjects()
+            
+            device_path = self.connected_device.path
+            
+            # Look for MediaTransport1 interface for this device
+            for path, interfaces in objects.items():
+                if self.MEDIA_TRANSPORT_INTERFACE in interfaces:
+                    # Verify transport belongs to our device
+                    transport_props = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
+                    transport_device_path = str(transport_props.get('Device', ''))
+                    
+                    if transport_device_path == device_path:
+                        try:
+                            # Get MediaTransport1 interface
+                            transport_obj = self.bt_manager.bus.get_object(
+                                self.bt_manager.BLUEZ_SERVICE, path
+                            )
+                            transport = dbus.Interface(
+                                transport_obj, self.MEDIA_TRANSPORT_INTERFACE
+                            )
+                            
+                            # Control local playback based on action
+                            if action == 'play':
+                                # Resume A2DP transport
+                                transport.Resume()
+                                logger.debug("Resumed local A2DP transport for %s", self.connected_device.name)
+                            elif action in ('pause', 'stop'):
+                                # Suspend A2DP transport (both pause and stop suspend locally)
+                                transport.Suspend()
+                                logger.debug("Suspended local A2DP transport for %s (action: %s)", 
+                                           self.connected_device.name, action)
+                            
+                            return True
+                            
+                        except dbus.exceptions.DBusException as e:
+                            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                            # Check for specific BlueZ errors
+                            if 'org.bluez.Error.NotConnected' in error_name:
+                                logger.debug("Transport not connected for %s", self.connected_device.name)
+                            elif 'org.bluez.Error.Failed' in error_name:
+                                logger.debug("Transport control failed for %s: %s", 
+                                           self.connected_device.name, error_name)
+                            else:
+                                logger.debug("Local playback control failed: %s", error_name)
+                            return False
+                        except Exception as e:
+                            logger.error("Error controlling local playback: %s", e, exc_info=True)
+                            return False
+            
+            logger.debug("No MediaTransport1 found for device %s (path: %s)", 
+                        self.connected_device.name, device_path)
+            return False
+            
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            logger.error("D-Bus error controlling local playback: %s", error_name)
+            return False
+        except Exception as e:
+            logger.error("Error controlling local playback: %s", e, exc_info=True)
+            return False
     
     def get_status(self) -> dict:
         """Get current sink status."""

@@ -7,6 +7,16 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
+# Try to import watchdog for file system monitoring
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    Observer = None
+    FileSystemEventHandler = object
+
 from core.config import get_config
 from core.logging import get_logger
 from core.metadata import TrackMetadata

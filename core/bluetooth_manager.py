@@ -11,6 +11,7 @@ from gi.repository import Gtk, GLib
 
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 from core.bluetooth_advanced import BluetoothAdvanced
+from core.dbus_utils import dbus_retry, DBusConnectionMonitor
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -62,7 +63,13 @@ class BluetoothManager:
         Args:
             parent_window: GTK window for pairing dialogs (optional)
         """
-        DBusGMainLoop(set_as_default=True)
+        # DBusGMainLoop should be set once globally, but calling multiple times is safe
+        try:
+            DBusGMainLoop(set_as_default=True)
+        except RuntimeError:
+            # Already set, ignore
+            pass
+        
         self.bus = dbus.SystemBus()
         self.adapter_path: Optional[str] = None
         self.adapter_proxy: Optional[dbus.Interface] = None
@@ -110,8 +117,22 @@ class BluetoothManager:
         Set up the Bluetooth adapter.
         
         Finds and initializes the default Bluetooth adapter via D-Bus.
+        Handles gracefully if BlueZ service is not available.
         """
         try:
+            # Check if BlueZ service is available
+            try:
+                name_owner = self.bus.get_name_owner(self.BLUEZ_SERVICE)
+                if not name_owner:
+                    logger.warning("BlueZ service (org.bluez) is not available - Bluetooth features disabled")
+                    return
+            except dbus.exceptions.DBusException as e:
+                error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                    logger.warning("BlueZ service (org.bluez) is not available - Bluetooth features disabled")
+                    return
+                raise
+            
             # Get the default adapter
             manager = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, '/'),
@@ -127,6 +148,12 @@ class BluetoothManager:
             if self.adapter_path:
                 adapter_obj = self.bus.get_object(self.BLUEZ_SERVICE, self.adapter_path)
                 self.adapter_proxy = dbus.Interface(adapter_obj, self.ADAPTER_INTERFACE)
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                logger.warning("BlueZ service (org.bluez) is not available - Bluetooth features disabled")
+            else:
+                logger.error("D-Bus error setting up Bluetooth adapter: %s", error_name)
         except Exception as e:
             logger.error("Error setting up Bluetooth adapter: %s", e, exc_info=True)
             # Check connection health
@@ -136,6 +163,19 @@ class BluetoothManager:
     def _setup_agent(self):
         """Set up the Bluetooth Agent for handling pairing confirmations."""
         try:
+            # Check if BlueZ service is available
+            try:
+                name_owner = self.bus.get_name_owner(self.BLUEZ_SERVICE)
+                if not name_owner:
+                    logger.warning("BlueZ service not available - skipping agent setup")
+                    return
+            except dbus.exceptions.DBusException as e:
+                error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                    logger.warning("BlueZ service not available - skipping agent setup")
+                    return
+                raise
+            
             # Create UI handler for pairing dialogs first
             self.agent_ui = BluetoothAgentUI(self.parent_window)
             
@@ -155,6 +195,12 @@ class BluetoothManager:
             logger.info("Bluetooth pairing agent set up successfully")
             if not self.adapter_path:
                 logger.warning("Adapter path not yet available, agent registered with default path")
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                logger.warning("BlueZ service not available - skipping agent setup")
+            else:
+                logger.error("D-Bus error setting up Bluetooth agent: %s", error_name)
         except Exception as e:
             logger.error("Error setting up Bluetooth agent: %s", e, exc_info=True)
             logger.warning("Pairing confirmations may not work properly")
@@ -357,6 +403,19 @@ class BluetoothManager:
     def _refresh_devices(self):
         """Refresh the list of Bluetooth devices."""
         try:
+            # Check if BlueZ service is available
+            try:
+                name_owner = self.bus.get_name_owner(self.BLUEZ_SERVICE)
+                if not name_owner:
+                    logger.debug("BlueZ service not available - skipping device refresh")
+                    return
+            except dbus.exceptions.DBusException as e:
+                error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+                if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                    logger.debug("BlueZ service not available - skipping device refresh")
+                    return
+                raise
+            
             manager = dbus.Interface(
                 self.bus.get_object(self.BLUEZ_SERVICE, '/'),
                 'org.freedesktop.DBus.ObjectManager'
@@ -378,6 +437,12 @@ class BluetoothManager:
                     
                     if device.connected:
                         self.connected_device = device
+        except dbus.exceptions.DBusException as e:
+            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+            if 'NameHasNoOwner' in error_name or 'ServiceUnknown' in error_name:
+                logger.debug("BlueZ service not available - skipping device refresh")
+            else:
+                logger.error("D-Bus error refreshing Bluetooth devices: %s", error_name)
         except Exception as e:
             logger.error("Error refreshing Bluetooth devices: %s", e, exc_info=True)
     

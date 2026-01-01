@@ -1,0 +1,3370 @@
+diff --git a/core/bluetooth_sink.py b/core/bluetooth_sink.py
+index c68e795..2df641a 100644
+--- a/core/bluetooth_sink.py
++++ b/core/bluetooth_sink.py
+@@ -1,33 +1,20 @@
+-"""Bluetooth A2DP sink management for receiving audio from mobile devices."""
++"""Bluetooth A2DP sink management."""
+ 
+ import subprocess
++import time
+ from typing import Optional, Callable
+-
+ import dbus
+ import gi
+ gi.require_version('Gst', '1.0')
+-from gi.repository import Gst
+-
++gi.require_version('GLib', '2.0')
++from gi.repository import Gst, GLib
+ from core.bluetooth_manager import BluetoothManager, BluetoothDevice
+ from core.logging import get_logger
+ 
+ logger = get_logger(__name__)
+ 
+-
+ class BluetoothSink:
+-    """
+-    Manages Bluetooth A2DP sink functionality.
+-    
+-    When enabled, this allows the computer to act as a Bluetooth speaker,
+-    receiving audio from phones and other devices, and playing it through
+-    the local audio output (ALSA).
+-    """
+-    
+-    MEDIA_CONTROL_INTERFACE = 'org.bluez.MediaControl1'
+-    MEDIA_PLAYER_INTERFACE = 'org.bluez.MediaPlayer1'
+     MEDIA_TRANSPORT_INTERFACE = 'org.bluez.MediaTransport1'
+-    PROFILE_INTERFACE = 'org.bluez.Profile1'
+-    PROFILE_MANAGER_INTERFACE = 'org.bluez.ProfileManager1'
+     
+     def __init__(self, bt_manager: BluetoothManager):
+         self.bt_manager = bt_manager
+@@ -35,274 +22,90 @@ class BluetoothSink:
+         self.is_discoverable = False
+         self.connected_device: Optional[BluetoothDevice] = None
+         self.device_name = "Music Player Speaker"
+-        
+-        # GStreamer BlueZ plugin support
+         self.gst_bluez_available = False
+         self._check_gst_bluez_plugin()
+-        
+-        # Callbacks
+         self.on_sink_enabled: Optional[Callable] = None
+         self.on_sink_disabled: Optional[Callable] = None
+         self.on_device_connected: Optional[Callable] = None
+         self.on_device_disconnected: Optional[Callable] = None
+-        # Optional callbacks for audio stream events (not currently used in UI)
+-        # These are called internally when A2DP audio streams start/stop
+-        # Can be set for future features like notifications or status updates
+         self.on_audio_stream_started: Optional[Callable] = None
+         self.on_audio_stream_stopped: Optional[Callable] = None
+-        
+-        # Register sink mode checker callback with BT manager (avoids circular dependency)
+         if hasattr(self.bt_manager, 'register_sink_mode_checker'):
+             self.bt_manager.register_sink_mode_checker(lambda: self.is_sink_enabled)
+-        
+-        # Setup BT manager callbacks using callback chaining pattern
+-        # 
+-        # IMPORTANT: This pattern intercepts BluetoothManager callbacks to add sink-specific
+-        # behavior (audio routing) while preserving the original callbacks. This allows:
+-        # 1. BluetoothSink to configure audio routing when devices connect/disconnect
+-        # 2. Other components (like BluetoothPanel) to still receive connection events
+-        # 
+-        # NOTE: This pattern requires that BluetoothSink is initialized BEFORE any other
+-        # components that set callbacks on BluetoothManager. If callbacks are set after
+-        # BluetoothSink initialization, those components won't receive events.
+-        # 
+-        # Future improvement: Consider refactoring to an event emitter pattern for better
+-        # decoupling and support for multiple listeners.
+         self._original_device_connected = self.bt_manager.on_device_connected
+         self._original_device_disconnected = self.bt_manager.on_device_disconnected
+         self.bt_manager.on_device_connected = self._on_device_connected
+         self.bt_manager.on_device_disconnected = self._on_device_disconnected
+     
+     def _check_gst_bluez_plugin(self):
+-        """Check if GStreamer BlueZ plugin is available."""
+         try:
+-            # Initialize GStreamer if not already done
+             if not Gst.is_initialized():
+                 Gst.init(None)
+-            
+-            # Check for BlueZ plugin by inspecting registry
+-            # The plugin package is media-libs/gst-plugins-bluez
+-            # It provides elements for BlueZ A2DP integration
+-            registry = Gst.Registry.get()
+-            
+-            # Check for BlueZ-related plugins in the registry
+-            plugins_to_check = [
+-                'bluez',
+-                'gstbluez',
+-                'bluezaudio',
+-                'bluezsrc',
+-                'bluezsink',
+-            ]
+-            
+-            # Also check for factory names that might contain bluez
+-            factories = registry.get_feature_list(Gst.ElementFactory)
+-            for factory in factories:
+-                factory_name = factory.get_name().lower()
+-                if 'bluez' in factory_name:
++            for factory in Gst.Registry.get().get_feature_list(Gst.ElementFactory):
++                if 'bluez' in factory.get_name().lower():
+                     self.gst_bluez_available = True
+-                    logger.debug("GStreamer BlueZ plugin found: %s", factory.get_name())
+                     return
+-            
+-            # Try to create common BlueZ element names
+-            bluez_elements = [
+-                'bluezsrc',
+-                'bluezsink',
+-                'bluezaudiosrc',
+-                'bluezaudiosink',
+-                'bluetoothaudiosink',
+-                'bluetoothaudiosrc',
+-            ]
+-            
+-            for element_name in bluez_elements:
+-                element = Gst.ElementFactory.make(element_name, element_name)
+-                if element:
++            for name in ['bluezsrc', 'bluezsink', 'bluezaudiosrc', 'bluezaudiosink', 'bluetoothaudiosink', 'bluetoothaudiosrc']:
++                if Gst.ElementFactory.make(name, name):
+                     self.gst_bluez_available = True
+-                    logger.debug("GStreamer BlueZ plugin found: %s", element_name)
+                     return
+-            
+-            # If not found, check if the plugin is installed but not loaded
+-            # This is informational - the plugin might work via D-Bus integration
+-            logger.info("GStreamer BlueZ plugin elements not found in registry.")
+-            logger.info("Note: media-libs/gst-plugins-bluez may use D-Bus integration")
+-            logger.info("and may not expose traditional GStreamer elements.")
+-            logger.info("Bluetooth audio will work via PipeWire/PulseAudio if available.")
+-            self.gst_bluez_available = False
+-        except Exception as e:
+-            logger.error("Error checking GStreamer BlueZ plugin: %s", e, exc_info=True)
++        except Exception:
+             self.gst_bluez_available = False
+     
++    def _get_adapter_props(self):
++        """Helper: get adapter properties interface."""
++        if not self.bt_manager.adapter_path:
++            return None
++        return dbus.Interface(self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, self.bt_manager.adapter_path), self.bt_manager.PROPERTIES_INTERFACE)
++    
+     def enable_sink_mode(self) -> bool:
+-        """
+-        Enable Bluetooth A2DP sink mode.
+-        This configures the system to receive audio from Bluetooth devices
+-        and makes the computer discoverable as a Bluetooth speaker.
+-        
+-        According to Bluetooth A2DP specification:
+-        - Verifies A2DP sink profile is available
+-        - Sets adapter to discoverable and pairable
+-        - Configures audio routing for A2DP streams
+-        """
+-        # Check if BlueZ is available
+-        if not self.bt_manager.is_available():
+-            logger.warning("Cannot enable sink mode - BlueZ service not available")
+-            logger.info("Start the BlueZ service: rc-service bluetooth start")
++        if not self.bt_manager.is_available() or not self.bt_manager.set_powered(True):
+             return False
+-        
+         try:
+-            # Ensure Bluetooth is powered on
+-            if not self.bt_manager.is_powered():
+-                if not self.bt_manager.set_powered(True):
+-                    logger.error("Failed to power on Bluetooth adapter")
+-                    return False
+-            
+-            # Verify A2DP sink profile support
+-            if not self._verify_a2dp_sink_support():
+-                logger.warning("A2DP sink profile may not be fully supported")
+-                logger.warning("Audio streaming may not work properly")
+-            
+-            # Set device name
+             self._set_adapter_name(self.device_name)
+-            
+-            # Make adapter discoverable and pairable
+             self._set_discoverable(True)
+             self._set_pairable(True)
+-            
+-            # Configure audio subsystem
+-            # Prefer GStreamer BlueZ plugin if available
+             if self.gst_bluez_available:
+                 success = self._enable_gst_bluez_sink()
+             else:
+                 audio_system = self._detect_audio_system()
+-                
+-                if audio_system == 'pipewire':
+-                    success = self._enable_pipewire_sink()
+-                elif audio_system == 'pulseaudio':
+-                    success = self._enable_pulseaudio_sink()
+-                else:
+-                    logger.warning("No compatible audio system found. Trying basic setup.")
+-                    success = self._enable_basic_sink()
+-            
++                success = self._enable_pipewire_sink() if audio_system == 'pipewire' else self._enable_pulseaudio_sink() if audio_system == 'pulseaudio' else self._enable_basic_sink()
+             if success:
+                 self.is_sink_enabled = True
+                 if self.on_sink_enabled:
+                     self.on_sink_enabled()
+-            
+             return success
+-            
+         except Exception as e:
+             logger.error("Error enabling Bluetooth sink: %s", e, exc_info=True)
+             return False
+     
+     def disable_sink_mode(self) -> bool:
+-        """
+-        Disable Bluetooth A2DP sink mode.
+-        
+-        Properly terminates all A2DP connections and cleans up resources:
+-        - Disconnects all connected devices
+-        - Terminates A2DP transport connections
+-        - Stops being discoverable and pairable
+-        - Cleans up audio routing
+-        """
+         try:
+-            logger.info("Disabling Bluetooth sink mode...")
+-            
+-            # First, disconnect and terminate A2DP connections for all connected devices
+-            connected_devices = []
+-            if self.connected_device:
+-                connected_devices.append(self.connected_device)
+-            else:
+-                # Check for any connected devices
+-                for device in self.bt_manager.get_devices():
+-                    if device.connected:
+-                        connected_devices.append(device)
+-            
++            connected_devices = [self.connected_device] if self.connected_device else [d for d in self.bt_manager.get_devices() if d.connected]
+             for device in connected_devices:
+-                logger.info("Disconnecting device: %s (%s)", device.name, device.address)
+-                
+-                # Notify that audio stream is stopping
+                 if self.on_audio_stream_stopped:
+                     self.on_audio_stream_stopped()
+-                
+-                # Terminate A2DP transport if active (this closes the audio stream)
+                 self._terminate_a2dp_transport(device)
+-                
+-                # Small delay to allow transport to close
+-                import time
+                 time.sleep(0.3)
+-                
+-                # Disconnect the device
+                 self.bt_manager.disconnect_device(device.path)
+-                
+-                # Small delay to allow disconnection to complete
+                 time.sleep(0.2)
+-            
+-            # Stop being discoverable and pairable
+             self._set_discoverable(False)
+             self._set_pairable(False)
+-            
+-            # Update state flags BEFORE clearing connected device
+-            # This ensures _is_sink_mode_enabled() returns False immediately
+             self.is_sink_enabled = False
+             self.is_discoverable = False
+-            
+-            # Clear connected device reference
+             self.connected_device = None
+-            
+-            # After disabling, disconnect any devices that might still be connected
+-            # (in case they connected while we were disabling or after)
+-            remaining_connected = []
+-            for device in self.bt_manager.get_devices():
+-                if device.connected:
+-                    remaining_connected.append(device)
+-            
+-            for device in remaining_connected:
+-                logger.info("Disconnecting %s - sink mode is now disabled", device.name)
++            for device in [d for d in self.bt_manager.get_devices() if d.connected]:
+                 self.bt_manager.disconnect_device(device.path)
+-            
+-            # Notify callbacks
+             if self.on_sink_disabled:
+                 self.on_sink_disabled()
+-            
+-            logger.info("Bluetooth sink mode disabled successfully")
+             return True
+         except Exception as e:
+             logger.error("Error disabling Bluetooth sink: %s", e, exc_info=True)
+-            import traceback
+-            traceback.print_exc()
+             return False
+     
+-    def _verify_a2dp_sink_support(self) -> bool:
+-        """
+-        Verify that A2DP sink profile is available.
+-        
+-        According to Bluetooth A2DP specification, the sink profile must be
+-        registered with BlueZ for the adapter to accept A2DP connections.
+-        """
+-        try:
+-            # Check if A2DP sink profile is registered via D-Bus
+-            manager = dbus.Interface(
+-                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+-                'org.freedesktop.DBus.ObjectManager'
+-            )
+-            
+-            objects = manager.GetManagedObjects()
+-            for path, interfaces in objects.items():
+-                # Look for profile manager or A2DP-related interfaces
+-                if self.PROFILE_MANAGER_INTERFACE in interfaces:
+-                    return True
+-                # Check for A2DP sink in adapter properties
+-                if self.bt_manager.ADAPTER_INTERFACE in interfaces:
+-                    props = interfaces[self.bt_manager.ADAPTER_INTERFACE]
+-                    # A2DP support is typically indicated by available profiles
+-                    # We'll assume it's available if adapter exists
+-                    return True
+-            
+-            # If we can't verify, assume it might work (some systems don't expose this)
+-            return True
+-        except Exception as e:
+-            logger.warning("Could not verify A2DP sink support: %s", e)
+-            # Assume it might work anyway
+-            return True
++    def _get_object_manager(self):
++        """Helper: get D-Bus object manager."""
++        return dbus.Interface(self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'), 'org.freedesktop.DBus.ObjectManager')
+     
+     def _detect_audio_system(self) -> str:
+         """Detect which audio system is running."""
+@@ -325,336 +128,139 @@ class BluetoothSink:
+             return 'none'
+     
+     def _set_adapter_name(self, name: str):
+-        """Set the Bluetooth adapter's visible name."""
+-        try:
+-            if not self.bt_manager.adapter_path:
+-                return
+-            
+-            props = dbus.Interface(
+-                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, 
+-                                                self.bt_manager.adapter_path),
+-                self.bt_manager.PROPERTIES_INTERFACE
+-            )
+-            props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Alias', dbus.String(name))
+-            logger.info("Set Bluetooth name to: %s", name)
+-        except Exception as e:
+-            logger.error("Error setting adapter name: %s", e, exc_info=True)
++        props = self._get_adapter_props()
++        if props:
++            try:
++                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Alias', dbus.String(name))
++            except Exception:
++                pass
+     
+     def _set_discoverable(self, discoverable: bool, timeout: int = 0):
+-        """
+-        Set the Bluetooth adapter's discoverability.
+-        
+-        Args:
+-            discoverable: Whether to be discoverable
+-            timeout: Timeout in seconds (0 = indefinite)
+-        """
+-        try:
+-            if not self.bt_manager.adapter_path:
+-                return
+-            
+-            props = dbus.Interface(
+-                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, 
+-                                                self.bt_manager.adapter_path),
+-                self.bt_manager.PROPERTIES_INTERFACE
+-            )
+-            
+-            props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Discoverable', 
+-                     dbus.Boolean(discoverable))
+-            
+-            if discoverable and timeout == 0:
+-                # Set no timeout for indefinite discoverability
+-                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'DiscoverableTimeout',
+-                         dbus.UInt32(0))
+-            
+-            self.is_discoverable = discoverable
+-            logger.debug("Discoverable: %s", discoverable)
+-        except Exception as e:
+-            logger.error("Error setting discoverable: %s", e, exc_info=True)
++        props = self._get_adapter_props()
++        if props:
++            try:
++                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Discoverable', dbus.Boolean(discoverable))
++                if discoverable and timeout == 0:
++                    props.Set(self.bt_manager.ADAPTER_INTERFACE, 'DiscoverableTimeout', dbus.UInt32(0))
++                self.is_discoverable = discoverable
++            except Exception:
++                pass
+     
+     def _set_pairable(self, pairable: bool, timeout: int = 0):
+-        """Set the Bluetooth adapter's pairability."""
+-        try:
+-            if not self.bt_manager.adapter_path:
+-                return
+-            
+-            props = dbus.Interface(
+-                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, 
+-                                                self.bt_manager.adapter_path),
+-                self.bt_manager.PROPERTIES_INTERFACE
+-            )
+-            
+-            props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Pairable', 
+-                     dbus.Boolean(pairable))
+-            
+-            if pairable and timeout == 0:
+-                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'PairableTimeout',
+-                         dbus.UInt32(0))
+-            
+-            logger.debug("Pairable: %s", pairable)
+-        except Exception as e:
+-            logger.error("Error setting pairable: %s", e, exc_info=True)
++        props = self._get_adapter_props()
++        if props:
++            try:
++                props.Set(self.bt_manager.ADAPTER_INTERFACE, 'Pairable', dbus.Boolean(pairable))
++                if pairable and timeout == 0:
++                    props.Set(self.bt_manager.ADAPTER_INTERFACE, 'PairableTimeout', dbus.UInt32(0))
++            except Exception:
++                pass
+     
+     def _enable_pipewire_sink(self) -> bool:
+-        """Enable A2DP sink using PipeWire (modern setup)."""
+         try:
+-            # PipeWire with wireplumber handles A2DP automatically
+-            # Just ensure the Bluetooth module is running
+-            
+-            # Check if wireplumber is running
+-            result = subprocess.run(['pgrep', '-x', 'wireplumber'],
+-                                  capture_output=True, timeout=2)
+-            
+-            if result.returncode != 0:
+-                logger.info("wireplumber not running, trying to start...")
+-                subprocess.Popen(['wireplumber'], 
+-                               stdout=subprocess.DEVNULL, 
+-                               stderr=subprocess.DEVNULL)
+-            
+-            # PipeWire should now handle A2DP connections automatically
+-            logger.info("PipeWire sink mode enabled")
++            if subprocess.run(['pgrep', '-x', 'wireplumber'], capture_output=True, timeout=2).returncode != 0:
++                subprocess.Popen(['wireplumber'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+             return True
+-            
+-        except Exception as e:
+-            logger.error("Error enabling PipeWire sink: %s", e, exc_info=True)
++        except Exception:
+             return False
+     
+     def _enable_pulseaudio_sink(self) -> bool:
+-        """Enable A2DP sink using PulseAudio."""
+         try:
+-            # Load Bluetooth modules
+-            subprocess.run(['pactl', 'load-module', 'module-bluetooth-discover'],
+-                         capture_output=True, timeout=5)
+-            subprocess.run(['pactl', 'load-module', 'module-bluetooth-policy'],
+-                         capture_output=True, timeout=5)
+-            
+-            logger.info("PulseAudio sink mode enabled")
++            subprocess.run(['pactl', 'load-module', 'module-bluetooth-discover'], capture_output=True, timeout=5)
++            subprocess.run(['pactl', 'load-module', 'module-bluetooth-policy'], capture_output=True, timeout=5)
+             return True
+-            
+-        except Exception as e:
+-            logger.error("Error enabling PulseAudio sink: %s", e, exc_info=True)
++        except Exception:
+             return False
+     
+     def _enable_gst_bluez_sink(self) -> bool:
+-        """Enable A2DP sink using GStreamer BlueZ plugin."""
+-        try:
+-            logger.info("Using GStreamer BlueZ plugin for audio routing")
+-            # GStreamer BlueZ plugin integrates with BlueZ D-Bus automatically
+-            # When a device connects via A2DP, GStreamer can handle the audio stream
+-            # The actual audio routing will be configured when a device connects
+-            logger.info("GStreamer BlueZ sink mode enabled")
+-            return True
+-        except Exception as e:
+-            logger.error("Error enabling GStreamer BlueZ sink: %s", e, exc_info=True)
+-            return False
++        return True
+     
+     def _enable_basic_sink(self) -> bool:
+-        """Enable basic A2DP sink without sound server (direct ALSA)."""
+-        try:
+-            # This is a fallback - just ensure Bluetooth is ready
+-            # Note: Direct ALSA A2DP requires additional setup (bluez-alsa)
+-            logger.warning("No PipeWire, PulseAudio, or GStreamer BlueZ plugin.")
+-            logger.info("Install one of:")
+-            logger.info("  - media-plugins/gst-plugins-bluez (recommended)")
+-            logger.info("  - media-video/pipewire")
+-            logger.info("  - media-sound/pulseaudio")
+-            return True
+-        except Exception as e:
+-            logger.error("Error enabling basic sink: %s", e, exc_info=True)
+-            return False
++        return True
+     
+     def _on_device_connected(self, device: BluetoothDevice):
+-        """Handle Bluetooth device connection."""
+         self.connected_device = device
+-        
+-        # Call original callback if set
+         if self._original_device_connected:
+             self._original_device_connected(device)
+-        
+-        # Call our callback
+         if self.on_device_connected:
+             self.on_device_connected(device)
+-        
+-        # If sink mode is enabled, ensure audio is routed properly
+         if self.is_sink_enabled:
+             self._configure_audio_routing(device)
+     
+     def _on_device_disconnected(self, device: BluetoothDevice):
+-        """Handle Bluetooth device disconnection."""
+         if self.connected_device and self.connected_device.path == device.path:
+             self.connected_device = None
+-        
+-        # Call original callback if set
+         if self._original_device_disconnected:
+             self._original_device_disconnected(device)
+-        
+-        # Call our callback
+         if self.on_device_disconnected:
+             self.on_device_disconnected(device)
+-        
+         if self.on_audio_stream_stopped:
+             self.on_audio_stream_stopped()
+     
+     def _configure_audio_routing(self, device: BluetoothDevice):
+-        """Configure audio routing for the connected device."""
+         try:
+-            logger.info("Configuring audio routing for %s (%s)", device.name, device.address)
+-            
+-            # Check if A2DP transport is available
+-            transport_available = self._check_a2dp_transport(device)
+-            if not transport_available:
+-                logger.warning("A2DP transport not yet available for %s", device.name)
+-                logger.info("Audio routing will be configured when A2DP transport becomes active")
+-                # Try again after a short delay
+-                import gi
+-                gi.require_version('GLib', '2.0')
+-                from gi.repository import GLib
++            if not self._check_a2dp_transport(device):
+                 GLib.timeout_add(1000, lambda: self._retry_audio_routing(device))
+                 return
+-            
+-            # Prefer GStreamer BlueZ plugin if available
+             if self.gst_bluez_available:
+                 self._setup_gst_bluez_routing(device)
+-            else:
+-                audio_system = self._detect_audio_system()
+-                
+-                if audio_system == 'pipewire':
+-                    # PipeWire handles routing automatically
+-                    logger.info("Audio from %s will be routed via PipeWire", device.name)
+-                elif audio_system == 'pulseaudio':
+-                    # Find the Bluetooth source and loopback to ALSA sink
+-                    self._setup_pulseaudio_routing(device)
+-            
++            elif self._detect_audio_system() == 'pulseaudio':
++                self._setup_pulseaudio_routing(device)
+             if self.on_audio_stream_started:
+                 self.on_audio_stream_started()
+-                
+         except Exception as e:
+             logger.error("Error configuring audio routing: %s", e, exc_info=True)
+-            import traceback
+-            traceback.print_exc()
+     
+     def _check_a2dp_transport(self, device: BluetoothDevice) -> bool:
+-        """Check if A2DP transport is available for the device."""
+         try:
+-            manager = dbus.Interface(
+-                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+-                'org.freedesktop.DBus.ObjectManager'
+-            )
+-            objects = manager.GetManagedObjects()
+-            
+-            # Look for MediaTransport interface for this device
+-            for path, interfaces in objects.items():
++            for path, interfaces in self._get_object_manager().GetManagedObjects().items():
+                 if self.MEDIA_TRANSPORT_INTERFACE in interfaces:
+-                    # Check if this transport belongs to our device
+-                    transport_props = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
+-                    device_path = str(transport_props.get('Device', ''))
+-                    if device_path == device.path:
+-                        state = str(transport_props.get('State', ''))
+-                        logger.debug("A2DP transport found for %s: state=%s", device.name, state)
+-                        return state in ['idle', 'pending', 'active']
++                    tp = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
++                    if str(tp.get('Device', '')) == device.path:
++                        return str(tp.get('State', '')) in ['idle', 'pending', 'active']
+             return False
+-        except Exception as e:
+-            logger.error("Error checking A2DP transport: %s", e, exc_info=True)
++        except Exception:
+             return False
+     
+     def _terminate_a2dp_transport(self, device: BluetoothDevice):
+-        """
+-        Terminate A2DP transport connection for a device.
+-        
+-        This properly closes the A2DP audio stream before disconnecting the device.
+-        """
+         try:
+-            manager = dbus.Interface(
+-                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, '/'),
+-                'org.freedesktop.DBus.ObjectManager'
+-            )
+-            objects = manager.GetManagedObjects()
+-            
+-            # Find and terminate all MediaTransport interfaces for this device
+-            for path, interfaces in objects.items():
++            for path, interfaces in self._get_object_manager().GetManagedObjects().items():
+                 if self.MEDIA_TRANSPORT_INTERFACE in interfaces:
+-                    transport_props = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
+-                    device_path = str(transport_props.get('Device', ''))
+-                    
+-                    if device_path == device.path:
+-                        state = str(transport_props.get('State', ''))
+-                        logger.info("Terminating A2DP transport for %s (state: %s)", device.name, state)
+-                        
+-                        # Get the transport interface
+-                        transport_obj = self.bt_manager.bus.get_object(
+-                            self.bt_manager.BLUEZ_SERVICE, path
+-                        )
+-                        transport = dbus.Interface(
+-                            transport_obj, self.MEDIA_TRANSPORT_INTERFACE
+-                        )
+-                        
+-                        # Disconnect the transport
++                    tp = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
++                    if str(tp.get('Device', '')) == device.path:
+                         try:
+-                            transport.Disconnect()
+-                            logger.info("A2DP transport disconnected for %s", device.name)
++                            dbus.Interface(self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, path), self.MEDIA_TRANSPORT_INTERFACE).Disconnect()
+                         except dbus.exceptions.DBusException as e:
+-                            error_name = e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)
+-                            if 'org.bluez.Error.NotConnected' not in error_name:
+-                                logger.error("Error disconnecting A2DP transport: %s", e, exc_info=True)
+-                        except Exception as e:
+-                            logger.error("Error disconnecting A2DP transport: %s", e, exc_info=True)
+-                            
+-        except Exception as e:
+-            logger.error("Error terminating A2DP transport: %s", e, exc_info=True)
+-            import traceback
+-            traceback.print_exc()
++                            if 'NotConnected' not in (e.get_dbus_name() if hasattr(e, 'get_dbus_name') else str(e)):
++                                pass
++                        except Exception:
++                            pass
++        except Exception:
++            pass
+     
+     def _retry_audio_routing(self, device: BluetoothDevice) -> bool:
+-        """Retry audio routing configuration after delay."""
+         if device.connected:
+             self._configure_audio_routing(device)
+-        return False  # Remove from timeout
++        return False
+     
+     def _setup_gst_bluez_routing(self, device: BluetoothDevice):
+-        """Set up audio routing using GStreamer BlueZ plugin."""
+-        try:
+-            # GStreamer BlueZ plugin automatically handles A2DP connections
+-            # The plugin integrates with BlueZ D-Bus to receive audio streams
+-            logger.info("GStreamer BlueZ: Audio from %s (%s) will be handled automatically", device.name, device.address)
+-            logger.info("The BlueZ plugin integrates with the BlueZ D-Bus service for A2DP audio routing")
+-            
+-            # Note: The actual audio pipeline is managed by GStreamer/BlueZ
+-            # We don't need to manually create pipelines - BlueZ handles it via D-Bus
+-            # The audio will be available through the default audio sink
+-            
+-        except Exception as e:
+-            logger.error("Error setting up GStreamer BlueZ routing: %s", e, exc_info=True)
++        pass
+     
+     def _setup_pulseaudio_routing(self, device: BluetoothDevice):
+-        """Set up PulseAudio loopback from Bluetooth to ALSA."""
+         try:
+-            # Get Bluetooth source
+-            result = subprocess.run(['pactl', 'list', 'sources', 'short'],
+-                                  capture_output=True, text=True, timeout=5)
+-            
++            result = subprocess.run(['pactl', 'list', 'sources', 'short'], capture_output=True, text=True, timeout=5)
+             if result.returncode == 0:
+                 for line in result.stdout.strip().split('\n'):
+                     if 'bluez' in line.lower():
+                         source = line.split()[1]
+-                        
+-                        # Get ALSA sink
+-                        sink_result = subprocess.run(['pactl', 'list', 'sinks', 'short'],
+-                                                   capture_output=True, text=True, timeout=5)
+-                        
++                        sink_result = subprocess.run(['pactl', 'list', 'sinks', 'short'], capture_output=True, text=True, timeout=5)
+                         if sink_result.returncode == 0:
+                             for sink_line in sink_result.stdout.strip().split('\n'):
+                                 if 'alsa' in sink_line.lower():
+-                                    sink = sink_line.split()[1]
+-                                    
+-                                    # Create loopback
+-                                    subprocess.run([
+-                                        'pactl', 'load-module', 'module-loopback',
+-                                        f'source={source}', f'sink={sink}'
+-                                    ], capture_output=True, timeout=5)
+-                                    
+-                                    logger.debug("Created loopback: %s -> %s", source, sink)
++                                    subprocess.run(['pactl', 'load-module', 'module-loopback', f'source={source}', f'sink={sink_line.split()[1]}'], capture_output=True, timeout=5)
+                                     return
+-        except Exception as e:
+-            logger.error("Error setting up PulseAudio routing: %s", e, exc_info=True)
++        except Exception:
++            pass
+     
+     def get_status(self) -> dict:
+         """Get current sink status."""
+diff --git a/core/playback_controller.py b/core/playback_controller.py
+index 284ab38..e577132 100644
+--- a/core/playback_controller.py
++++ b/core/playback_controller.py
+@@ -7,14 +7,12 @@ from typing import TYPE_CHECKING
+ 
+ from core.audio_player import AudioPlayer, VIDEO_EXTENSIONS
+ from core.metadata import TrackMetadata
+-from core.moc_controller import MocController
+-from core.playlist_manager import PlaylistManager
+-from ui.components import player_controls
+-from ui.moc_sync import MocSyncHelper
+ from core.logging import get_logger
+ 
+ if TYPE_CHECKING:
+     from ui.components.player_controls import PlayerControls
++    from ui.components.playlist_view import PlaylistView
++    from ui.moc_sync import MocSyncHelper
+ 
+ logger = get_logger(__name__)
+ 
+@@ -33,11 +31,11 @@ class PlaybackController:
+     
+     def __init__(
+         self,
+-        playlist_manager: PlaylistManager,
+-        moc_sync: MocSyncHelper,
++        playlist_view: 'PlaylistView',
++        moc_sync: 'MocSyncHelper',
+         player: AudioPlayer,
+-        moc_controller: MocController,
+         player_controls: 'PlayerControls',
++        use_moc: bool,
+         is_video_track: Callable[[Optional[TrackMetadata]], bool],
+         normalize_path: Callable[[Optional[str]], Optional[str]],
+         on_track_changed: Optional[Callable[[TrackMetadata], None]] = None,
+@@ -47,21 +45,21 @@ class PlaybackController:
+         Initialize playback controller.
+         
+         Args:
+-            playlist_manager: Manages the playlist
+-            moc_sync: MOC synchronization helper
++            playlist_view: UI component that wraps PlaylistManager (exclusive playlist interface)
++            moc_sync: MOC synchronization helper (handles all MOC operations)
+             player: Internal GStreamer player
+-            moc_controller: MOC controller for status queries
+             player_controls: UI component for player controls
++            use_moc: Whether to use MOC for audio playback (set by main_window)
+             is_video_track: Function to check if track is video
+             normalize_path: Function to normalize file paths
+             on_track_changed: Callback when track changes
+             on_playback_state_changed: Callback when playback state changes
+         """
+-        self.playlist_manager = playlist_manager
++        self.playlist_view = playlist_view
+         self.moc_sync = moc_sync
+         self.player = player
+-        self.moc_controller = moc_controller
+         self.player_controls = player_controls
++        self.use_moc = use_moc
+         self._is_video_track = is_video_track
+         self._normalize_path = normalize_path
+         self.on_track_changed = on_track_changed
+@@ -90,19 +88,9 @@ class PlaybackController:
+         Returns:
+             True if the track is currently playing, False otherwise
+         """
+-        if not self._is_video_track(track):
+-            # Check if MOC is playing this track
+-            moc_status = self.moc_controller.get_status(force_refresh=False)
+-            if moc_status:
+-                moc_state = moc_status.get("state", "STOP")
+-                moc_file = moc_status.get("file_path")
+-                # Normalize paths for comparison
+-                if moc_file and track.file_path:
+-                    moc_file_abs = self._normalize_path(moc_file)
+-                    track_file_abs = self._normalize_path(track.file_path)
+-                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
+-                        return moc_state == "PLAY"
+-            return False
++        if not self._is_video_track(track) and self.use_moc:
++            # Check if MOC is playing this track - delegate to moc_sync
++            return self.moc_sync.is_track_playing(track, self._normalize_path)
+         else:
+             # Check if internal player is playing this track
+             if self.player.current_track and self.player.is_playing:
+@@ -122,19 +110,9 @@ class PlaybackController:
+         Returns:
+             True if the track is paused and can be resumed, False otherwise
+         """
+-        if not self._is_video_track(track):
+-            # Check if MOC is paused on this track
+-            moc_status = self.moc_controller.get_status(force_refresh=True)
+-            if moc_status:
+-                moc_state = moc_status.get("state", "STOP")
+-                moc_file = moc_status.get("file_path")
+-                # Normalize paths for comparison
+-                if moc_file and track.file_path:
+-                    moc_file_abs = self._normalize_path(moc_file)
+-                    track_file_abs = self._normalize_path(track.file_path)
+-                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
+-                        return moc_state == "PAUSE"
+-            return False
++        if not self._is_video_track(track) and self.use_moc:
++            # Check if MOC is paused on this track - delegate to moc_sync
++            return self.moc_sync.can_resume_track(track, self._normalize_path)
+         else:
+             # Check if internal player is paused on this track
+             if self.player.current_track:
+@@ -155,7 +133,7 @@ class PlaybackController:
+         if hasattr(self.player_controls, '_user_interacting'):
+             self.player_controls._user_interacting = False
+         
+-        if not self._is_video_track(track):
++        if not self._is_video_track(track) and self.use_moc:
+             # Resume MOC playback
+             self._stop_internal_player()
+             self.moc_sync.play()
+@@ -189,7 +167,7 @@ class PlaybackController:
+     
+     def play_current_track(self):
+         """Play the current track from playlist - use MOC for audio, internal player for video."""
+-        track = self.playlist_manager.get_current_track()
++        track = self.playlist_view.get_current_track()
+         if not track:
+             return
+         
+@@ -209,19 +187,19 @@ class PlaybackController:
+         # Reset position display when starting a new track
+         self.player_controls.update_progress(0.0, 0.0)
+         
+-        # Decide which player to use based on file type
+-        if not self._is_video_track(track):
++        # Decide which player to use based on file type and MOC availability
++        if not self._is_video_track(track) and self.use_moc:
+             # Use MOC for audio files - delegate to moc_sync
+             self._stop_internal_player()
+             self.moc_sync.play_track()
+         else:
+-            # Use internal player for video files
++            # Use internal player when MOC is not available
+             self.player.load_track(track)
+             self.player.play()
+             
+-            # Sync MOC playlist (but don't play in MOC for video files)
+-            self.moc_sync.sync_enabled = True
+-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
++            # Update MOC playlist state if MOC is available (but don't play in MOC for video files)
++            if self.use_moc:
++                self.moc_sync.update_moc_playlist(start_playback=False)
+         
+         # Update UI state immediately
+         self.player_controls.set_playing(True)
+@@ -240,7 +218,7 @@ class PlaybackController:
+             selected_index: Optional index of selected track to play
+         """
+         # Step 1: Check if we can resume a paused track
+-        current_track = self.playlist_manager.get_current_track()
++        current_track = self.playlist_view.get_current_track()
+         
+         if current_track:
+             # Check if this track is already playing - do nothing
+@@ -254,9 +232,9 @@ class PlaybackController:
+         
+         # Step 2: Check if there's a selected track in the playlist
+         if selected_index is not None and selected_index >= 0:
+-            playlist = self.playlist_manager.get_playlist()
++            playlist = self.playlist_view.get_playlist()
+             if 0 <= selected_index < len(playlist):
+-                self.playlist_manager.set_current_index(selected_index)
++                self.playlist_view.set_current_index(selected_index)
+                 self.play_current_track()
+                 return
+         
+@@ -270,12 +248,12 @@ class PlaybackController:
+         if hasattr(self.player_controls, '_user_interacting'):
+             self.player_controls._user_interacting = False
+         
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
+             # Use MOC for audio files
+             self.moc_sync.pause()
+         else:
+-            # Use internal player for video files
++            # Use internal player when MOC is not available
+             self.player.pause()
+         
+         # Update UI state immediately
+@@ -286,12 +264,12 @@ class PlaybackController:
+     
+     def stop(self):
+         """Handle stop action."""
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
+             # Use MOC for audio files
+             self.moc_sync.stop()
+         else:
+-            # Use internal player for video files
++            # Use internal player when MOC is not available
+             self.player.stop()
+         
+         # Update UI state immediately
+@@ -302,14 +280,14 @@ class PlaybackController:
+     
+     def next(self):
+         """Handle next track action."""
+-        track = self.playlist_manager.get_current_track()
+-        if self.moc_sync.use_moc and not self._is_video_track(track):
+-                # Use MOC for audio files
+-                # moc_sync.next_track() handles checking for next track and stopping if needed
+-                self.moc_sync.next_track()
++        track = self.playlist_view.get_current_track()
++        if self.use_moc and not self._is_video_track(track):
++            # Use MOC for audio files
++            # moc_sync.next_track() handles checking for next track and stopping if needed
++            self.moc_sync.next_track()
+         else:
+             # Get next track (this updates current_index internally)
+-            next_track = self.playlist_manager.get_next_track()
++            next_track = self.playlist_view.get_next_track()
+             if next_track:
+                 self.play_current_track()
+             else:
+@@ -319,30 +297,30 @@ class PlaybackController:
+     
+     def previous(self):
+         """Handle previous track action."""
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
+             # Use MOC for audio files
+             self.moc_sync.previous_track()
+         else:
+-            # Use internal player for video files
+-            prev_track = self.playlist_manager.get_previous_track()
++            # Use internal player when MOC is not available
++            prev_track = self.playlist_view.get_previous_track()
+             if prev_track:
+                 self.play_current_track()
+     
+     def seek(self, position: float):
+         """Handle seek action - UI already updated, just perform the seek."""
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
+             # Use MOC for audio files - force seek since this is user-initiated
+             self.moc_sync.seek(position, force=True)
+         else:
+-            # Use internal player for video files
++            # Use internal player when MOC is not available
+             self.player.seek(position)
+     
+     def get_current_duration(self) -> float:
+         """Get current track duration from the active player."""
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
+             # Use cached duration if available, otherwise get from MOC
+             return self.moc_sync.get_cached_duration()
+         else:
+@@ -351,8 +329,8 @@ class PlaybackController:
+     
+     def get_current_position(self) -> float:
+         """Get current track position from the active player."""
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
+             # Get position from MOC
+             return self.moc_sync.get_cached_position()
+         else:
+@@ -361,13 +339,10 @@ class PlaybackController:
+     
+     def is_playing(self) -> bool:
+         """Check if playback is currently active."""
+-        track = self.playlist_manager.get_current_track()
+-        if not self._is_video_track(track):
+-            # Check MOC state
+-            moc_status = self.moc_controller.get_status(force_refresh=False)
+-            if moc_status:
+-                return moc_status.get("state", "STOP") == "PLAY"
+-            return False
++        track = self.playlist_view.get_current_track()
++        if not self._is_video_track(track) and self.use_moc:
++            # Check MOC state - delegate to moc_sync
++            return self.moc_sync.is_playing()
+         else:
+             # Check internal player state
+             return self.player.is_playing
+@@ -412,10 +387,10 @@ class PlaybackController:
+     def play_random_track(self):
+         """Play a random track from the current playlist (for video files only)."""
+         import random
+-        tracks = self.playlist_manager.get_playlist()
++        tracks = self.playlist_view.get_playlist()
+         if not tracks:
+             return
+-        current_index = self.playlist_manager.get_current_index()
++        current_index = self.playlist_view.get_current_index()
+         if len(tracks) == 1:
+             new_index = 0
+         else:
+@@ -423,6 +398,6 @@ class PlaybackController:
+             if not indices:
+                 return
+             new_index = random.choice(indices)
+-        self.playlist_manager.set_current_index(new_index)
++        self.playlist_view.set_current_index(new_index)
+         self.play_current_track()
+ 
+diff --git a/core/playlist_manager.py b/core/playlist_manager.py
+index 6abdb8a..42b8b7a 100644
+--- a/core/playlist_manager.py
++++ b/core/playlist_manager.py
+@@ -31,20 +31,49 @@ class PlaylistManager:
+         # Load playlist from file on initialization
+         self.load_playlist_from_file()
+     
++    def _sync_to_file(self):
++        """Sync in-memory playlist state to file."""
++        data = {
++            'name': 'current',
++            'tracks': [track.to_dict() for track in self.current_playlist],
++            'current_index': self.current_index
++        }
++        self._write_playlist_file(data)
++    
+     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
+         """Add a track to the current playlist."""
+         if position is None:
+             self.current_playlist.append(track)
+         else:
++            # Validate and clamp position
++            if position < 0:
++                position = 0
++            if position > len(self.current_playlist):
++                position = len(self.current_playlist)
++            
+             self.current_playlist.insert(position, track)
++            # Adjust current index if needed (only if a track is currently selected)
++            if self.current_index >= 0 and position <= self.current_index:
++                self.current_index += 1
++        self._sync_to_file()
+     
+     def add_tracks(self, tracks: List[TrackMetadata], position: Optional[int] = None):
+         """Add multiple tracks to the current playlist."""
+         if position is None:
+             self.current_playlist.extend(tracks)
+         else:
++            # Validate and clamp position
++            if position < 0:
++                position = 0
++            if position > len(self.current_playlist):
++                position = len(self.current_playlist)
++            
+             for i, track in enumerate(tracks):
+                 self.current_playlist.insert(position + i, track)
++            # Adjust current index if needed (only if a track is currently selected)
++            if self.current_index >= 0 and position <= self.current_index:
++                self.current_index += len(tracks)
++        self._sync_to_file()
+     
+     def remove_track(self, index: int):
+         """Remove a track from the current playlist."""
+@@ -55,6 +84,7 @@ class PlaylistManager:
+                 self.current_index -= 1
+             elif index == self.current_index:
+                 self.current_index = -1
++            self._sync_to_file()
+     
+     def move_track(self, from_index: int, to_index: int):
+         """Move a track from one position to another."""
+@@ -68,11 +98,13 @@ class PlaylistManager:
+                 self.current_index -= 1
+             elif to_index <= self.current_index < from_index:
+                 self.current_index += 1
++            self._sync_to_file()
+     
+     def clear(self):
+         """Clear the current playlist."""
+         self.current_playlist.clear()
+         self.current_index = -1
++        self._sync_to_file()
+     
+     def get_current_track(self) -> Optional[TrackMetadata]:
+         """Get the currently playing track."""
+@@ -82,20 +114,26 @@ class PlaylistManager:
+     
+     def set_current_index(self, index: int):
+         """Set the current playing index."""
+-        data = self._read_playlist_file()
+-        tracks = data.get('tracks', [])
+-        if 0 <= index < len(tracks):
+-            self.current_index = index
+-            data['current_index'] = index
+-            self._write_playlist_file(data)
+-        elif 0 <= index < len(self.current_playlist):
+-            # Fallback to in-memory if file doesn't have tracks yet
++        # Use in-memory playlist as source of truth, but also check file
++        if 0 <= index < len(self.current_playlist):
+             self.current_index = index
++            self._sync_to_file()
++        else:
++            # Fallback: check file if in-memory is empty
++            data = self._read_playlist_file()
++            tracks = data.get('tracks', [])
++            if 0 <= index < len(tracks):
++                self.current_index = index
++                data['current_index'] = index
++                self._write_playlist_file(data)
++                # Reload from file to sync in-memory state
++                self.load_playlist_from_file()
+     
+     def get_next_track(self) -> Optional[TrackMetadata]:
+         """Get the next track in the playlist."""
+         if self.current_index < len(self.current_playlist) - 1:
+             self.current_index += 1
++            self._sync_to_file()
+             return self.current_playlist[self.current_index]
+         return None
+     
+@@ -103,6 +141,7 @@ class PlaylistManager:
+         """Get the previous track in the playlist."""
+         if self.current_index > 0:
+             self.current_index -= 1
++            self._sync_to_file()
+             return self.current_playlist[self.current_index]
+         return None
+     
+@@ -141,6 +180,9 @@ class PlaylistManager:
+             ]
+             self.current_index = -1
+             
++            # Sync to current playlist file
++            self._sync_to_file()
++            
+             return True
+         except Exception as e:
+             logger.error("Error loading playlist: %s", e, exc_info=True)
+@@ -171,12 +213,8 @@ class PlaylistManager:
+     
+     def get_current_index(self) -> int:
+         """Get the current playing index."""
+-        data = self._read_playlist_file()
+-        file_index = data.get('current_index', -1)
+-        # Use file index if available, otherwise fallback to in-memory
+-        if file_index != -1 or len(data.get('tracks', [])) > 0:
+-            self.current_index = file_index
+-            return file_index
++        # In-memory index is the source of truth - return it directly
++        # File sync happens on write operations, not on reads
+         return self.current_index
+     
+     # ------------------------------------------------------------------
+@@ -249,6 +287,15 @@ class PlaylistManager:
+         
+         self._write_playlist_file(data)
+         
++        # Update in-memory cache directly (don't reload from file to avoid interfering with MOC)
++        if index < 0:
++            index = 0
++        if index > len(self.current_playlist):
++            index = len(self.current_playlist)
++        self.current_playlist.insert(index, track)
++        if index <= self.current_index and self.current_index >= 0:
++            self.current_index += 1
++        
+         return True
+     
+     def remove_track_at_index_file(self, index: int) -> bool:
+@@ -281,6 +328,14 @@ class PlaylistManager:
+         
+         self._write_playlist_file(data)
+         
++        # Update in-memory cache directly (don't reload from file to avoid interfering with MOC)
++        if 0 <= index < len(self.current_playlist):
++            self.current_playlist.pop(index)
++            if index < self.current_index:
++                self.current_index -= 1
++            elif index == self.current_index:
++                self.current_index = -1
++        
+         return True
+     
+     def move_track_in_file(self, from_index: int, to_index: int) -> bool:
+@@ -320,6 +375,20 @@ class PlaylistManager:
+         
+         self._write_playlist_file(data)
+         
++        # Update in-memory cache directly (don't reload from file to avoid interfering with MOC)
++        if (0 <= from_index < len(self.current_playlist) and 
++            0 <= to_index < len(self.current_playlist) and 
++            from_index != to_index):
++            track = self.current_playlist.pop(from_index)
++            self.current_playlist.insert(to_index, track)
++            # Update current index
++            if self.current_index == from_index:
++                self.current_index = to_index
++            elif from_index < self.current_index <= to_index:
++                self.current_index -= 1
++            elif to_index <= self.current_index < from_index:
++                self.current_index += 1
++        
+         return True
+     
+     def get_track_at_index_file(self, index: int) -> Optional[TrackMetadata]:
+@@ -349,6 +418,10 @@ class PlaylistManager:
+         """Clear the playlist file."""
+         data = {'name': 'current', 'tracks': [], 'current_index': -1}
+         self._write_playlist_file(data)
++        
++        # Update in-memory cache directly (don't reload from file to avoid interfering with MOC)
++        self.current_playlist.clear()
++        self.current_index = -1
+     
+     def load_playlist_from_file(self) -> bool:
+         """Load the current playlist from file into memory cache."""
+diff --git a/ui/components/player_controls.py b/ui/components/player_controls.py
+index b46d178..a4327fd 100644
+--- a/ui/components/player_controls.py
++++ b/ui/components/player_controls.py
+@@ -1,10 +1,21 @@
+ """Player controls component - play/pause/next/prev/volume/progress."""
+ 
++from typing import Optional, Callable, TYPE_CHECKING
++
+ import gi
+ gi.require_version('Gtk', '4.0')
+ gi.require_version('GLib', '2.0')
+ from gi.repository import Gtk, GObject, GLib
+ 
++if TYPE_CHECKING:
++    from core.metadata import TrackMetadata
++    from core.playlist_manager import PlaylistManager
++    from core.audio_player import AudioPlayer
++    from ui.moc_sync import MocSyncHelper
++    from ui.components.playlist_view import PlaylistView
++
++from core.playback_controller import PlaybackController
++
+ 
+ class PlayerControls(Gtk.Box):
+     """Component for player controls (play/pause, volume, progress)."""
+@@ -23,6 +34,7 @@ class PlayerControls(Gtk.Box):
+     
+     def __init__(self):
+         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15)
++        self.playback_controller: Optional[PlaybackController] = None
+         # Touch-friendly margins
+         self.set_margin_top(15)
+         self.set_margin_bottom(15)
+@@ -313,4 +325,125 @@ class PlayerControls(Gtk.Box):
+         """Handle autonext toggle button."""
+         active = button.get_active()
+         self.emit('autonext-toggled', active)
++    
++    # PlaybackController initialization and callback management
++    def initialize_playback_controller(
++        self,
++        playlist_view: 'PlaylistView',
++        moc_sync: 'MocSyncHelper',
++        player: 'AudioPlayer',
++        use_moc: bool,
++        is_video_track: Callable[[Optional['TrackMetadata']], bool],
++        normalize_path: Callable[[Optional[str]], Optional[str]],
++        on_track_changed: Optional[Callable[['TrackMetadata'], None]] = None,
++        on_playback_state_changed: Optional[Callable[[bool], None]] = None,
++    ):
++        """
++        Initialize the playback controller with all required dependencies.
++        
++        Args:
++            playlist_view: UI component that wraps PlaylistManager (exclusive playlist interface)
++            moc_sync: MOC synchronization helper
++            player: Internal GStreamer player
++            use_moc: Whether to use MOC for audio playback
++            is_video_track: Function to check if track is video
++            normalize_path: Function to normalize file paths
++            on_track_changed: Callback when track changes
++            on_playback_state_changed: Callback when playback state changes
++        """
++        self.playback_controller = PlaybackController(
++            playlist_view,  # Use playlist_view instead of playlist_manager
++            moc_sync,
++            player,
++            self,  # Pass self as player_controls
++            use_moc,
++            is_video_track,
++            normalize_path,
++            on_track_changed=on_track_changed,
++            on_playback_state_changed=on_playback_state_changed
++        )
++    
++    def set_on_state_changed(self, callback: Optional[Callable[[bool], None]]):
++        """Set callback for playback state changes."""
++        if self.playback_controller:
++            self.playback_controller.on_state_changed = callback
++    
++    def set_on_position_changed(self, callback: Optional[Callable[[float], None]]):
++        """Set callback for playback position changes."""
++        if self.playback_controller:
++            self.playback_controller.on_position_changed = callback
++    
++    def set_on_track_finished(self, callback: Optional[Callable[[], None]]):
++        """Set callback for when track finishes."""
++        if self.playback_controller:
++            self.playback_controller.on_track_finished = callback
++    
++    def set_on_track_loaded(self, callback: Optional[Callable[[], None]]):
++        """Set callback for when track is loaded."""
++        if self.playback_controller:
++            self.playback_controller.on_track_loaded = callback
++    
++    # Wrapper methods for PlaybackController operations
++    def play(self, selected_index: Optional[int] = None):
++        """Play - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.play(selected_index)
++    
++    def pause(self):
++        """Pause - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.pause()
++    
++    def stop(self):
++        """Stop - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.stop()
++    
++    def next(self):
++        """Next track - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.next()
++    
++    def previous(self):
++        """Previous track - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.previous()
++    
++    def seek(self, position: float):
++        """Seek - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.seek(position)
++    
++    def play_current_track(self):
++        """Play current track - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.play_current_track()
++    
++    def play_random_track(self):
++        """Play random track - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.play_random_track()
++    
++    def get_current_position(self) -> float:
++        """Get current position - delegate to playback controller."""
++        if self.playback_controller:
++            return self.playback_controller.get_current_position()
++        return 0.0
++    
++    def get_current_duration(self) -> float:
++        """Get current duration - delegate to playback controller."""
++        if self.playback_controller:
++            return self.playback_controller.get_current_duration()
++        return 0.0
++    
++    def is_playing(self) -> bool:
++        """Check if playing - delegate to playback controller."""
++        if self.playback_controller:
++            return self.playback_controller.is_playing()
++        return False
++    
++    def cleanup(self):
++        """Cleanup - delegate to playback controller."""
++        if self.playback_controller:
++            self.playback_controller.cleanup()
+ 
+diff --git a/ui/components/playlist_view.py b/ui/components/playlist_view.py
+index b2d5314..e7b72da 100644
+--- a/ui/components/playlist_view.py
++++ b/ui/components/playlist_view.py
+@@ -1,4 +1,36 @@
+-"""Playlist view component - shows current queue/playlist."""
++"""
++Playlist View Component - Queue Display and Management
++
++This module implements the playlist view component, which displays and manages the current
++playlist/queue in the music player application. It follows the MVC (Model-View-Controller)
++pattern where:
++
++- **Model**: `PlaylistManager` (in `core/playlist_manager.py`) - manages playlist data and persistence
++- **View**: This component - displays the playlist and handles user interactions
++- **Controller**: `MainWindow` (in `ui/main_window.py`) - connects view events to application logic
++
++Architecture:
++    The playlist view acts as a bridge between the UI and the playlist manager:
++    
++    1. **State Management**: The playlist manager maintains the source of truth (JSON file + in-memory cache)
++    2. **UI Updates**: This view reflects the current state and updates when state changes
++    3. **MOC Integration**: When MOC is enabled, playlist changes are synced to MOC's M3U file
++    4. **Direct Operations**: Buttons directly call methods instead of emitting signals (cleaner code)
++
++Data Flow:
++    User Action → PlaylistView Method → PlaylistManager → JSON File
++                                          ↓
++                                    MOC Sync (if enabled)
++                                          ↓
++                                    MOC M3U File
++
++Key Features:
++    - Touch-friendly UI with larger buttons and padding
++    - Context menu for track operations (right-click or long-press)
++    - Direct button handlers (no unnecessary signal emissions)
++    - State-based synchronization (no complex sync flags)
++    - JSON playlist as source of truth
++"""
+ 
+ from pathlib import Path
+ from typing import Optional, List
+@@ -10,10 +42,28 @@ gi.require_version('GLib', '2.0')
+ from gi.repository import Gtk, GObject, Gdk, GLib
+ 
+ from core.metadata import TrackMetadata
++from core.playlist_manager import PlaylistManager
+ 
+ 
+ class PlaylistView(Gtk.Box):
+-    """Component for displaying the current playlist/queue."""
++    """
++    Playlist view component - displays and manages the current playlist/queue.
++    
++    This component provides:
++    - Visual display of the current playlist with track information
++    - User interactions (double-click to play, context menu for operations)
++    - Playlist management operations (add, remove, move, clear)
++    - Integration with MOC for external player synchronization
++    
++    Signals:
++        'track-activated' (int): Emitted when a track is activated (double-clicked)
++        'remove-track' (int): Emitted when a track should be removed
++        'move-track-up' (int): Emitted when a track should be moved up
++        'move-track-down' (int): Emitted when a track should be moved down
++        'clear-playlist' (): Emitted when playlist should be cleared
++        'save-playlist' (): Emitted when playlist should be saved
++        'load-playlist' (): Emitted when a playlist should be loaded
++    """
+     
+     __gsignals__ = {
+         'track-activated': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+@@ -23,57 +73,93 @@ class PlaylistView(Gtk.Box):
+         'clear-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+         'save-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+         'load-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+-        'refresh-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+     }
+     
+-    def __init__(self):
++    # ============================================================================
++    # Initialization and UI Setup
++    # ============================================================================
++    
++    def __init__(self, playlist_manager: PlaylistManager, player_controls=None, moc_sync=None):
++        """
++        Initialize the playlist view component.
++        
++        Args:
++            playlist_manager: The playlist manager instance (Model layer)
++            player_controls: Optional reference to player controls for triggering playback
++            moc_sync: Optional reference to MOC sync helper for external player integration
++        """
+         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
++        self.playlist_manager = playlist_manager
++        self.player_controls = player_controls
++        self.moc_sync = moc_sync
++        
++        # Internal state
++        self.tracks: List[TrackMetadata] = []
++        self.current_index: int = -1
++        self.context_menu = None
++        self.selected_index = -1
++        self._menu_showing = False
+         
+-        # Header with action buttons
++        # Build UI
++        self._create_header()
++        self._create_playlist_view()
++        
++        # Set initial state
++        self.set_vexpand(True)
++    
++    def _create_header(self):
++        """Create the header bar with action buttons."""
+         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+         header_box.set_margin_start(5)
+         header_box.set_margin_end(5)
+         header_box.set_margin_top(5)
+         header_box.set_margin_bottom(5)
+         
++        # Title label
+         header_label = Gtk.Label(label="Playlist")
+         header_label.add_css_class("title-2")
+         header_label.set_halign(Gtk.Align.START)
+         header_label.set_hexpand(True)
+         header_box.append(header_label)
+         
+-        # Action buttons
+-        self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+-        self.refresh_button.set_tooltip_text("Refresh from MOC")
+-        self.refresh_button.add_css_class("flat")
+-        self.refresh_button.set_size_request(36, 36)  # Touch-friendly size
+-        self.refresh_button.connect('clicked', lambda w: self.emit('refresh-playlist'))
++        # Action buttons (direct function calls, not signals)
++        self.refresh_button = self._create_button(
++            "view-refresh-symbolic", "Refresh from JSON",
++            self._on_refresh_clicked
++        )
+         header_box.append(self.refresh_button)
+         
+-        self.clear_button = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
+-        self.clear_button.set_tooltip_text("Clear Playlist")
+-        self.clear_button.add_css_class("flat")
+-        self.clear_button.set_size_request(36, 36)  # Touch-friendly size
+-        self.clear_button.connect('clicked', lambda w: self.emit('clear-playlist'))
++        self.clear_button = self._create_button(
++            "edit-clear-symbolic", "Clear Playlist",
++            self._on_clear_clicked
++        )
+         header_box.append(self.clear_button)
+         
+-        self.save_button = Gtk.Button.new_from_icon_name("document-save-symbolic")
+-        self.save_button.set_tooltip_text("Save Playlist")
+-        self.save_button.add_css_class("flat")
+-        self.save_button.set_size_request(36, 36)  # Touch-friendly size
+-        self.save_button.connect('clicked', lambda w: self.emit('save-playlist'))
++        self.save_button = self._create_button(
++            "document-save-symbolic", "Save Playlist",
++            self._on_save_clicked
++        )
+         header_box.append(self.save_button)
+         
+-        self.load_button = Gtk.Button.new_from_icon_name("document-open-symbolic")
+-        self.load_button.set_tooltip_text("Load Saved Playlist")
+-        self.load_button.add_css_class("flat")
+-        self.load_button.set_size_request(36, 36)  # Touch-friendly size
+-        self.load_button.connect('clicked', lambda w: self.emit('load-playlist'))
++        self.load_button = self._create_button(
++            "document-open-symbolic", "Load Saved Playlist",
++            self._on_load_clicked
++        )
+         header_box.append(self.load_button)
+         
+         self.append(header_box)
+-        
+-        # Scrolled window
++    
++    def _create_button(self, icon_name: str, tooltip: str, handler) -> Gtk.Button:
++        """Helper: create a standardized action button."""
++        button = Gtk.Button.new_from_icon_name(icon_name)
++        button.set_tooltip_text(tooltip)
++        button.add_css_class("flat")
++        button.set_size_request(36, 36)  # Touch-friendly size
++        button.connect('clicked', handler)
++        return button
++    
++    def _create_playlist_view(self):
++        """Create the main playlist tree view with columns and gestures."""
+         scrolled = Gtk.ScrolledWindow()
+         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+         
+@@ -83,95 +169,338 @@ class PlaylistView(Gtk.Box):
+         # Tree view
+         self.tree_view = Gtk.TreeView(model=self.store)
+         self.tree_view.set_headers_visible(True)
+-        self.tree_view.connect('row-activated', self._on_row_activated)
+-        # Add CSS class for touch-friendly styling
+         self.tree_view.add_css_class("playlist-tree")
++        self.tree_view.connect('row-activated', self._on_row_activated)
++        
++        # Add interaction gestures
++        self._add_gestures()
+         
+-        # Add right-click gesture for context menu
++        # Create columns
++        self._create_columns()
++        
++        scrolled.set_child(self.tree_view)
++        scrolled.set_vexpand(True)
++        self.append(scrolled)
++    
++    def _add_gestures(self):
++        """Add right-click and long-press gestures for context menu."""
++        # Right-click gesture
+         right_click_gesture = Gtk.GestureClick()
+         right_click_gesture.set_button(3)  # Right mouse button
+         right_click_gesture.connect('pressed', self._on_right_click)
+         self.tree_view.add_controller(right_click_gesture)
+         
+-        # Add long-press gesture for context menu (touch-friendly)
++        # Long-press gesture (touch-friendly)
+         long_press_gesture = Gtk.GestureLongPress()
+         long_press_gesture.set_touch_only(True)  # Only for touch, not mouse
+         long_press_gesture.connect('pressed', self._on_long_press)
+         self.tree_view.add_controller(long_press_gesture)
+-        
+-        # Context menu
+-        self.context_menu = None
+-        self.selected_index = -1
+-        self._menu_showing = False  # Flag to prevent multiple menus
+-        self.set_vexpand(True)  # Expand to fill available vertical space
+-        
+-        # Columns with touch-friendly padding
++    
++    def _create_columns(self):
++        """Create tree view columns with touch-friendly padding."""
++        # Index column
+         col_index = Gtk.TreeViewColumn("#")
+         renderer_index = Gtk.CellRendererText()
+-        renderer_index.set_padding(8, 12)  # Add padding for touch-friendliness
++        renderer_index.set_padding(8, 12)
+         col_index.pack_start(renderer_index, True)
+         col_index.add_attribute(renderer_index, "text", 0)
+         col_index.set_min_width(50)
+         col_index.set_resizable(False)
+         self.tree_view.append_column(col_index)
+         
++        # Title column
+         col_title = Gtk.TreeViewColumn("Title")
+         renderer_title = Gtk.CellRendererText()
+-        renderer_title.set_padding(8, 12)  # Add padding for touch-friendliness
++        renderer_title.set_padding(8, 12)
+         col_title.pack_start(renderer_title, True)
+         col_title.add_attribute(renderer_title, "text", 1)
+         col_title.set_expand(True)
+         col_title.set_resizable(True)
+         self.tree_view.append_column(col_title)
+         
++        # Artist column
+         col_artist = Gtk.TreeViewColumn("Artist")
+         renderer_artist = Gtk.CellRendererText()
+-        renderer_artist.set_padding(8, 12)  # Add padding for touch-friendliness
++        renderer_artist.set_padding(8, 12)
+         col_artist.pack_start(renderer_artist, True)
+         col_artist.add_attribute(renderer_artist, "text", 2)
+         col_artist.set_expand(True)
+         col_artist.set_resizable(True)
+         self.tree_view.append_column(col_artist)
+         
++        # Duration column
+         col_duration = Gtk.TreeViewColumn("Duration")
+         renderer_duration = Gtk.CellRendererText()
+-        renderer_duration.set_padding(8, 12)  # Add padding for touch-friendliness
++        renderer_duration.set_padding(8, 12)
+         col_duration.pack_start(renderer_duration, True)
+         col_duration.add_attribute(renderer_duration, "text", 3)
+         col_duration.set_min_width(80)
+         col_duration.set_resizable(False)
+         self.tree_view.append_column(col_duration)
+-        
+-        scrolled.set_child(self.tree_view)
+-        scrolled.set_vexpand(True)
+-        self.append(scrolled)
+-        
+-        self.tracks: List[TrackMetadata] = []
+-        self.current_index: int = -1
++    
++    # ============================================================================
++    # Public API - Playlist State Management
++    # ============================================================================
+     
+     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
+-        """Set the playlist tracks."""
++        """
++        Set the playlist tracks and update the view.
++        
++        This is the primary method for updating the playlist display. It updates
++        both the internal state and the visual representation.
++        
++        Args:
++            tracks: List of track metadata objects
++            current_index: Index of the currently playing track (-1 if none)
++        """
+         self.tracks = tracks
+         self.current_index = current_index
+         self._update_view()
+     
+-    def set_moc_mode(self, enabled: bool):
+-        """Show or hide the Refresh button based on whether MOC mode is active."""
+-        self.refresh_button.set_visible(enabled)
++    def get_playlist(self) -> List[TrackMetadata]:
++        """
++        Get the current playlist from the manager's in-memory cache.
++        
++        Returns:
++            Copy of the current playlist (no file I/O)
++        """
++        return self.playlist_manager.current_playlist.copy()
+     
+-    def _update_button_states(self):
+-        """Update the state of action buttons based on playlist content."""
+-        has_tracks = len(self.tracks) > 0
+-        self.clear_button.set_sensitive(has_tracks)
+-        self.save_button.set_sensitive(has_tracks)
++    def get_current_index(self) -> int:
++        """
++        Get the current track index from the manager's in-memory cache.
++        
++        Returns:
++            Current track index (-1 if no track selected)
++        """
++        return self.playlist_manager.current_index
++    
++    def get_current_track(self) -> Optional[TrackMetadata]:
++        """
++        Get the currently playing track.
++        
++        Returns:
++            TrackMetadata object or None if no track is selected
++        """
++        if 0 <= self.playlist_manager.current_index < len(self.playlist_manager.current_playlist):
++            return self.playlist_manager.current_playlist[self.playlist_manager.current_index]
++        return None
++    
++    def get_next_track(self) -> Optional[TrackMetadata]:
++        """Get the next track in the playlist."""
++        return self.playlist_manager.get_next_track()
++    
++    def get_previous_track(self) -> Optional[TrackMetadata]:
++        """Get the previous track in the playlist."""
++        return self.playlist_manager.get_previous_track()
+     
+     def set_current_index(self, index: int):
+-        """Set the currently playing track index."""
+-        self.current_index = index
+-        self._update_selection()
++        """
++        Set the current track index and update the view.
++        
++        Args:
++            index: The index to set as current
++        """
++        self.playlist_manager.set_current_index(index)
++        self.set_playlist(
++            self.playlist_manager.current_playlist.copy(),
++            self.playlist_manager.current_index
++        )
++    
++    # ============================================================================
++    # Public API - Playlist Operations
++    # ============================================================================
++    
++    def add_track(self, track: TrackMetadata, position: Optional[int] = None):
++        """
++        Add a track to the playlist.
++        
++        This method:
++        1. Updates the playlist manager (which persists to JSON)
++        2. Updates the UI view
++        3. Syncs to MOC if enabled
++        
++        Args:
++            track: Track metadata to add
++            position: Optional position to insert at (appends if None)
++        """
++        self.playlist_manager.add_track(track, position=position)
++        self.set_playlist(
++            self.playlist_manager.current_playlist.copy(),
++            self.playlist_manager.current_index
++        )
++        # Sync to MOC if enabled
++        if self.moc_sync and self.moc_sync.use_moc:
++            self.moc_sync.update_moc_playlist(start_playback=False)
++    
++    def add_tracks(self, tracks: List[TrackMetadata]):
++        """
++        Add multiple tracks to the playlist.
++        
++        Args:
++            tracks: List of track metadata objects to add
++        """
++        self.playlist_manager.add_tracks(tracks)
++        self.set_playlist(
++            self.playlist_manager.current_playlist.copy(),
++            self.playlist_manager.current_index
++        )
++        # Sync to MOC if enabled
++        if self.moc_sync and self.moc_sync.use_moc:
++            self.moc_sync.update_moc_playlist(start_playback=False)
++    
++    def remove_track(self, index: int):
++        """
++        Remove a track from the playlist.
++        
++        Args:
++            index: Index of the track to remove
++        """
++        self.playlist_manager.remove_track(index)
++        self.set_playlist(
++            self.playlist_manager.current_playlist.copy(),
++            self.playlist_manager.current_index
++        )
++        # Sync to MOC if enabled
++        if self.moc_sync and self.moc_sync.use_moc:
++            self.moc_sync.update_moc_playlist(start_playback=False)
++    
++    def move_track(self, from_index: int, to_index: int):
++        """
++        Move a track from one position to another.
++        
++        Args:
++            from_index: Current position of the track
++            to_index: New position for the track
++        """
++        self.playlist_manager.move_track(from_index, to_index)
++        self.set_playlist(
++            self.playlist_manager.current_playlist.copy(),
++            self.playlist_manager.current_index
++        )
++        # Sync to MOC if enabled
++        if self.moc_sync and self.moc_sync.use_moc:
++            self.moc_sync.update_moc_playlist(start_playback=False)
++    
++    def clear(self):
++        """
++        Clear the entire playlist.
++        
++        This method:
++        1. Clears the playlist manager (which persists to JSON)
++        2. Updates the UI view
++        3. Stops MOC playback and syncs empty state if MOC is enabled
++        """
++        self.playlist_manager.clear()
++        self.set_playlist([], -1)
++        # Sync to MOC if enabled
++        if self.moc_sync and self.moc_sync.use_moc:
++            self.moc_sync.stop()
++            self.moc_sync.moc_controller.set_playlist([], -1, start_playback=False)
++    
++    def save_playlist(self, name: str) -> bool:
++        """
++        Save the current playlist with a given name.
++        
++        Args:
++            name: Name for the saved playlist
++            
++        Returns:
++            True if saved successfully, False otherwise
++        """
++        return self.playlist_manager.save_playlist(name)
++    
++    def load_playlist(self, name: str) -> bool:
++        """
++        Load a saved playlist by name.
++        
++        Args:
++            name: Name of the playlist to load
++            
++        Returns:
++            True if loaded successfully, False otherwise
++        """
++        result = self.playlist_manager.load_playlist(name)
++        if result:
++            self.set_playlist(
++                self.playlist_manager.current_playlist.copy(),
++                self.playlist_manager.current_index
++            )
++        return result
++    
++    def list_playlists(self) -> List[str]:
++        """
++        List all saved playlist names.
++        
++        Returns:
++            List of playlist names
++        """
++        return self.playlist_manager.list_playlists()
++    
++    # ============================================================================
++    # Button Handlers (Direct Function Calls)
++    # ============================================================================
++    
++    def _on_refresh_clicked(self, button):
++        """
++        Handle refresh button click - reload from JSON file.
++        
++        The JSON playlist file is the source of truth. This method:
++        1. Reloads the playlist from the JSON file
++        2. Updates the UI to reflect the loaded state
++        3. Syncs to MOC if enabled (ensures MOC reflects JSON state)
++        """
++        self.playlist_manager.load_playlist_from_file()
++        self.set_playlist(
++            self.playlist_manager.current_playlist.copy(),
++            self.playlist_manager.current_index
++        )
++        # Sync to MOC if enabled
++        if self.moc_sync and self.moc_sync.use_moc:
++            self.moc_sync.update_moc_playlist(start_playback=False)
++    
++    def _on_clear_clicked(self, button):
++        """
++        Handle clear button click.
++        
++        Clears the playlist and emits signal for main_window to handle
++        player controls (stop playback, update UI state).
++        """
++        self.clear()
++        self.emit('clear-playlist')
++    
++    def _on_save_clicked(self, button):
++        """Handle save button click - emit signal to show save dialog."""
++        self.emit('save-playlist')
++    
++    def _on_load_clicked(self, button):
++        """Handle load button click - emit signal to show load dialog."""
++        self.emit('load-playlist')
++    
++    # ============================================================================
++    # UI Configuration
++    # ============================================================================
++    
++    def set_moc_mode(self, enabled: bool):
++        """
++        Show or hide the Refresh button based on MOC availability.
++        
++        Args:
++            enabled: True to show refresh button (MOC available), False to hide
++        """
++        self.refresh_button.set_visible(enabled)
++    
++    # ============================================================================
++    # View Update Methods
++    # ============================================================================
+     
+     def _update_view(self):
+-        """Update the tree view with current tracks."""
++        """
++        Update the tree view with current tracks.
++        
++        This method populates the tree view store with track information
++        and updates the selection to highlight the current track.
++        """
+         self.store.clear()
+         for i, track in enumerate(self.tracks):
+             # Use filename as fallback if title is missing
+@@ -179,12 +508,12 @@ class PlaylistView(Gtk.Box):
+             artist = track.artist or "Unknown Artist"
+             duration = self._format_duration(track.duration) if track.duration else "--:--"
+             self.store.append([i + 1, title, artist, duration])
++        
+         self._update_selection()
+-        # Update button states
+         self._update_button_states()
+     
+     def _update_selection(self):
+-        """Update the selection to highlight current track."""
++        """Update the selection to highlight the current track."""
+         selection = self.tree_view.get_selection()
+         selection.unselect_all()
+         
+@@ -194,33 +523,55 @@ class PlaylistView(Gtk.Box):
+             self.tree_view.set_cursor(path, None, False)
+             self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
+     
+-    def _format_duration(self, seconds: float) -> str:
+-        """Format duration in seconds to MM:SS."""
+-        minutes = int(seconds // 60)
+-        secs = int(seconds % 60)
+-        return f"{minutes:02d}:{secs:02d}"
++    def _update_button_states(self):
++        """Update the state of action buttons based on playlist content."""
++        has_tracks = len(self.tracks) > 0
++        self.clear_button.set_sensitive(has_tracks)
++        self.save_button.set_sensitive(has_tracks)
++    
++    # ============================================================================
++    # Event Handlers - User Interactions
++    # ============================================================================
+     
+     def _on_row_activated(self, tree_view, path, column):
+-        """Handle row activation (double-click or double-tap) - triggers playback."""
++        """
++        Handle row activation (double-click or double-tap) - triggers playback.
++        
++        When a track is activated:
++        1. Set it as the current track
++        2. Trigger playback through player_controls
++        3. Emit signal for backward compatibility
++        """
+         indices = path.get_indices()
+         if indices:
+             index = indices[0]
++            self.set_current_index(index)
++            # Trigger playback through player_controls if available
++            if self.player_controls:
++                self.player_controls.play_current_track()
++            # Emit signal for backward compatibility
+             self.emit('track-activated', index)
+     
+     def _on_right_click(self, gesture, n_press, x, y):
+         """Handle right-click to show context menu."""
+-        # Only show menu if not already showing
+         if not self._menu_showing:
+             self._show_context_menu_at_position(x, y)
+     
+     def _on_long_press(self, gesture, x, y):
+         """Handle long-press to show context menu (touch-friendly)."""
+-        # Only show menu if not already showing
+         if not self._menu_showing:
+             self._show_context_menu_at_position(x, y)
+     
++    # ============================================================================
++    # Context Menu
++    # ============================================================================
++    
+     def _show_context_menu_at_position(self, x, y):
+-        """Show context menu at the given position."""
++        """
++        Show context menu at the given position.
++        
++        Determines which track was clicked and shows the appropriate menu.
++        """
+         # Get the path at click position
+         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+         if path_info:
+@@ -238,34 +589,25 @@ class PlaylistView(Gtk.Box):
+         self._show_context_menu(x, y)
+     
+     def _show_context_menu(self, x: float, y: float):
+-        """Show context menu."""
++        """
++        Show the context menu popover.
++        
++        Creates and displays a popover menu with track-specific and general
++        playlist operations.
++        """
+         # Prevent multiple menus
+         if self._menu_showing:
+             return
+         
+-        # Properly close and remove old menu if exists
+-        if self.context_menu:
+-            try:
+-                self.context_menu.popdown()
+-            except (AttributeError, RuntimeError):
+-                # Widget may have been destroyed
+-                pass
+-            try:
+-                if self.context_menu.get_parent():
+-                    self.context_menu.unparent()
+-            except (AttributeError, RuntimeError):
+-                # Widget may have been destroyed
+-                pass
+-            self.context_menu = None
++        # Clean up old menu if exists
++        self._cleanup_old_menu()
+         
+         # Set flag to prevent multiple menus
+         self._menu_showing = True
+         
+         # Create popover
+         self.context_menu = Gtk.Popover()
+-        # Set child first, then parent
+         self.context_menu.set_has_arrow(True)
+-        # Set modal to ensure it captures all events and prevents clicks from going through
+         self.context_menu.set_modal(True)
+         
+         # Create menu box with touch-friendly spacing
+@@ -275,60 +617,17 @@ class PlaylistView(Gtk.Box):
+         menu_box.set_margin_top(10)
+         menu_box.set_margin_bottom(10)
+         
++        # Add track-specific menu items if a track is selected
+         if self.selected_index >= 0:
+-            # Track-specific menu items
+-            play_item = Gtk.Button(label="Play")
+-            play_item.add_css_class("flat")
+-            play_item.set_size_request(150, 40)  # Larger for touch
+-            play_item.connect('clicked', lambda w: self._on_menu_play())
+-            menu_box.append(play_item)
+-            
+-            remove_item = Gtk.Button(label="Remove")
+-            remove_item.add_css_class("flat")
+-            remove_item.set_size_request(150, 40)  # Larger for touch
+-            remove_item.connect('clicked', lambda w: self._on_menu_remove())
+-            menu_box.append(remove_item)
+-            
++            self._add_track_menu_items(menu_box)
+             menu_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+-            
+-            move_up_item = Gtk.Button(label="Move Up")
+-            move_up_item.add_css_class("flat")
+-            move_up_item.set_size_request(150, 40)  # Larger for touch
+-            move_up_item.connect('clicked', lambda w: self._on_menu_move_up())
+-            move_up_item.set_sensitive(self.selected_index > 0)
+-            menu_box.append(move_up_item)
+-            
+-            move_down_item = Gtk.Button(label="Move Down")
+-            move_down_item.add_css_class("flat")
+-            move_down_item.set_size_request(150, 40)  # Larger for touch
+-            move_down_item.connect('clicked', lambda w: self._on_menu_move_down())
+-            move_down_item.set_sensitive(self.selected_index < len(self.tracks) - 1)
+-            menu_box.append(move_down_item)
+-            
+-            menu_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+-        
+-        # General menu items
+-        clear_item = Gtk.Button(label="Clear Playlist")
+-        clear_item.add_css_class("flat")
+-        clear_item.set_size_request(150, 40)  # Larger for touch
+-        clear_item.connect('clicked', lambda w: self._on_menu_clear())
+-        clear_item.set_sensitive(len(self.tracks) > 0)
+-        menu_box.append(clear_item)
+         
+-        save_item = Gtk.Button(label="Save Playlist...")
+-        save_item.add_css_class("flat")
+-        save_item.set_size_request(150, 40)  # Larger for touch
+-        save_item.connect('clicked', lambda w: self._on_menu_save())
+-        save_item.set_sensitive(len(self.tracks) > 0)
+-        menu_box.append(save_item)
++        # Add general menu items
++        self._add_general_menu_items(menu_box)
+         
+-        # Set child before parent
++        # Set up popover
+         self.context_menu.set_child(menu_box)
+-        
+-        # Set parent after child is set
+         self.context_menu.set_parent(self.tree_view)
+-        
+-        # Connect to closed signal for cleanup
+         self.context_menu.connect('closed', self._on_popover_closed)
+         
+         # Position and show menu
+@@ -340,30 +639,79 @@ class PlaylistView(Gtk.Box):
+         self.context_menu.set_pointing_to(rect)
+         self.context_menu.popup()
+     
++    def _add_track_menu_items(self, menu_box):
++        """Add track-specific menu items to the context menu."""
++        play_item = self._create_menu_button("Play", self._on_menu_play)
++        menu_box.append(play_item)
++        
++        remove_item = self._create_menu_button("Remove", self._on_menu_remove)
++        menu_box.append(remove_item)
++        
++        menu_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
++        
++        move_up_item = self._create_menu_button("Move Up", self._on_menu_move_up)
++        move_up_item.set_sensitive(self.selected_index > 0)
++        menu_box.append(move_up_item)
++        
++        move_down_item = self._create_menu_button("Move Down", self._on_menu_move_down)
++        move_down_item.set_sensitive(self.selected_index < len(self.tracks) - 1)
++        menu_box.append(move_down_item)
++    
++    def _add_general_menu_items(self, menu_box):
++        """Add general playlist menu items to the context menu."""
++        clear_item = self._create_menu_button("Clear Playlist", self._on_menu_clear)
++        clear_item.set_sensitive(len(self.tracks) > 0)
++        menu_box.append(clear_item)
++        
++        save_item = self._create_menu_button("Save Playlist...", self._on_menu_save)
++        save_item.set_sensitive(len(self.tracks) > 0)
++        menu_box.append(save_item)
++    
++    def _create_menu_button(self, label: str, handler) -> Gtk.Button:
++        """Helper: create a standardized menu button."""
++        button = Gtk.Button(label=label)
++        button.add_css_class("flat")
++        button.set_size_request(150, 40)  # Touch-friendly size
++        button.connect('clicked', lambda w: handler())
++        return button
++    
++    def _cleanup_old_menu(self):
++        """Clean up any existing context menu."""
++        if self.context_menu:
++            try:
++                self.context_menu.popdown()
++            except (AttributeError, RuntimeError):
++                pass
++            try:
++                if self.context_menu.get_parent():
++                    self.context_menu.unparent()
++            except (AttributeError, RuntimeError):
++                pass
++            self.context_menu = None
++    
+     def _on_popover_closed(self, popover):
+         """Handle popover closed signal for cleanup."""
+-        # Reset flag immediately
+         self._menu_showing = False
+-        # Clean up after a short delay to avoid issues
+         GLib.timeout_add(100, self._cleanup_popover)
+     
+     def _cleanup_popover(self):
+-        """Clean up the popover properly."""
++        """Clean up the popover properly after a delay."""
+         if self.context_menu:
+             try:
+-                # Check if widget is still valid and has a parent
+                 parent = self.context_menu.get_parent()
+                 if parent is not None:
+                     self.context_menu.unparent()
+             except (AttributeError, RuntimeError):
+-                # Widget might have been destroyed already
+                 pass
+             finally:
+                 self.context_menu = None
+-        # Ensure flag is reset
+         self._menu_showing = False
+         return False  # Don't repeat
+     
++    # ============================================================================
++    # Context Menu Handlers
++    # ============================================================================
++    
+     def _on_menu_play(self):
+         """Handle 'Play' from context menu."""
+         if self.selected_index >= 0:
+@@ -404,7 +752,23 @@ class PlaylistView(Gtk.Box):
+             try:
+                 self.context_menu.popdown()
+             except (AttributeError, RuntimeError):
+-                # Widget may have been destroyed
+                 pass
+         self._menu_showing = False
+-
++    
++    # ============================================================================
++    # Utility Methods
++    # ============================================================================
++    
++    def _format_duration(self, seconds: float) -> str:
++        """
++        Format duration in seconds to MM:SS format.
++        
++        Args:
++            seconds: Duration in seconds
++            
++        Returns:
++            Formatted string (e.g., "03:45")
++        """
++        minutes = int(seconds // 60)
++        secs = int(seconds % 60)
++        return f"{minutes:02d}:{secs:02d}"
+diff --git a/ui/main_window.py b/ui/main_window.py
+index cc659b7..074213e 100644
+--- a/ui/main_window.py
++++ b/ui/main_window.py
+@@ -16,7 +16,6 @@ from core.moc_controller import MocController
+ from core.mpris2 import MPRIS2Manager
+ from core.music_library import MusicLibrary
+ from core.playlist_manager import PlaylistManager
+-from core.playback_controller import PlaybackController
+ from core.system_volume import SystemVolume
+ from ui.components.bluetooth_panel import BluetoothPanel
+ from ui.components.library_browser import LibraryBrowser
+@@ -74,25 +73,27 @@ class MainWindow(Gtk.ApplicationWindow):
+         
+         # Initialize MOC sync helper (after UI is created)
+         # This is the SINGLE interface for all MOC operations
++        # Note: playlist_view now handles all playlist operations
+         self.moc_sync = MocSyncHelper(
+             self.moc_controller,
+-            self.playlist_manager,
++            self.playlist_view,
+             self.player_controls,
+             self.metadata_panel,
+-            self.playlist_view,
+             self._is_video_track,
+             self.mpris2
+         )
+         self.moc_sync.on_track_finished = self._on_moc_track_finished
+         self.moc_sync.on_shuffle_changed = self._on_moc_shuffle_changed
+         
+-        # Initialize playback controller (handles all playback logic)
+-        self.playback_controller = PlaybackController(
+-            self.playlist_manager,
++        # Initialize playback controller through player_controls
++        # Note: PlaybackController is ONLY accessed through PlayerControls
++        # Note: moc_sync handles all MOC operations, playback_controller delegates to it
++        # main_window decides whether to use MOC and passes this to playback_controller
++        self.player_controls.initialize_playback_controller(
++            self.playlist_view,  # Use playlist_view instead of playlist_manager
+             self.moc_sync,
+             self.player,
+-            self.moc_controller,
+-            self.player_controls,
++            self.use_moc,  # Pass MOC availability decision from main_window
+             self._is_video_track,
+             self._normalize_path,
+             on_track_changed=self._on_playback_track_changed,
+@@ -100,14 +101,17 @@ class MainWindow(Gtk.ApplicationWindow):
+         )
+         
+         # Setup playback controller callbacks (delegates to internal player for video tracks)
+-        self.playback_controller.on_state_changed = self._on_player_state_changed
+-        self.playback_controller.on_position_changed = self._on_player_position_changed
+-        self.playback_controller.on_track_finished = self._on_track_finished
+-        self.playback_controller.on_track_loaded = self._on_track_loaded
++        self.player_controls.set_on_state_changed(self._on_player_state_changed)
++        self.player_controls.set_on_position_changed(self._on_player_position_changed)
++        self.player_controls.set_on_track_finished(self._on_track_finished)
++        self.player_controls.set_on_track_loaded(self._on_track_loaded)
+         
+         # Setup MPRIS2 callbacks (after playback controller callbacks are set)
+         self._setup_mpris2()
+         
++        # Set player_controls reference in playlist_view so it can trigger playback
++        self.playlist_view.player_controls = self.player_controls
++        
+         # Load saved layout
+         GLib.idle_add(self.dock_manager.load_layout)
+         
+@@ -346,7 +350,8 @@ class MainWindow(Gtk.ApplicationWindow):
+     
+     def _create_playlist_view(self):
+         """Create and configure the playlist view."""
+-        self.playlist_view = PlaylistView()
++        # Create playlist_view first (moc_sync and player_controls will be set later)
++        self.playlist_view = PlaylistView(self.playlist_manager)
+         self.playlist_view.connect('track-activated', self._on_playlist_track_activated)
+         self.playlist_view.connect('remove-track', self._on_playlist_remove_track)
+         self.playlist_view.connect('move-track-up', self._on_playlist_move_up)
+@@ -354,7 +359,7 @@ class MainWindow(Gtk.ApplicationWindow):
+         self.playlist_view.connect('clear-playlist', self._on_playlist_clear)
+         self.playlist_view.connect('save-playlist', self._on_playlist_save)
+         self.playlist_view.connect('load-playlist', self._on_playlist_load)
+-        self.playlist_view.connect('refresh-playlist', self._on_playlist_refresh)
++        # Note: playlist-changed signal is no longer needed since playlist_view handles moc_sync directly
+         # Show refresh button only when MOC is available
+         self.playlist_view.set_moc_mode(self.use_moc)
+     
+@@ -369,6 +374,7 @@ class MainWindow(Gtk.ApplicationWindow):
+     
+     def _create_player_controls(self):
+         """Create player controls."""
++        # Create player controls first (before playback_controller)
+         self.player_controls = PlayerControls()
+         self.player_controls.connect('play-clicked', lambda w: self._on_play())
+         self.player_controls.connect('pause-clicked', lambda w: self._on_pause())
+@@ -425,7 +431,7 @@ class MainWindow(Gtk.ApplicationWindow):
+     def _on_close(self, window):
+         """Handle window close."""
+         self.dock_manager.cleanup()
+-        self.playback_controller.cleanup()
++        self.player_controls.cleanup()
+         # Cleanup MPRIS2
+         if hasattr(self, 'mpris2') and self.mpris2:
+             self.mpris2.cleanup()
+@@ -454,7 +460,7 @@ class MainWindow(Gtk.ApplicationWindow):
+         """Called when library scan is complete."""
+         # Final update of library browser
+         GLib.idle_add(self._populate_library_browser)
+-        GLib.idle_add(self._update_playlist_view)
++        GLib.idle_add(self._update_mpris2_navigation)
+         # Delay MOC operations to ensure server is ready
+         if self.use_moc:
+             GLib.timeout_add(500, lambda: self.moc_sync.load_playlist_from_moc())  # Delay 500ms
+@@ -504,8 +510,8 @@ class MainWindow(Gtk.ApplicationWindow):
+         if not self.mpris2:
+             return
+         
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
++        tracks = self.playlist_view.get_playlist()
++        current_index = self.playlist_view.get_current_index()
+         
+         # Can go next if there's a next track or shuffle is enabled with tracks available
+         can_go_next = False
+@@ -523,61 +529,41 @@ class MainWindow(Gtk.ApplicationWindow):
+         self.mpris2.update_can_go_next(can_go_next)
+         self.mpris2.update_can_go_previous(can_go_previous)
+     
+-    def _update_playlist_view(self):
+-        """Update the playlist view."""
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
+-        self.playlist_view.set_playlist(tracks, current_index)
+-        # Update MPRIS2 navigation capabilities when playlist changes
++    def _update_mpris2_navigation(self):
++        """Update MPRIS2 navigation capabilities when playlist changes."""
+         self._update_mpris2_navigation_capabilities()
+-        return False
+     
+     def _on_search_changed(self, entry):
+         """Handle search entry changes."""
+         query = entry.get_text()
+         if query:
+-            self.playlist_manager.clear()
+-            self.playlist_manager.add_tracks(self.library.search(query))
++            self.playlist_view.clear()
++            self.playlist_view.add_tracks(self.library.search(query))
+         else:
+-            self.playlist_manager.clear()
+-        self._update_playlist_view()
+-        self._sync_moc_playlist()
+-    
+-    def _sync_moc_playlist(self):
+-        """Helper: sync MOC playlist after changes."""
+-        if self.use_moc:
+-            self.moc_sync.sync_enabled = True
+-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
++            self.playlist_view.clear()
++        self._update_mpris2_navigation()
+     
+     def _on_track_selected(self, browser, track: TrackMetadata):
+-        self.playlist_manager.clear()
+-        self.playlist_manager.add_track(track)
+-        self.playlist_manager.set_current_index(0)
+-        self._update_playlist_view()
+-        self._sync_moc_playlist()
+-        self.playback_controller.play_current_track()
+-        self._update_playlist_view()
++        self.playlist_view.clear()
++        self.playlist_view.add_track(track)
++        self.playlist_view.set_current_index(0)
++        self.player_controls.play_current_track()
++        self._update_mpris2_navigation()
+     
+     def _on_album_selected(self, browser, tracks: List[TrackMetadata]):
+-        self.playlist_manager.clear()
+-        self.playlist_manager.add_tracks(tracks)
+-        self.playlist_manager.set_current_index(0)
+-        self._update_playlist_view()
+-        self._sync_moc_playlist()
+-        self.playback_controller.play_current_track()
+-        self._update_playlist_view()
++        self.playlist_view.clear()
++        self.playlist_view.add_tracks(tracks)
++        self.playlist_view.set_current_index(0)
++        self.player_controls.play_current_track()
++        self._update_mpris2_navigation()
+     
+     def _on_playlist_track_activated(self, view, index: int):
+         """Handle track activation in playlist."""
+-        self.playlist_manager.set_current_index(index)
+-        self._update_playlist_view()
+-        self.playback_controller.play_current_track()
++        # playlist_view._on_row_activated already handles setting index and triggering playback
++        self._update_mpris2_navigation()
+     
+     def _on_playback_track_changed(self, track: TrackMetadata):
+         """Handle track change from playback controller."""
+-        # Update playlist view to ensure current track is highlighted and visible
+-        self._update_playlist_view()
+-        
+         # Update metadata panel
+         self.metadata_panel.set_track(track)
+         
+@@ -601,18 +587,18 @@ class MainWindow(Gtk.ApplicationWindow):
+         def on_seek(offset_microseconds: int):
+             """Handle seek from MPRIS2 (offset in microseconds)."""
+             # Get current position and add offset
+-            track = self.playlist_manager.get_current_track()
++            track = self.playlist_view.get_current_track()
+             if not self._is_video_track(track):
+                 # For MOC, get position from moc_sync
+                 current_pos = self.moc_sync.get_cached_position()
+             else:
+-                # For internal player, get from playback_controller
+-                current_pos = self.playback_controller.get_current_position()
++                # For internal player, get from player_controls
++                current_pos = self.player_controls.get_current_position()
+             
+             offset_seconds = offset_microseconds / 1_000_000.0
+             new_position = max(0.0, current_pos + offset_seconds)
+-            # playback_controller.seek() now handles updating player_controls
+-            self.playback_controller.seek(new_position)
++            # player_controls.seek() now handles updating player_controls
++            self.player_controls.seek(new_position)
+         
+         self.mpris2.set_playback_callbacks(
+             on_play=self._on_play,
+@@ -642,46 +628,44 @@ class MainWindow(Gtk.ApplicationWindow):
+         if tree_iter:
+             # Get the index from the first column (which contains the 1-based index)
+             index = model[tree_iter][0] - 1  # Convert to 0-based
+-            playlist = self.playlist_manager.get_playlist()
++            playlist = self.playlist_view.get_playlist()
+             if 0 <= index < len(playlist):
+                 return index
+         return -1
+     
+     def _on_play(self):
+-        """Handle play button click - delegate to playback controller."""
++        """Handle play button click - delegate to player controls."""
+         selected_index = self._get_selected_track_index()
+-        self.playback_controller.play(selected_index if selected_index >= 0 else None)
++        self.player_controls.play(selected_index if selected_index >= 0 else None)
+     
+     def _on_pause(self):
+-        """Handle pause button click - delegate to playback controller."""
++        """Handle pause button click - delegate to player controls."""
+         # Reset user interaction state to ensure duration labels update properly
+         self.player_controls._user_interacting = False
+-        self.playback_controller.pause()
++        self.player_controls.pause()
+     
+     def _on_stop(self):
+-        """Handle stop button click - delegate to playback controller."""
+-        self.playback_controller.stop()
++        """Handle stop button click - delegate to player controls."""
++        self.player_controls.stop()
+         
+         # Update MPRIS2 playback status
+         if self.mpris2:
+             self.mpris2.update_playback_status(False, is_paused=False)
+-        self._update_playlist_view()
+-        self._update_mpris2_navigation_capabilities()
++        self._update_mpris2_navigation()
+     
+     def _on_next(self):
+-        self.playback_controller.next()
+-        self._update_playlist_view()
+-        self._update_mpris2_navigation_capabilities()
++        self.player_controls.next()
++        self._update_mpris2_navigation()
+     
+     def _on_prev(self):
+-        """Handle previous button click - delegate to playback controller."""
+-        self.playback_controller.previous()
++        """Handle previous button click - delegate to player controls."""
++        self.player_controls.previous()
+         # Update MPRIS2 navigation capabilities after track change
+         self._update_mpris2_navigation_capabilities()
+     
+     def _on_seek(self, controls, position: float):
+-        """Handle seek operation - delegate to playback controller."""
+-        self.playback_controller.seek(position)
++        """Handle seek operation - delegate to player controls."""
++        self.player_controls.seek(position)
+     
+     def _on_volume_changed(self, controls, volume: float):
+         """Handle volume change from UI slider - control system volume directly."""
+@@ -694,7 +678,7 @@ class MainWindow(Gtk.ApplicationWindow):
+     def _on_player_state_changed(self, is_playing: bool):
+         """Handle player state change - only for internal player (video files)."""
+         # Only update if we're using internal player (video files)
+-        track = self.playlist_manager.get_current_track()
++        track = self.playlist_view.get_current_track()
+         if track and self._is_video_track(track):
+             self.player_controls.set_playing(is_playing)
+             # Update MPRIS2
+@@ -706,7 +690,7 @@ class MainWindow(Gtk.ApplicationWindow):
+     def _on_player_position_changed(self, position: float, duration: float):
+         """Handle player position change - only for internal player (video files)."""
+         # Only update if we're using internal player (video files)
+-        track = self.playlist_manager.get_current_track()
++        track = self.playlist_view.get_current_track()
+         if track and self._is_video_track(track):
+             self.player_controls.update_progress(position, duration)
+     
+@@ -714,8 +698,8 @@ class MainWindow(Gtk.ApplicationWindow):
+         """Handle track loaded - update duration and sync MOC."""
+         # Wait a bit for GStreamer to determine duration, then update
+         def update_after_load():
+-            duration = self.playback_controller.get_current_duration()
+-            position = self.playback_controller.get_current_position()
++            duration = self.player_controls.get_current_duration()
++            position = self.player_controls.get_current_position()
+             # Update progress even if duration is 0 (will be updated when available)
+             self.player_controls.update_progress(position, duration)
+             # If duration is still 0, try again after a short delay
+@@ -726,11 +710,10 @@ class MainWindow(Gtk.ApplicationWindow):
+         # Initial update
+         GLib.timeout_add(100, update_after_load)
+         
+-        # Sync MOC after track is loaded (only if using MOC for this track)
+-        track = self.playlist_manager.get_current_track()
++        # Update MOC state after track is loaded (only if using MOC for this track)
++        track = self.playlist_view.get_current_track()
+         if self.use_moc and track and not self._is_video_track(track):
+-            self.moc_sync.sync_enabled = True
+-            self.moc_sync.sync_playlist_for_playback()
++            self.moc_sync.update_moc_playlist(start_playback=True)
+             # Ensure autonext and shuffle are set correctly
+             self.moc_sync.set_shuffle(self.moc_sync.get_shuffle_enabled())
+     
+@@ -738,38 +721,36 @@ class MainWindow(Gtk.ApplicationWindow):
+         """Handle track finished - auto-advance to next track (internal player only)."""
+         # This callback is only for internal player (video files)
+         # MOC handles auto-advancement internally for audio files
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
++        tracks = self.playlist_view.get_playlist()
++        current_index = self.playlist_view.get_current_index()
+         
+         # Check if there's a next track available
+         if current_index < len(tracks) - 1:
+             # There's a next track - advance to it
+             if self.moc_sync.get_shuffle_enabled() if self.use_moc else False:
+-                self.playback_controller.play_random_track()
++                self.player_controls.play_random_track()
+             else:
+                 # Auto-advance to next track in playlist
+-                next_track = self.playlist_manager.get_next_track()
++                next_track = self.playlist_view.get_next_track()
+                 if next_track:
+-                    self._update_playlist_view()
+-                    self.playback_controller.play_current_track()
++                    self.player_controls.play_current_track()
+                 else:
+                     # Shouldn't happen, but handle gracefully
+-                    self.playback_controller.stop()
+-                    self.playlist_manager.set_current_index(-1)
+-                    self._update_playlist_view()
++                    self.player_controls.stop()
++                    self.playlist_view.set_current_index(-1)
+         else:
+             # End of playlist reached
+-            self.playback_controller.stop()
+-            self.playlist_manager.set_current_index(-1)
+-            self._update_playlist_view()
++            self.player_controls.stop()
++            self.playlist_view.set_current_index(-1)
++        self._update_mpris2_navigation()
+     
+     def _get_current_duration(self) -> float:
+-        """Get current track duration - delegate to playback_controller."""
+-        return self.playback_controller.get_current_duration()
++        """Get current track duration - delegate to player_controls."""
++        return self.player_controls.get_current_duration()
+     
+     def _update_position(self):
+         """Periodically update position display - from active player."""
+-        track = self.playlist_manager.get_current_track()
++        track = self.playlist_view.get_current_track()
+         if not track:
+             # Update MPRIS2 position even when no track (set to 0)
+             if self.mpris2:
+@@ -785,9 +766,9 @@ class MainWindow(Gtk.ApplicationWindow):
+                 self.mpris2.update_position(position)
+         else:
+             # Update from internal player for video files
+-            if self.playback_controller.is_playing():
+-                position = self.playback_controller.get_current_position()
+-                duration = self.playback_controller.get_current_duration()
++            if self.player_controls.is_playing():
++                position = self.player_controls.get_current_position()
++                duration = self.player_controls.get_current_duration()
+                 # Always update progress to keep slider in sync
+                 if duration > 0:
+                     self.player_controls.update_progress(position, duration)
+@@ -800,7 +781,7 @@ class MainWindow(Gtk.ApplicationWindow):
+             else:
+                 # Player not playing - update MPRIS2 with current position
+                 if self.mpris2:
+-                    position = self.playback_controller.get_current_position()
++                    position = self.player_controls.get_current_position()
+                     self.mpris2.update_position(position)
+         return True
+ 
+@@ -858,51 +839,41 @@ class MainWindow(Gtk.ApplicationWindow):
+             logger.debug("  Paired: %s, Connected: %s", device.paired, device.connected)
+             logger.info("Note: Enable speaker mode to connect to devices")
+     
+-    def _sync_playlist_file_op(self, op):
+-        """Helper: execute playlist file operation and refresh UI."""
+-        op()
+-        self.playlist_manager.load_playlist_from_file()
+-        self._update_playlist_view()
+-    
+     def _on_add_track(self, browser, track: TrackMetadata):
+-        index = self.playlist_manager.get_playlist_length_file()
+-        self._sync_playlist_file_op(lambda: self.moc_sync.sync_add_track_file(index, track))
++        """Add a track to the playlist using playlist_view."""
++        index = len(self.playlist_view.get_playlist())
++        self.playlist_view.add_track(track, position=index)
++        self._update_mpris2_navigation()
+     
+     def _on_add_album(self, browser, tracks):
+-        start_index = self.playlist_manager.get_playlist_length_file()
+-        for i, track in enumerate(tracks):
+-            self.moc_sync.sync_add_track_file(start_index + i, track)
+-        self.playlist_manager.load_playlist_from_file()
+-        self._update_playlist_view()
++        """Add multiple tracks to the playlist using playlist_view."""
++        self.playlist_view.add_tracks(tracks)
++        self._update_mpris2_navigation()
+     
+     def _on_playlist_remove_track(self, view, index: int):
+-        self._sync_playlist_file_op(lambda: self.moc_sync.sync_remove_track_file(index))
++        """Remove a track from the playlist using playlist_view."""
++        self.playlist_view.remove_track(index)
++        self._update_mpris2_navigation()
+     
+     def _on_playlist_move_up(self, view, index: int):
++        """Move a track up in the playlist using playlist_view."""
+         if index > 0:
+-            self._sync_playlist_file_op(lambda: self.moc_sync.sync_move_track_file(index, index - 1))
++            self.playlist_view.move_track(index, index - 1)
++            self._update_mpris2_navigation()
+     
+     def _on_playlist_move_down(self, view, index: int):
+-        if index < self.playlist_manager.get_playlist_length_file() - 1:
+-            self._sync_playlist_file_op(lambda: self.moc_sync.sync_move_track_file(index, index + 1))
+-    
+-    def _on_playlist_refresh(self, view):
+-        """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
+-        if self.use_moc:
+-            self.moc_sync.load_playlist_from_moc()
++        """Move a track down in the playlist using playlist_view."""
++        tracks = self.playlist_view.get_playlist()
++        if index < len(tracks) - 1:
++            self.playlist_view.move_track(index, index + 1)
++            self._update_mpris2_navigation()
+     
+     def _on_playlist_clear(self, view):
+         """Handle clearing playlist."""
+-        self.playback_controller.stop()
+-        if self.use_moc:
+-            self.moc_sync.stop()
+-            self.moc_sync.sync_playlist_to_moc(start_playback=False)
+-        
++        self.player_controls.stop()
+         # Update player controls state to show play button
+         self.player_controls.set_playing(False)
+-        
+-        self.playlist_manager.clear()
+-        self._update_playlist_view()
++        self.playlist_view.clear()
+ 
+     def _create_dialog_content(self, content):
+         """Helper: set dialog content margins."""
+@@ -919,11 +890,11 @@ class MainWindow(Gtk.ApplicationWindow):
+         entry = Gtk.Entry()
+         entry.set_placeholder_text("My Playlist")
+         content.append(entry)
+-        dialog.connect('response', lambda d, r: (self.playlist_manager.save_playlist(entry.get_text().strip()) if r == Gtk.ResponseType.OK and entry.get_text().strip() else None, d.close())[1])
++        dialog.connect('response', lambda d, r: (self.playlist_view.save_playlist(entry.get_text().strip()) if r == Gtk.ResponseType.OK and entry.get_text().strip() else None, d.close())[1])
+         dialog.present()
+     
+     def _on_playlist_load(self, view):
+-        playlists = self.playlist_manager.list_playlists()
++        playlists = self.playlist_view.list_playlists()
+         if not playlists:
+             dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK, text="No Saved Playlists")
+             dialog.set_detail_text("There are no saved playlists to load.")
+@@ -954,10 +925,11 @@ class MainWindow(Gtk.ApplicationWindow):
+             if r == Gtk.ResponseType.OK:
+                 sel = tree_view.get_selection()
+                 m, it = sel.get_selected()
+-                if it and self.playlist_manager.load_playlist(m[it][0]):
+-                    self._update_playlist_view()
+-                    if self.use_moc:
+-                        self.moc_sync.sync_playlist_to_moc(start_playback=False)
++                if it and self.playlist_view.load_playlist(m[it][0]):
++                    # Update MOC state after loading playlist
++                    if self.use_moc and self.moc_sync:
++                        self.moc_sync.update_moc_playlist(start_playback=False)
++                    self._update_mpris2_navigation()
+             d.close()
+         dialog.connect('response', on_response)
+         dialog.present()
+diff --git a/ui/moc_sync.py b/ui/moc_sync.py
+index 03455fb..98306e1 100644
+--- a/ui/moc_sync.py
++++ b/ui/moc_sync.py
+@@ -13,60 +13,27 @@ from core.logging import get_logger
+ logger = get_logger(__name__)
+ 
+ class MocSyncHelper:
+-    def __init__(self, moc_controller: MocController, playlist_manager, player_controls,
+-            metadata_panel, playlist_view, is_video_track_fn: Callable[[Optional[TrackMetadata]], bool], mpris2=None):
++    def __init__(self, moc_controller: MocController, playlist_view, player_controls,
++            metadata_panel, is_video_track_fn: Callable[[Optional[TrackMetadata]], bool], mpris2=None):
+         self.moc_controller = moc_controller
+-        self.playlist_manager = playlist_manager
++        self.playlist_view = playlist_view
+         self.player_controls = player_controls
+         self.metadata_panel = metadata_panel
+-        self.playlist_view = playlist_view
+         self.is_video_track = is_video_track_fn
+         self.mpris2 = mpris2
+         self.use_moc = moc_controller.is_available()
+         self.last_position = 0.0
+         self.last_duration = 0.0
+         self.last_file = None
+-        self.playlist_mtime = 0.0
+-        self.sync_enabled = True
+         self.end_detected = False
+         self._resuming = False
+         self.shuffle_enabled = False
+         self._seeking = False  # Flag to prevent update_status from overwriting position during seek
+         self.on_track_finished = None
+         self.on_shuffle_changed = None
+-        self._sync_timeout_id = None
+-        self._sync_pending = False
+-        self._sync_start_playback = False
+-        config = get_config()
+-        moc_playlist_path = config.moc_playlist_path
+-        if self.use_moc and moc_playlist_path.exists():
+-            try:
+-                self.playlist_mtime = moc_playlist_path.stat().st_mtime
+-            except OSError:
+-                self.playlist_mtime = 0.0
+-    
+-    def sync_add_track_file(self, index: int, track: TrackMetadata):
+-        self.playlist_manager.add_track_at_index_file(index, track)
+-        if self.use_moc and self.sync_enabled and not self.is_video_track(track):
+-            self.moc_controller.add_track_at_index_m3u(index, str(Path(track.file_path).resolve()))
+     
+-    def sync_remove_track_file(self, index: int):
+-        self.playlist_manager.remove_track_at_index_file(index)
+-        if self.use_moc and self.sync_enabled:
+-            self.moc_controller.remove_track_at_index_m3u(index)
+-    
+-    def sync_move_track_file(self, from_index: int, to_index: int):
+-        self.playlist_manager.move_track_in_file(from_index, to_index)
+-        if self.use_moc and self.sync_enabled:
+-            self.moc_controller.move_track_in_m3u(from_index, to_index)
+-    
+-    def sync_jump_to_index_file(self, index: int, start_playback: bool = False):
+-        if not self.sync_enabled:
+-            return
+-        track = self.playlist_manager.get_track_at_index_file(index)
+-        if track and self.is_video_track(track):
+-            return
+-        self.moc_controller.jump_to_index(index, start_playback=start_playback)
++    # Note: All sync logic has been removed. The UI now directly updates MOC state when changed,
++    # and update_status() reflects MOC state changes in the UI. No sync flags or debouncing needed.
+     
+     def initialize(self):
+         if not self.use_moc:
+@@ -79,25 +46,32 @@ class MocSyncHelper:
+             self._load_state_from_running_moc()
+         self.moc_controller.enable_autonext()
+         self.sync_shuffle_from_moc()
+-        tracks = self.playlist_manager.get_playlist()
++        tracks = self.playlist_view.get_playlist()
+         if tracks:
+-            current_index = self.playlist_manager.get_current_index()
++            current_index = self.playlist_view.get_current_index()
+             self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
+             logger.info("Synced %d tracks to MOC - app is now orchestrator", len(tracks))
+         return True
+     
+     def _load_state_from_running_moc(self):
++        """Load current state from running MOC instance."""
+         status = self.moc_controller.get_status(force_refresh=True)
+         if not status:
+             return
+         current_file = status.get("file_path")
+         moc_tracks, moc_index = self.moc_controller.get_playlist(current_file=current_file)
+         if moc_tracks:
+-            self.playlist_manager.clear()
+-            self.playlist_manager.add_tracks(moc_tracks)
++            # Update JSON playlist directly to reflect MOC state (bypass playlist_view methods to avoid MOC updates)
++            self.playlist_view.playlist_manager.clear()
++            self.playlist_view.playlist_manager.add_tracks(moc_tracks)
+             if moc_index >= 0:
+-                self.playlist_manager.set_current_index(moc_index)
+-            self.playlist_view.set_playlist(moc_tracks, moc_index)
++                self.playlist_view.playlist_manager.set_current_index(moc_index)
++            # Sync to JSON file (our local source of truth)
++            self.playlist_view.playlist_manager._sync_to_file()
++            # Update view directly from playlist_manager's in-memory state
++            tracks = self.playlist_view.playlist_manager.current_playlist.copy()
++            current_index = self.playlist_view.playlist_manager.current_index
++            self.playlist_view.set_playlist(tracks, current_index)
+             logger.info("Loaded %d tracks from running MOC instance", len(moc_tracks))
+         state = status.get("state", "STOP")
+         file_path = status.get("file_path")
+@@ -121,79 +95,41 @@ class MocSyncHelper:
+         if moc_shuffle is not None:
+             self.shuffle_enabled = moc_shuffle
+     
+-    def set_shuffle_enabled(self, enabled: bool):
+-        self.shuffle_enabled = enabled
+-    
+-    def sync_playlist_to_moc(self, start_playback: bool = False):
+-        if not self.sync_enabled:
+-            return
+-        if self._sync_timeout_id is not None:
+-            GLib.source_remove(self._sync_timeout_id)
+-            self._sync_timeout_id = None
+-        self._sync_pending = True
+-        self._sync_start_playback = start_playback or self._sync_start_playback
+-        self._sync_timeout_id = GLib.timeout_add(300, self._do_sync_playlist_to_moc)
+-    
+-    def _do_sync_playlist_to_moc(self):
+-        self._sync_timeout_id = None
+-        if not self._sync_pending:
+-            return False
+-        self._sync_pending = False
+-        start_playback = self._sync_start_playback
+-        self._sync_start_playback = False
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
+-        if not tracks:
+-            self.moc_controller.set_playlist([], -1, start_playback=False)
+-            return False
+-        track = self.playlist_manager.get_current_track()
+-        if track and not self.is_video_track(track) and start_playback:
+-            self.moc_controller.set_playlist(tracks, current_index, start_playback=True)
+-        else:
+-            self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
+-        return False
+-    
+-    def sync_playlist_for_playback(self):
+-        if not self.sync_enabled or self._resuming:
+-            return
+-        moc_status = self.moc_controller.get_status(force_refresh=False)
+-        if moc_status:
+-            moc_state = moc_status.get("state", "STOP")
+-            moc_file = moc_status.get("file_path")
+-            current_track = self.playlist_manager.get_current_track()
+-            if moc_state == "PAUSE" and moc_file and current_track:
+-                if str(Path(moc_file).resolve()) == str(Path(current_track.file_path).resolve()):
+-                    return
+-            if moc_state == "PLAY" and moc_file and current_track and moc_file != current_track.file_path:
+-                self.sync_enabled = False
+-                return
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
+-        if not tracks:
+-            self.moc_controller.set_playlist([], -1, start_playback=False)
++    def update_moc_playlist(self, start_playback: bool = False):
++        """Update MOC playlist to reflect current UI state."""
++        if not self.use_moc:
+             return
+-        track = self.playlist_manager.get_current_track()
+-        if track and not self.is_video_track(track):
+-            self.moc_controller.set_playlist(tracks, current_index, start_playback=True)
+-        else:
+-            self.moc_controller.set_playlist(tracks, current_index, start_playback=False)
++        # Get current state from playlist_view
++        tracks = self.playlist_view.get_playlist()
++        current_index = self.playlist_view.get_current_index()
++        track = self.playlist_view.get_current_track()
++        
++        # Determine if we should start playback (only for audio tracks)
++        should_start = start_playback and track is not None and not self.is_video_track(track)
++        
++        # Update MOC state directly
++        self.moc_controller.set_playlist(tracks, current_index, start_playback=should_start)
+     
+     def load_playlist_from_moc(self):
++        """Load playlist from MOC into playlist_view - update UI and JSON playlist to reflect MOC state."""
+         moc_tracks, moc_index = self.moc_controller.get_playlist()
++        # Update JSON playlist directly to reflect MOC state (bypass playlist_view methods to avoid MOC updates)
++        self.playlist_view.playlist_manager.clear()
+         if moc_tracks:
+-            self.playlist_manager.clear()
+-            self.playlist_manager.add_tracks(moc_tracks)
++            self.playlist_view.playlist_manager.add_tracks(moc_tracks)
+             if moc_index >= 0:
+-                self.playlist_manager.set_current_index(moc_index)
+-            self.playlist_view.set_playlist(moc_tracks, moc_index)
++                self.playlist_view.playlist_manager.set_current_index(moc_index)
++        # Sync to JSON file (our local source of truth)
++        self.playlist_view.playlist_manager._sync_to_file()
++        # Update view directly from playlist_manager's in-memory state
++        tracks = self.playlist_view.playlist_manager.current_playlist.copy()
++        current_index = self.playlist_view.playlist_manager.current_index
++        self.playlist_view.set_playlist(tracks, current_index)
++        if moc_tracks:
+             GLib.idle_add(self._load_metadata_async, 0)
+-        elif not moc_tracks:
+-            status = self.moc_controller.get_status()
+-            if status and status.get("state") in ("PLAY", "PAUSE") and status.get("file_path"):
+-                pass
+     
+     def _load_metadata_async(self, start_index: int = 0) -> bool:
+-        tracks = self.playlist_manager.get_playlist()
++        tracks = self.playlist_view.get_playlist()
+         if not tracks:
+             return False
+         batch_size = 10
+@@ -209,7 +145,9 @@ class MocSyncHelper:
+                         setattr(track, attr, getattr(full_metadata, attr))
+                 except Exception as e:
+                     logger.debug("Error loading metadata for %s: %s", track.file_path, e)
+-        self.playlist_view.set_playlist(tracks, self.playlist_manager.get_current_index())
++        # Update UI with current state from playlist_view
++        current_index = self.playlist_view.get_current_index()
++        self.playlist_view.set_playlist(tracks, current_index)
+         if end_index < len(tracks):
+             GLib.idle_add(self._load_metadata_async, end_index)
+             return False
+@@ -235,7 +173,7 @@ class MocSyncHelper:
+         self.last_duration = duration
+         if self.last_file is None and file_path:
+             self.last_file = file_path
+-        track = self.playlist_manager.get_current_track()
++        track = self.playlist_view.get_current_track()
+         if track and not self.is_video_track(track):
+             self.player_controls.set_playing(state == "PLAY")
+             if self.mpris2:
+@@ -245,36 +183,40 @@ class MocSyncHelper:
+             elif position > 0:
+                 self.player_controls.update_progress(position, 0.0)
+             if file_path and file_path != self.last_file and self.last_file is not None:
++                # MOC playback changed to a different track - sync playlist from MOC to UI
+                 if self._resuming:
+                     self.last_file = file_path
+                     self.end_detected = False
+                     return True
+-                current_track = self.playlist_manager.get_current_track()
++                current_track = self.playlist_view.get_current_track()
+                 if current_track and current_track.file_path:
+                     if str(Path(current_track.file_path).resolve()) == str(Path(file_path).resolve()):
+                         self.last_file = file_path
+                         self.end_detected = False
+                         return True
++                # Track changed in MOC - sync playlist from MOC to UI
+                 self.last_file = file_path
+                 self.end_detected = False
+                 moc_tracks, moc_index = self.moc_controller.get_playlist(current_file=file_path)
+                 if moc_tracks:
+-                    self.playlist_manager.clear()
+-                    self.playlist_manager.add_tracks(moc_tracks)
++                    # Update JSON playlist directly to reflect MOC state (bypass playlist_view methods to avoid MOC updates)
++                    self.playlist_view.playlist_manager.clear()
++                    self.playlist_view.playlist_manager.add_tracks(moc_tracks)
+                     found_index = -1
+                     for idx, track_item in enumerate(moc_tracks):
+                         if track_item.file_path == file_path:
+                             found_index = idx
+                             break
+                     if found_index >= 0:
+-                        self.playlist_manager.set_current_index(found_index)
+-                        self.playlist_view.set_playlist(moc_tracks, found_index)
+-                    else:
+-                        if moc_index >= 0:
+-                            self.playlist_manager.set_current_index(moc_index)
+-                            self.playlist_view.set_playlist(moc_tracks, moc_index)
+-                        else:
+-                            self.playlist_view.set_playlist(moc_tracks, -1)
++                        self.playlist_view.playlist_manager.set_current_index(found_index)
++                    elif moc_index >= 0:
++                        self.playlist_view.playlist_manager.set_current_index(moc_index)
++                    # Sync to JSON file (our local source of truth)
++                    self.playlist_view.playlist_manager._sync_to_file()
++                    # Update view directly from playlist_manager's in-memory state
++                    tracks = self.playlist_view.playlist_manager.current_playlist.copy()
++                    current_index = self.playlist_view.playlist_manager.current_index
++                    self.playlist_view.set_playlist(tracks, current_index)
+                     new_track = TrackMetadata(file_path)
+                     self.metadata_panel.set_track(new_track)
+                     if self.mpris2:
+@@ -284,59 +226,63 @@ class MocSyncHelper:
+                     self.metadata_panel.set_track(new_track)
+                     if self.mpris2:
+                         self.mpris2.update_metadata(new_track)
+-                    playlist = self.playlist_manager.get_playlist()
++                    # Try to find track in current playlist
++                    tracks = self.playlist_view.get_playlist()
+                     found_in_playlist = False
+-                    for idx, track_item in enumerate(playlist):
++                    for idx, track_item in enumerate(tracks):
+                         if track_item.file_path == file_path:
+-                            self.playlist_manager.set_current_index(idx)
+-                            self.playlist_view.set_playlist(playlist, idx)
++                            self.playlist_view.set_current_index(idx)
++                            self.playlist_view.set_playlist(tracks, idx)
+                             found_in_playlist = True
+                             break
+                     if not found_in_playlist and self.on_track_finished:
+                         self.on_track_finished()
+-            playlist = self.playlist_manager.get_playlist()
+-            current_index = self.playlist_manager.get_current_index()
++            tracks = self.playlist_view.get_playlist()
++            current_index = self.playlist_view.get_current_index()
+             if duration > 0 and file_path == self.last_file and not self.end_detected:
+                 if position >= duration - 0.5:
+                     self.end_detected = True
+-                    if current_index < len(playlist) - 1:
++                    if current_index < len(tracks) - 1:
+                         if self.on_track_finished:
+                             self.on_track_finished()
+                     elif state == "STOP":
+-                        self.playlist_manager.set_current_index(-1)
+-                        self.playlist_view.set_playlist(playlist, -1)
++                        self.playlist_view.set_current_index(-1)
++                        current_index = self.playlist_view.get_current_index()
++                        self.playlist_view.set_playlist(tracks, current_index)
+             if duration > 0 and state == "STOP" and file_path == self.last_file and not self.end_detected:
+                 if position >= duration - 1.0:
+-                    if current_index < len(playlist) - 1:
++                    if current_index < len(tracks) - 1:
+                         if self.on_track_finished:
+                             self.on_track_finished()
+         else:
++            # Video track or other non-MOC playback - handle MOC playback changes
+             if file_path and state == "PLAY":
+-                current_track = self.playlist_manager.get_current_track()
++                # MOC is playing a track (possibly video or external change) - update UI to reflect MOC state
++                current_track = self.playlist_view.get_current_track()
+                 if not current_track or file_path != current_track.file_path:
+-                    if self.sync_enabled:
+-                        self.sync_enabled = False
++                    # Load playlist from MOC to update UI
+                     self.load_playlist_from_moc()
+                     if file_path != self.last_file:
+                         self.last_file = file_path
+-            elif state == "STOP":
+-                if not self.sync_enabled:
+-                    self.sync_enabled = True
++        
+         moc_shuffle = status.get("shuffle", False)
+         if moc_shuffle != self.shuffle_enabled:
+-            self.set_shuffle_enabled(moc_shuffle)
++            self.shuffle_enabled = moc_shuffle
+             if self.on_shuffle_changed:
+                 self.on_shuffle_changed(moc_shuffle)
+-        try:
+-            config = get_config()
+-            moc_playlist_path = config.moc_playlist_path
+-            mtime = moc_playlist_path.stat().st_mtime if moc_playlist_path.exists() else self.playlist_mtime
+-        except OSError:
+-            mtime = self.playlist_mtime
+-        if mtime != self.playlist_mtime:
+-            self.playlist_mtime = mtime
+-            if not self.sync_enabled:
+-                self.load_playlist_from_moc()
++        
++        # Check if MOC playlist differs from UI - if so, update UI to reflect MOC state
++        moc_tracks, moc_index = self.moc_controller.get_playlist()
++        our_tracks = self.playlist_view.get_playlist()
++        
++        # Compare track lists by file path
++        moc_paths = {str(Path(t.file_path).resolve()) for t in moc_tracks}
++        our_paths = {str(Path(t.file_path).resolve()) for t in our_tracks}
++        
++        # If they differ, MOC state changed - update UI to reflect it
++        if moc_paths != our_paths:
++            logger.info("MOC playlist state changed, updating UI to reflect current state")
++            self.load_playlist_from_moc()
+         return True
+     
+     def reset_end_detection(self):
+@@ -344,7 +290,7 @@ class MocSyncHelper:
+     
+     def play(self):
+         self._resuming = True
+-        current_track = self.playlist_manager.get_current_track()
++        current_track = self.playlist_view.get_current_track()
+         if current_track and current_track.file_path:
+             self.last_file = current_track.file_path
+         self.moc_controller.play()
+@@ -357,53 +303,75 @@ class MocSyncHelper:
+         self.moc_controller.pause()
+     
+     def stop(self):
++        """Stop playback and reset current index using playlist_view."""
+         self.moc_controller.stop()
+-        self.playlist_manager.set_current_index(-1)
+-        self.playlist_view.set_playlist(self.playlist_manager.get_playlist(), -1)
++        self.playlist_view.set_current_index(-1)
++        tracks = self.playlist_view.get_playlist()
++        current_index = self.playlist_view.get_current_index()
++        self.playlist_view.set_playlist(tracks, current_index)
+     
+     def next_track(self):
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
+-        if current_index < len(tracks) - 1:
+-            new_index = current_index + 1
+-            self.playlist_manager.set_current_index(new_index)
+-            self.playlist_view.set_playlist(tracks, new_index)
+-            self.play_track()
++        """Move to next track using playlist_view and moc_controller.jump_to_index()."""
++        next_track = self.playlist_view.get_next_track()
++        if next_track:
++            # get_next_track() already updated the index in playlist_view
++            current_index = self.playlist_view.get_current_index()
++            # Use moc_controller.jump_to_index() to jump to the new track and play
++            self.moc_controller.jump_to_index(current_index, start_playback=True)
++            # Update UI
++            tracks = self.playlist_view.get_playlist()
++            self.playlist_view.set_playlist(tracks, current_index)
+         else:
++            # No next track - stop playback
+             self.moc_controller.stop()
+-            self.playlist_manager.set_current_index(-1)
++            self.playlist_view.set_current_index(-1)
++            tracks = self.playlist_view.get_playlist()
+             self.playlist_view.set_playlist(tracks, -1)
+     
+     def previous_track(self):
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
+-        if current_index > 0:
+-            new_index = current_index - 1
+-            self.playlist_manager.set_current_index(new_index)
+-            self.playlist_view.set_playlist(tracks, new_index)
+-            self.play_track()
++        """Move to previous track using playlist_view and moc_controller.jump_to_index()."""
++        prev_track = self.playlist_view.get_previous_track()
++        if prev_track:
++            # get_previous_track() already updated the index in playlist_view
++            current_index = self.playlist_view.get_current_index()
++            # Use moc_controller.jump_to_index() to jump to the new track and play
++            self.moc_controller.jump_to_index(current_index, start_playback=True)
++            # Update UI
++            tracks = self.playlist_view.get_playlist()
++            self.playlist_view.set_playlist(tracks, current_index)
+     
+     def play_track(self):
+-        track = self.playlist_manager.get_current_track()
++        """Play current track - uses moc_controller.set_playlist() for coordination."""
++        track = self.playlist_view.get_current_track()
+         if not track or self.is_video_track(track):
+             return
++        
++        # Validate track file exists
+         file_path = Path(track.file_path)
+         if not file_path.exists() or not file_path.is_file():
+             logger.error("Track file does not exist: %s", track.file_path)
+             return
++        
++        # Stop MOC if playing different track
+         moc_status = self.moc_controller.get_status(force_refresh=False)
+         if moc_status:
+             moc_state = moc_status.get("state", "STOP")
+             moc_file = moc_status.get("file_path")
+             if moc_state == "PLAY" and moc_file and moc_file != track.file_path:
+                 self.moc_controller.stop()
+-        self.sync_playlist_for_playback()
++        
++        # Sync playlist and start playback using moc_controller.set_playlist()
++        tracks = self.playlist_view.get_playlist()
++        current_index = self.playlist_view.get_current_index()
++        self.moc_controller.set_playlist(tracks, current_index, start_playback=True)
++        
++        # Set shuffle state if needed
+         if self.shuffle_enabled:
+             self.moc_controller.enable_shuffle()
+         else:
+             self.moc_controller.disable_shuffle()
+-        tracks = self.playlist_manager.get_playlist()
+-        current_index = self.playlist_manager.get_current_index()
++        
++        # Update UI with current state from playlist_view
+         self.playlist_view.set_playlist(tracks, current_index)
+         self.metadata_panel.set_track(track)
+         if self.mpris2:
+@@ -438,18 +406,21 @@ class MocSyncHelper:
+         return new_state
+     
+     def handle_track_finished(self):
++        """Handle track finished event using playlist_view."""
+         self.end_detected = False
+-        tracks = self.playlist_manager.get_playlist()
+-        current_track = self.playlist_manager.get_current_track()
++        tracks = self.playlist_view.get_playlist()
++        current_track = self.playlist_view.get_current_track()
+         moc_status = self.moc_controller.get_status(force_refresh=True)
+         if moc_status:
+             moc_state = moc_status.get("state", "STOP")
+             moc_file = moc_status.get("file_path")
+             if moc_state == "PLAY" and moc_file and current_track and moc_file != current_track.file_path:
++                # Find the track in playlist and set it as current
+                 for idx, track_item in enumerate(tracks):
+                     if track_item.file_path == moc_file:
+-                        self.playlist_manager.set_current_index(idx)
+-                        self.playlist_view.set_playlist(tracks, idx)
++                        self.playlist_view.set_current_index(idx)
++                        current_index = self.playlist_view.get_current_index()
++                        self.playlist_view.set_playlist(tracks, current_index)
+                         self.metadata_panel.set_track(track_item)
+                         if self.mpris2:
+                             self.mpris2.update_metadata(track_item)
+@@ -468,6 +439,69 @@ class MocSyncHelper:
+     def get_cached_position(self) -> float:
+         return self.last_position
+     
++    def is_playing(self) -> bool:
++        """Check if MOC is currently playing - uses moc_controller.get_status()."""
++        if not self.use_moc:
++            return False
++        status = self.moc_controller.get_status(force_refresh=False)
++        return status is not None and status.get("state", "STOP") == "PLAY"
++    
++    def is_track_playing(self, track: TrackMetadata, normalize_path: Callable[[Optional[str]], Optional[str]]) -> bool:
++        """
++        Check if a specific track is currently playing in MOC - uses moc_controller.get_status().
++        
++        Args:
++            track: The track to check
++            normalize_path: Function to normalize file paths for comparison
++            
++        Returns:
++            True if the track is currently playing, False otherwise
++        """
++        if not self.use_moc or not track or not track.file_path:
++            return False
++        
++        status = self.moc_controller.get_status(force_refresh=False)
++        if not status:
++            return False
++        
++        moc_state = status.get("state", "STOP")
++        moc_file = status.get("file_path")
++        if not moc_file:
++            return False
++        
++        # Compare normalized paths
++        moc_file_abs = normalize_path(moc_file)
++        track_file_abs = normalize_path(track.file_path)
++        return moc_file_abs and track_file_abs and moc_file_abs == track_file_abs and moc_state == "PLAY"
++    
++    def can_resume_track(self, track: TrackMetadata, normalize_path: Callable[[Optional[str]], Optional[str]]) -> bool:
++        """
++        Check if a track is currently paused in MOC and can be resumed - uses moc_controller.get_status().
++        
++        Args:
++            track: The track to check
++            normalize_path: Function to normalize file paths for comparison
++            
++        Returns:
++            True if the track is paused and can be resumed, False otherwise
++        """
++        if not self.use_moc or not track or not track.file_path:
++            return False
++        
++        status = self.moc_controller.get_status(force_refresh=True)
++        if not status:
++            return False
++        
++        moc_state = status.get("state", "STOP")
++        moc_file = status.get("file_path")
++        if not moc_file:
++            return False
++        
++        # Compare normalized paths
++        moc_file_abs = normalize_path(moc_file)
++        track_file_abs = normalize_path(track.file_path)
++        return moc_file_abs and track_file_abs and moc_file_abs == track_file_abs and moc_state == "PAUSE"
++    
+     def seek(self, position: float, force: bool = False):
+         position = max(0.0, position)
+         duration = self.get_cached_duration()

@@ -2,7 +2,7 @@
 
 import dbus
 import time
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, List
 from functools import wraps
 
 from core.logging import get_logger
@@ -125,12 +125,17 @@ def dbus_safe_call(func: Callable, default_return: Any = None, log_errors: bool 
         return default_return
 
 
-def validate_dbus_message(message: dbus.Message, required_interface: Optional[str] = None) -> bool:
+def validate_dbus_message(message: Any, required_interface: Optional[str] = None) -> bool:
     """
     Validate a D-Bus message for security.
     
+    This function is intended for low-level D-Bus message validation.
+    Note: When using dbus.service.Object, messages are handled automatically
+    and methods receive regular Python arguments, not message objects.
+    
     Args:
-        message: D-Bus message to validate
+        message: D-Bus message object (low-level API) or any object with
+                get_interface() and get_sender() methods
         required_interface: Required interface name (optional)
         
     Returns:
@@ -139,12 +144,19 @@ def validate_dbus_message(message: dbus.Message, required_interface: Optional[st
     try:
         # Check if message has required interface
         if required_interface:
+            if not hasattr(message, 'get_interface'):
+                logger.warning("D-Bus message object missing get_interface() method")
+                return False
             if message.get_interface() != required_interface:
                 logger.warning("D-Bus message has wrong interface: expected %s, got %s",
                              required_interface, message.get_interface())
                 return False
         
         # Validate sender (basic check)
+        if not hasattr(message, 'get_sender'):
+            logger.warning("D-Bus message object missing get_sender() method")
+            return False
+        
         sender = message.get_sender()
         if sender and not sender.startswith(':'):
             # Well-known names should be validated

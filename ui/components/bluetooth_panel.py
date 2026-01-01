@@ -18,10 +18,11 @@ class BluetoothPanel(Gtk.Box):
         'device-selected': (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
     
-    def __init__(self, bt_manager: BluetoothManager, bt_sink: Optional[BluetoothSink] = None):
+    def __init__(self, bt_manager: BluetoothManager):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.bt_manager = bt_manager
-        self.bt_sink = bt_sink
+        # Create BluetoothSink internally - panel owns it
+        self.bt_sink = BluetoothSink(self.bt_manager)
         self.sink_toggle: Optional[Gtk.ToggleButton] = None
         self.sink_status: Optional[Gtk.Label] = None
         
@@ -54,23 +55,22 @@ class BluetoothPanel(Gtk.Box):
         self.append(scrolled)
         
         # Sink mode toggle
-        if self.bt_sink:
-            sink_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-            sink_box.set_margin_top(5)
-            
-            self.sink_toggle = Gtk.ToggleButton(label="Enable Speaker Mode")
-            self.sink_toggle.connect('toggled', self._on_sink_toggled)
-            sink_box.append(self.sink_toggle)
-            
-            self.sink_status = Gtk.Label(label="")
-            sink_box.append(self.sink_status)
-            
-            self.append(sink_box)
-            
-            # Setup sink callbacks
-            self.bt_sink.on_sink_enabled = self._on_sink_enabled
-            self.bt_sink.on_sink_disabled = self._on_sink_disabled
-            self.bt_sink.on_device_connected = self._on_sink_device_connected
+        sink_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        sink_box.set_margin_top(5)
+        
+        self.sink_toggle = Gtk.ToggleButton(label="Enable Speaker Mode")
+        self.sink_toggle.connect('toggled', self._on_sink_toggled)
+        sink_box.append(self.sink_toggle)
+        
+        self.sink_status = Gtk.Label(label="")
+        sink_box.append(self.sink_status)
+        
+        self.append(sink_box)
+        
+        # Setup sink callbacks
+        self.bt_sink.on_sink_enabled = self._on_sink_enabled
+        self.bt_sink.on_sink_disabled = self._on_sink_disabled
+        self.bt_sink.on_device_connected = self._on_sink_device_connected
         
         # Setup callbacks
         self.bt_manager.on_device_connected = self._on_device_connected
@@ -105,11 +105,27 @@ class BluetoothPanel(Gtk.Box):
         self._update_status()
     
     def _on_device_activated(self, tree_view, path, column):
-        """Handle device selection."""
+        """Handle device selection - pair/connect if sink mode enabled."""
         model = tree_view.get_model()
         tree_iter = model.get_iter(path)
         if tree_iter:
             device_path = model.get_value(tree_iter, 0)
+            
+            # Handle pairing/connection internally
+            if self.bt_sink and self.bt_sink.is_sink_enabled:
+                device = None
+                for d in self.bt_manager.get_devices():
+                    if d.path == device_path:
+                        device = d
+                        break
+                
+                if device:
+                    if not device.paired:
+                        self.bt_manager.pair_device(device_path)
+                    elif not device.connected:
+                        self.bt_manager.connect_device(device_path)
+            
+            # Still emit signal for other listeners if needed
             self.emit('device-selected', device_path)
     
     def _on_device_connected(self, device: BluetoothDevice):
@@ -174,4 +190,29 @@ class BluetoothPanel(Gtk.Box):
         self.device_store.clear()
         self.status_label.set_text("Speaker mode disabled")
         self.status_icon.set_from_icon_name("bluetooth-disabled-symbolic")
+    
+    def handle_playback_control(self, action: str) -> bool:
+        """
+        Handle playback control commands when BT sink is active.
+        
+        Args:
+            action: One of 'play', 'pause', 'stop', 'next', 'prev'
+            
+        Returns:
+            True if BT is active and command was handled, False otherwise
+        """
+        if not self.bt_sink or not self.bt_sink.is_sink_enabled:
+            return False
+        
+        if not self.bt_sink.connected_device:
+            return False
+        
+        # Route to bt_sink playback control
+        return self.bt_sink.control_playback(action)
+    
+    def is_bt_playback_active(self) -> bool:
+        """Check if BT sink is active and receiving audio."""
+        return (self.bt_sink and 
+                self.bt_sink.is_sink_enabled and 
+                self.bt_sink.connected_device is not None)
 

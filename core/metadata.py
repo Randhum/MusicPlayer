@@ -152,6 +152,9 @@ class TrackMetadata:
         """
         Get a tag value trying multiple possible keys - works for all formats.
         
+        This method tries different access patterns to extract tag values gracefully,
+        handling format-specific quirks and errors.
+        
         Args:
             audio_file: Mutagen File object
             tag_keys: List of possible tag key names to try
@@ -160,70 +163,101 @@ class TrackMetadata:
             Tag value as string, or None if not found
         """
         for key in tag_keys:
-            try:
-                value = None
-                
-                # Try different access methods based on file type
-                # FLAC and OGG use Vorbis comments accessed via tags attribute
-                if isinstance(audio_file, (FLAC, OggVorbis)):
-                    # Access via tags dictionary
-                    if hasattr(audio_file, 'tags') and audio_file.tags is not None:
-                        if key in audio_file.tags:
-                            value = audio_file.tags[key]
-                # MP3 uses ID3 tags - can access directly or via tags
-                elif isinstance(audio_file, MP3):
-                    # Try direct access first
-                    try:
-                        if key in audio_file:
-                            value = audio_file[key]
-                    except (KeyError, TypeError):
-                        # Try via tags attribute
-                        if hasattr(audio_file, 'tags') and audio_file.tags is not None:
-                            if key in audio_file.tags:
-                                value = audio_file.tags[key]
-                # MP4 uses a different structure
-                elif isinstance(audio_file, MP4):
-                    # MP4 tags are accessed directly
-                    if key in audio_file:
-                        value = audio_file[key]
-                else:
-                    # Generic fallback: try direct access, then tags attribute
-                    try:
-                        if key in audio_file:
-                            value = audio_file[key]
-                    except (KeyError, TypeError):
-                        if hasattr(audio_file, 'tags') and audio_file.tags is not None:
-                            if key in audio_file.tags:
-                                value = audio_file.tags[key]
-                
-                if value is None:
-                    continue
-                
-                # Handle different tag formats
-                # Most formats return lists
-                if isinstance(value, list):
-                    if len(value) > 0:
-                        value = value[0]
-                    else:
-                        continue
-                # MP4 sometimes returns tuples
-                if isinstance(value, tuple):
-                    if len(value) > 0:
-                        value = value[0]
-                    else:
-                        continue
-                # Some formats return bytes
-                if isinstance(value, bytes):
-                    value = value.decode('utf-8', errors='ignore')
-                
-                # Convert to string and clean up
-                result = str(value).strip()
-                if result:
-                    return result
-                    
-            except (KeyError, AttributeError, TypeError, IndexError):
-                continue
+            value = self._try_get_tag_value(audio_file, key)
+            if value is not None:
+                # Normalize the value to a string
+                normalized = self._normalize_tag_value(value)
+                if normalized:
+                    return normalized
         return None
+    
+    def _try_get_tag_value(self, audio_file: File, key: str) -> Optional[Any]:
+        """
+        Try to get a tag value using various access methods.
+        
+        Tries multiple access patterns in order:
+        1. Direct access (audio_file[key])
+        2. Tags attribute access (audio_file.tags[key])
+        
+        Handles format-specific errors gracefully.
+        
+        Args:
+            audio_file: Mutagen File object
+            key: Tag key to retrieve
+            
+        Returns:
+            Tag value (may be list, tuple, bytes, or string), or None if not found
+        """
+        # Method 1: Try direct access (works for MP3, MP4, and some formats)
+        try:
+            if key in audio_file:
+                return audio_file[key]
+        except (KeyError, TypeError, ValueError):
+            # KeyError: key doesn't exist (expected)
+            # TypeError: object doesn't support 'in' operator
+            # ValueError: some formats raise this for invalid keys
+            pass
+        
+        # Method 2: Try via tags attribute (works for FLAC, OGG, and some MP3)
+        if hasattr(audio_file, 'tags') and audio_file.tags is not None:
+            try:
+                # For Vorbis tags (FLAC/OGG), checking 'key in tags' can raise ValueError
+                # for invalid keys, so we need special handling
+                if isinstance(audio_file, (FLAC, OggVorbis)):
+                    try:
+                        if key in audio_file.tags:
+                            return audio_file.tags[key]
+                    except ValueError:
+                        # Invalid key for Vorbis tags - return None
+                        return None
+                else:
+                    # For other formats, safe to check normally
+                    if key in audio_file.tags:
+                        return audio_file.tags[key]
+            except (KeyError, TypeError, AttributeError, ValueError):
+                # Various errors that can occur when accessing tags
+                pass
+        
+        return None
+    
+    def _normalize_tag_value(self, value: Any) -> Optional[str]:
+        """
+        Normalize a tag value to a string, handling different formats.
+        
+        Handles:
+        - Lists (take first element)
+        - Tuples (take first element)
+        - Bytes (decode to string)
+        - Strings (return as-is after stripping)
+        
+        Args:
+            value: Raw tag value from mutagen
+            
+        Returns:
+            Normalized string value, or None if value is empty/invalid
+        """
+        if value is None:
+            return None
+        
+        # Handle lists (most common format)
+        if isinstance(value, list):
+            if len(value) == 0:
+                return None
+            value = value[0]
+        
+        # Handle tuples (MP4 sometimes uses these)
+        if isinstance(value, tuple):
+            if len(value) == 0:
+                return None
+            value = value[0]
+        
+        # Handle bytes (decode to string)
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', errors='ignore')
+        
+        # Convert to string and clean up
+        result = str(value).strip()
+        return result if result else None
     
     def _extract_album_art(self, audio_file: File) -> Optional[str]:
         """

@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Music Player - Main entry point."""
+"""
+Music Player - Main entry point.
+
+This module initializes the application and creates the main window.
+All component initialization (Bluetooth, audio players, etc.) is handled
+by the MainWindow class.
+
+Architecture:
+- MainWindow creates and manages core components (BluetoothManager, AudioPlayer, etc.)
+- BluetoothPanel owns and manages BluetoothSink internally
+- Player controls route to active playback source (MOC/internal player/Bluetooth)
+"""
 
 import sys
 import gi
@@ -15,7 +26,7 @@ try:
 except ValueError:
     USE_ADW = False
 
-from typing import Optional
+from typing import Optional, Any
 
 from core.config import get_config
 from core.logging import get_logger
@@ -71,9 +82,8 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
             if file_path:
                 from core.metadata import TrackMetadata
                 track = TrackMetadata(file_path)
-                self.window.playlist_manager.add_track(track)
+                self.window.playlist_view.add_track(track)
         
-        self.window._update_playlist_view()
         self.window.present()
 
 

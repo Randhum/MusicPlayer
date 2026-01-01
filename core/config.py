@@ -247,6 +247,13 @@ class Config:
         log_dir = self.data_dir / 'logs'
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir
+    
+    @property
+    def playlists_dir(self) -> Path:
+        """Get playlists directory for saved playlists."""
+        playlists_dir = self.data_dir / 'playlists'
+        playlists_dir.mkdir(parents=True, exist_ok=True)
+        return playlists_dir
 
 
 # Convenience function
