@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
+    from ui.components.player_controls import PlayerControls
     from ui.moc_sync import MocSyncHelper
 
 # ============================================================================
@@ -31,26 +32,30 @@ class PlaylistView(Gtk.Box):
 
     __gsignals__ = {
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        "remove-track": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        "move-track-up": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        "move-track-down": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        "clear-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
-        "save-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
-        "load-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
-        "refresh-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "current-index-changed": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
     }
 
-    def __init__(self, playlist_manager: PlaylistManager, moc_sync: Optional["MocSyncHelper"] = None):
+    def __init__(
+        self,
+        playlist_manager: PlaylistManager,
+        moc_sync: Optional["MocSyncHelper"] = None,
+        player_controls: Optional["PlayerControls"] = None,
+        window: Optional[Gtk.Window] = None,
+    ):
         """
         Initialize playlist view.
 
         Args:
             playlist_manager: PlaylistManager instance for data operations
             moc_sync: Optional MocSyncHelper instance for automatic MOC synchronization
+            player_controls: Optional PlayerControls instance for playback coordination
+            window: Optional Gtk.Window instance for dialog parents
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.playlist_manager = playlist_manager
         self.moc_sync = moc_sync
+        self.player_controls = player_controls
+        self.window = window
 
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -70,28 +75,28 @@ class PlaylistView(Gtk.Box):
         self.refresh_button.set_tooltip_text("Refresh from MOC")
         self.refresh_button.add_css_class("flat")
         self.refresh_button.set_size_request(36, 36)  # Touch-friendly size
-        self.refresh_button.connect("clicked", lambda w: self.emit("refresh-playlist"))
+        self.refresh_button.connect("clicked", lambda w: self._handle_refresh())
         header_box.append(self.refresh_button)
 
         self.clear_button = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
         self.clear_button.set_tooltip_text("Clear Playlist")
         self.clear_button.add_css_class("flat")
         self.clear_button.set_size_request(36, 36)  # Touch-friendly size
-        self.clear_button.connect("clicked", lambda w: self.emit("clear-playlist"))
+        self.clear_button.connect("clicked", lambda w: self._handle_clear())
         header_box.append(self.clear_button)
 
         self.save_button = Gtk.Button.new_from_icon_name("document-save-symbolic")
         self.save_button.set_tooltip_text("Save Playlist")
         self.save_button.add_css_class("flat")
         self.save_button.set_size_request(36, 36)  # Touch-friendly size
-        self.save_button.connect("clicked", lambda w: self.emit("save-playlist"))
+        self.save_button.connect("clicked", lambda w: self._show_save_dialog())
         header_box.append(self.save_button)
 
         self.load_button = Gtk.Button.new_from_icon_name("document-open-symbolic")
         self.load_button.set_tooltip_text("Load Saved Playlist")
         self.load_button.add_css_class("flat")
         self.load_button.set_size_request(36, 36)  # Touch-friendly size
-        self.load_button.connect("clicked", lambda w: self.emit("load-playlist"))
+        self.load_button.connect("clicked", lambda w: self._show_load_dialog())
         header_box.append(self.load_button)
 
         self.append(header_box)
@@ -374,6 +379,17 @@ class PlaylistView(Gtk.Box):
         # Auto-sync to MOC
         if self.moc_sync:
             self.moc_sync.update_moc_playlist(start_playback=False)
+    
+    def _handle_clear(self):
+        """Handle clear operation with player coordination."""
+        # Stop player if available
+        if self.player_controls and hasattr(self.player_controls, 'player'):
+            self.player_controls.player.stop()
+        # Stop MOC if available
+        if self.moc_sync:
+            self.moc_sync.stop()
+        # Clear playlist
+        self.clear()
 
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist."""
@@ -665,29 +681,150 @@ class PlaylistView(Gtk.Box):
         """Handle 'Remove' from context menu."""
         self._close_menu()
         if self.selected_index >= 0:
-            self.emit("remove-track", self.selected_index)
+            self.remove_track(self.selected_index)
 
     def _on_menu_move_up(self):
         """Handle 'Move Up' from context menu."""
         self._close_menu()
         if self.selected_index > 0:
-            self.emit("move-track-up", self.selected_index)
+            self.move_track(self.selected_index, self.selected_index - 1)
 
     def _on_menu_move_down(self):
         """Handle 'Move Down' from context menu."""
         self._close_menu()
         if self.selected_index < len(self.tracks) - 1:
-            self.emit("move-track-down", self.selected_index)
+            self.move_track(self.selected_index, self.selected_index + 1)
 
     def _on_menu_clear(self):
         """Handle 'Clear Playlist' from context menu."""
         self._close_menu()
-        self.emit("clear-playlist")
+        self._handle_clear()
 
     def _on_menu_save(self):
         """Handle 'Save Playlist' from context menu."""
         self._close_menu()
-        self.emit("save-playlist")
+        self._show_save_dialog()
+    
+    def _show_save_dialog(self):
+        """Show save playlist dialog."""
+        if not self.window:
+            return
+        
+        dialog = Gtk.Dialog(title="Save Playlist", transient_for=self.window, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+
+        content = dialog.get_content_area()
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        label = Gtk.Label(label="Playlist name:")
+        content.append(label)
+
+        entry = Gtk.Entry()
+        entry.set_placeholder_text("My Playlist")
+        content.append(entry)
+
+        def on_response(d, response_id):
+            if response_id == Gtk.ResponseType.OK:
+                name = entry.get_text().strip()
+                if name:
+                    self.save_playlist(name)
+            dialog.close()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+    
+    def _show_load_dialog(self):
+        """Show load playlist dialog."""
+        if not self.window:
+            return
+        
+        playlists = self.list_playlists()
+
+        if not playlists:
+            # Show a message dialog if no playlists exist
+            dialog = Gtk.MessageDialog(
+                transient_for=self.window,
+                modal=True,
+                message_type=Gtk.MessageType.INFO,
+                buttons=Gtk.ButtonsType.OK,
+                text="No Saved Playlists",
+            )
+            dialog.set_detail_text("There are no saved playlists to load.")
+            dialog.connect("response", lambda d, r: d.close())
+            dialog.present()
+            return
+
+        # Create dialog with playlist selection
+        dialog = Gtk.Dialog(title="Load Playlist", transient_for=self.window, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Load", Gtk.ResponseType.OK)
+
+        content = dialog.get_content_area()
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        label = Gtk.Label(label="Select a playlist to load:")
+        content.append(label)
+
+        # Create list store and tree view for playlist selection
+        store = Gtk.ListStore(str)
+        for playlist_name in playlists:
+            store.append([playlist_name])
+
+        tree_view = Gtk.TreeView(model=store)
+        tree_view.set_headers_visible(False)
+
+        renderer = Gtk.CellRendererText()
+        column = Gtk.TreeViewColumn("Playlist", renderer, text=0)
+        tree_view.append_column(column)
+
+        # Select first item by default
+        selection = tree_view.get_selection()
+        if playlists:
+            path = Gtk.TreePath.new_from_string("0")
+            selection.select_path(path)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(200)
+        scrolled.set_min_content_width(300)
+        scrolled.set_child(tree_view)
+        content.append(scrolled)
+
+        def on_response(d, response_id):
+            if response_id == Gtk.ResponseType.OK:
+                selection = tree_view.get_selection()
+                model, tree_iter = selection.get_selected()
+                if tree_iter:
+                    playlist_name = model[tree_iter][0]
+                    self.load_playlist(playlist_name)
+            dialog.close()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+    
+    def _handle_refresh(self):
+        """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
+        if not self.moc_sync:
+            return
+        
+        # Force reload by checking if MOC has a playlist in memory
+        # If MOC is playing, it definitely has a playlist, so we should try to load it
+        status = self.moc_sync.get_status()
+        if status and status.get("file_path"):
+            # MOC is playing something, so it has a playlist in memory
+            # Try to load it - if the file doesn't exist, we'll preserve current playlist
+            self.moc_sync.load_playlist_from_moc()
+        else:
+            # MOC is not playing, so try to load from file
+            # If file doesn't exist or is empty, we won't clear the current playlist
+            self.moc_sync.load_playlist_from_moc()
 
     def _close_menu(self):
         """Close the context menu safely."""

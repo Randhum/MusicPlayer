@@ -103,8 +103,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.player_controls.moc_sync = self.moc_sync
         self.player_controls.bt_panel = self.bt_panel
         
-        # Update playlist_view with moc_sync reference for auto-sync
+        # Update playlist_view with moc_sync, player_controls, and window references
         self.playlist_view.moc_sync = self.moc_sync
+        self.playlist_view.player_controls = self.player_controls
+        self.playlist_view.window = self
+        
+        # Update library_browser with playlist_view and player_controls references
+        self.library_browser.playlist_view = self.playlist_view
+        self.library_browser.player_controls = self.player_controls
 
         # Setup player callbacks (after player_controls is created)
         self.player.on_state_changed = lambda is_playing: self._on_player_state_changed(is_playing)
@@ -331,23 +337,25 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_library_browser(self):
         """Create and configure the library browser."""
-        self.library_browser = LibraryBrowser()
+        # Note: playlist_view and player_controls will be set after they are created
+        self.library_browser = LibraryBrowser(
+            playlist_view=None,  # Will be set after playlist_view is created
+            player_controls=None,  # Will be set after player_controls is created
+        )
         self.library_browser.connect("track-selected", self._on_track_selected)
         self.library_browser.connect("album-selected", self._on_album_selected)
-        self.library_browser.connect("add-track", self._on_add_track)
-        self.library_browser.connect("add-album", self._on_add_album)
 
     def _create_playlist_view(self):
         """Create and configure the playlist view."""
-        self.playlist_view = PlaylistView(self.playlist_manager)
+        # Note: player_controls and window will be set after player_controls is created
+        self.playlist_view = PlaylistView(
+            self.playlist_manager,
+            moc_sync=None,  # Will be set after moc_sync is created
+            player_controls=None,  # Will be set after player_controls is created
+            window=None,  # Will be set after player_controls is created
+        )
         self.playlist_view.connect("track-activated", self._on_playlist_track_activated)
-        self.playlist_view.connect("remove-track", self._on_playlist_remove_track)
-        self.playlist_view.connect("move-track-up", self._on_playlist_move_up)
-        self.playlist_view.connect("move-track-down", self._on_playlist_move_down)
-        self.playlist_view.connect("clear-playlist", self._on_playlist_clear)
-        self.playlist_view.connect("save-playlist", self._on_playlist_save)
-        self.playlist_view.connect("load-playlist", self._on_playlist_load)
-        self.playlist_view.connect("refresh-playlist", self._on_playlist_refresh)
+        self.playlist_view.connect("current-index-changed", self._on_playlist_current_index_changed)
         # Show refresh button only when MOC is available
         self.playlist_view.set_moc_mode(self.use_moc)
 
@@ -358,7 +366,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _create_bluetooth_panel(self):
         """Create the Bluetooth panel with speaker mode support."""
         self.bt_panel = BluetoothPanel(self.bt_manager)
-        self.bt_panel.connect("device-selected", self._on_bt_device_selected)
+        # Device selection is handled internally by bluetooth_panel
 
     def _create_player_controls(self):
         """Create player controls."""
@@ -375,10 +383,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # Connect signals for metadata updates
         self.player_controls.connect("track-changed", self._on_track_changed)
         self.player_controls.connect("shuffle-toggled", self._on_shuffle_toggled)
-        self.player_controls.connect("loop-mode-changed", self._on_loop_mode_changed)
-        # Connect next/previous button signals
-        self.player_controls.connect("next-clicked", lambda c: c.next_track())
-        self.player_controls.connect("prev-clicked", lambda c: c.previous_track())
 
     def _reattach_panel(self, panel_id: str):
         """Reattach a detached panel to its original position."""
@@ -524,6 +528,11 @@ class MainWindow(Gtk.ApplicationWindow):
         # Trigger playback through player_controls
         self.player_controls.play_current_track()
 
+    def _on_playlist_current_index_changed(self, view, index: int):
+        """Handle current index change in playlist and sync to MOC."""
+        if self.use_moc and self.moc_sync:
+            self.moc_sync.sync_set_current_index(index)
+
     def _on_track_changed(self, controls, track: TrackMetadata):
         """Handle track change from player_controls."""
         # Update metadata panel
@@ -637,12 +646,6 @@ class MainWindow(Gtk.ApplicationWindow):
         # Update player_controls internal state to keep in sync
         self.player_controls.set_shuffle_enabled(active)
 
-    def _on_loop_mode_changed(self, controls, mode: int):
-        """Handle loop mode changes."""
-        # Loop mode is managed by player_controls, just log for debugging
-        mode_names = ["Forward", "Loop Track", "Loop Playlist"]
-        logger.debug("Loop mode changed to: %s", mode_names[mode])
-
     def _sync_shuffle_from_moc(self):
         """Sync shuffle state from MOC to UI."""
         if not self.use_moc or not self.moc_sync:
@@ -653,159 +656,3 @@ class MainWindow(Gtk.ApplicationWindow):
             self.player_controls.shuffle_button.set_active(moc_shuffle)
         return False
 
-    def _on_bt_device_selected(self, panel, device_path: str):
-        """Handle Bluetooth device selection.
-
-        Device selection is now handled internally by the Bluetooth panel.
-        This handler is kept for compatibility but device pairing/connection
-        is managed by the panel itself.
-        """
-        # Device selection is handled internally by bluetooth_panel
-        # This signal handler is kept for potential future use
-        pass
-
-    def _on_add_track(self, browser, track: TrackMetadata):
-        """Handle 'Add to Playlist' from library browser context menu."""
-        self.playlist_view.add_track(track)  # Auto-syncs to MOC
-
-    def _on_add_album(self, browser, tracks):
-        """Handle 'Add Album to Playlist' from library browser context menu."""
-        self.playlist_view.add_tracks(tracks)  # Auto-syncs to MOC
-
-    def _on_playlist_remove_track(self, view, index: int):
-        """Handle track removal from playlist."""
-        self.playlist_view.remove_track(index)  # Auto-syncs to MOC
-
-    def _on_playlist_move_up(self, view, index: int):
-        """Handle moving track up in playlist."""
-        if index > 0:
-            self.playlist_view.move_track(index, index - 1)  # Auto-syncs to MOC
-
-    def _on_playlist_move_down(self, view, index: int):
-        """Handle moving track down in playlist."""
-        tracks = self.playlist_view.get_playlist()
-        if index < len(tracks) - 1:
-            self.playlist_view.move_track(index, index + 1)  # Auto-syncs to MOC
-
-    def _on_playlist_refresh(self, view):
-        """Handle refresh from MOC - reload the playlist from MOC's playlist file."""
-        if self.use_moc and self.moc_sync:
-            # Force reload by checking if MOC has a playlist in memory
-            # If MOC is playing, it definitely has a playlist, so we should try to load it
-            status = self.moc_sync.get_status()
-            if status and status.get("file_path"):
-                # MOC is playing something, so it has a playlist in memory
-                # Try to load it - if the file doesn't exist, we'll preserve current playlist
-                self.moc_sync.load_playlist_from_moc()
-            else:
-                # MOC is not playing, so try to load from file
-                # If file doesn't exist or is empty, we won't clear the current playlist
-                self.moc_sync.load_playlist_from_moc()
-
-    def _on_playlist_clear(self, view):
-        """Handle clearing playlist."""
-        self.player.stop()
-        self.playlist_view.clear()  # Auto-syncs to MOC via playlist_view
-        if self.use_moc and self.moc_sync:
-            self.moc_sync.stop()
-
-    def _on_playlist_save(self, view):
-        """Handle saving playlist."""
-        dialog = Gtk.Dialog(title="Save Playlist", transient_for=self, modal=True)
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Save", Gtk.ResponseType.OK)
-
-        content = dialog.get_content_area()
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-
-        label = Gtk.Label(label="Playlist name:")
-        content.append(label)
-
-        entry = Gtk.Entry()
-        entry.set_placeholder_text("My Playlist")
-        content.append(entry)
-
-        dialog.connect("response", lambda d, r: self._on_save_dialog_response(d, r, entry))
-        dialog.present()
-
-    def _on_save_dialog_response(self, dialog, response, entry):
-        """Handle save dialog response."""
-        if response == Gtk.ResponseType.OK:
-            name = entry.get_text().strip()
-            if name:
-                self.playlist_view.save_playlist(name)
-        dialog.close()
-
-    def _on_playlist_load(self, view):
-        """Handle loading a saved playlist."""
-        playlists = self.playlist_view.list_playlists()
-
-        if not playlists:
-            # Show a message dialog if no playlists exist
-            dialog = Gtk.MessageDialog(
-                transient_for=self,
-                modal=True,
-                message_type=Gtk.MessageType.INFO,
-                buttons=Gtk.ButtonsType.OK,
-                text="No Saved Playlists",
-            )
-            dialog.set_detail_text("There are no saved playlists to load.")
-            dialog.connect("response", lambda d, r: d.close())
-            dialog.present()
-            return
-
-        # Create dialog with playlist selection
-        dialog = Gtk.Dialog(title="Load Playlist", transient_for=self, modal=True)
-        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Load", Gtk.ResponseType.OK)
-
-        content = dialog.get_content_area()
-        content.set_margin_top(10)
-        content.set_margin_bottom(10)
-        content.set_margin_start(10)
-        content.set_margin_end(10)
-
-        label = Gtk.Label(label="Select a playlist to load:")
-        content.append(label)
-
-        # Create list store and tree view for playlist selection
-        store = Gtk.ListStore(str)
-        for playlist_name in playlists:
-            store.append([playlist_name])
-
-        tree_view = Gtk.TreeView(model=store)
-        tree_view.set_headers_visible(False)
-
-        renderer = Gtk.CellRendererText()
-        column = Gtk.TreeViewColumn("Playlist", renderer, text=0)
-        tree_view.append_column(column)
-
-        # Select first item by default
-        selection = tree_view.get_selection()
-        if playlists:
-            path = Gtk.TreePath.new_from_string("0")
-            selection.select_path(path)
-
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_min_content_height(200)
-        scrolled.set_min_content_width(300)
-        scrolled.set_child(tree_view)
-        content.append(scrolled)
-
-        def on_response(d, response_id):
-            if response_id == Gtk.ResponseType.OK:
-                selection = tree_view.get_selection()
-                model, tree_iter = selection.get_selected()
-                if tree_iter:
-                    playlist_name = model[tree_iter][0]
-                    if self.playlist_view.load_playlist(playlist_name):
-                        # Auto-sync to MOC via playlist_view.load_playlist()
-                        pass
-            dialog.close()
-
-        dialog.connect("response", on_response)
-        dialog.present()

@@ -154,7 +154,7 @@ class PlayerControls(Gtk.Box):
         bs = 56
 
         for name, icon, action in [
-            ("prev", "media-skip-backward-symbolic", lambda: self.emit("prev-clicked")),
+            ("prev", "media-skip-backward-symbolic", lambda: self.previous_track()),
             (
                 "play",
                 "media-playback-start-symbolic",
@@ -170,7 +170,7 @@ class PlayerControls(Gtk.Box):
                 "media-playback-stop-symbolic",
                 lambda: (self.stop(), self.emit("stop-clicked")),
             ),
-            ("next", "media-skip-forward-symbolic", lambda: self.emit("next-clicked")),
+            ("next", "media-skip-forward-symbolic", lambda: self.next_track()),
         ]:
             b = Gtk.Button.new_from_icon_name(icon)
             b.set_size_request(bs, bs)

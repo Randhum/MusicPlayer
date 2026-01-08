@@ -4,10 +4,12 @@
 # Standard Library Imports (alphabetical)
 # ============================================================================
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 if TYPE_CHECKING:
     from core.music_library import MusicLibrary
+    from ui.components.playlist_view import PlaylistView
+    from ui.components.player_controls import PlayerControls
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -31,14 +33,25 @@ class LibraryBrowser(Gtk.Box):
     __gsignals__ = {
         "track-selected": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
         "album-selected": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
-        "add-track": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
-        "add-album": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
     }
 
-    def __init__(self):
+    def __init__(
+        self,
+        playlist_view: Optional["PlaylistView"] = None,
+        player_controls: Optional["PlayerControls"] = None,
+    ):
+        """
+        Initialize library browser.
+
+        Args:
+            playlist_view: Optional PlaylistView instance for adding tracks
+            player_controls: Optional PlayerControls instance for playback coordination
+        """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.set_size_request(300, -1)
         self.set_vexpand(True)  # Expand to fill available vertical space
+        self.playlist_view = playlist_view
+        self.player_controls = player_controls
 
         # Header
         header = Gtk.Label(label="Library")
@@ -403,7 +416,8 @@ class LibraryBrowser(Gtk.Box):
     def _on_menu_add_track(self, track: TrackMetadata):
         """Handle 'Add to Playlist' from context menu."""
         self._close_menu()
-        self.emit("add-track", track)
+        if self.playlist_view:
+            self.playlist_view.add_track(track)
 
     def _on_menu_play_album(self, tracks):
         """Handle 'Play Album' from context menu."""
@@ -413,7 +427,8 @@ class LibraryBrowser(Gtk.Box):
     def _on_menu_add_album(self, tracks):
         """Handle 'Add Album to Playlist' from context menu."""
         self._close_menu()
-        self.emit("add-album", tracks)
+        if self.playlist_view:
+            self.playlist_view.add_tracks(tracks)
 
     def _close_menu(self):
         """Close the context menu safely."""
