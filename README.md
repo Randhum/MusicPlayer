@@ -519,6 +519,19 @@ ls -l /path/to/your/track.mp3
 - Better error messages to identify problematic tracks
 - Tracks with missing files are automatically skipped when syncing to MOC
 
+### "Songs don't automatically advance to the next track!"
+
+If playback stops when a song finishes instead of automatically playing the next song:
+
+**What was fixed:**
+- Improved end-of-track detection in MOC synchronization
+- Automatic next track advancement when a track finishes
+- Autonext is now always enabled when starting playback
+- Shuffle mode now works correctly with automatic track advancement
+- Better handling of track completion for both sequential and shuffled playback
+
+The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. When shuffle is enabled, the app works with MOC's shuffle feature to play tracks in random order.
+
 ### "Panel layout is messed up!"
 
 ```bash
@@ -1119,6 +1132,46 @@ We follow a pattern where:
 
 This separation makes code easier to understand and modify!
 
+### Architecture
+
+#### Code Harmonization
+
+The codebase is undergoing systematic harmonization to ensure consistency and maintainability:
+
+**Harmonization Plan:**
+- See [HARMONIZATION_IMPLEMENTATION_PLAN.md](HARMONIZATION_IMPLEMENTATION_PLAN.md) for detailed implementation plan
+- See [CODE_ORGANIZATION_HARMONIZATION.md](CODE_ORGANIZATION_HARMONIZATION.md) for standards and guidelines
+- See [ARCHITECTURE_SIMPLIFICATION_ANALYSIS.md](ARCHITECTURE_SIMPLIFICATION_ANALYSIS.md) for architecture simplification opportunities
+
+**Current Status:**
+- ✅ Configuration files created (pyproject.toml, .pylintrc, .editorconfig)
+- ✅ Import organization standardized in priority files
+- 🔄 Code formatting (requires Black installation)
+- 🔄 Naming harmonization
+- 🔄 Type hints completion
+- 🔄 Documentation improvements
+- 🔄 Error handling improvements
+
+#### Sustainable State Management
+
+The codebase uses explicit state machines to prevent race conditions and improve maintainability:
+
+**State Machines:**
+- **`SeekState`** (player_controls.py): `IDLE`, `DRAGGING`, `SEEKING` - Manages progress bar interactions
+- **`PlaybackState`** (audio_player.py): `STOPPED`, `LOADING`, `PAUSED`, `PLAYING`, `SEEKING` - Tracks GStreamer playback state
+- **`OperationState`** (moc_sync.py): `IDLE`, `RESUMING`, `SEEKING`, `SYNCING` - Prevents race conditions in MOC operations
+- **`SyncState`** (moc_sync.py): `ENABLED`, `DISABLED`, `INITIALIZING` - Tracks sync mode between app and MOC
+- **`ServerState`** (moc_controller.py): `UNAVAILABLE`, `DISCONNECTED`, `CONNECTING`, `CONNECTED` - Tracks MOC server connection
+- **`CacheState`** (moc_controller.py): `EMPTY`, `VALID`, `STALE`, `ERROR` - Manages status cache lifecycle
+
+**Benefits:**
+- **No race conditions**: State machines prevent conflicts between UI updates and playback operations
+- **Self-documenting**: Enums make code intent clear
+- **Easier debugging**: Explicit state transitions are easier to trace
+- **More maintainable**: Changes are localized and predictable
+
+See `SUSTAINABLE_ARCHITECTURE_SUMMARY.md` for detailed documentation.
+
 ### Development
 
 #### Code Quality
@@ -1129,6 +1182,9 @@ The codebase follows Linux best practices:
 - **XDG Base Directory** compliance
 - **Security validation** for all user inputs
 - **D-Bus integration** following specifications
+- **Explicit state machines** using enums instead of boolean flags
+- **Separation of concerns** between UI updates and playback operations
+- **Race condition prevention** through explicit state management
 
 #### Testing
 

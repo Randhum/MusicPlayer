@@ -7,11 +7,22 @@ This module provides audio effects such as:
 - Audio format conversion/transcoding
 """
 
-from typing import Optional, List, Dict, Any
+# ============================================================================
+# Standard Library Imports (alphabetical)
+# ============================================================================
+from typing import Any, Dict, List, Optional
+
+# ============================================================================
+# Third-Party Imports (alphabetical, with version requirements)
+# ============================================================================
 import gi
-gi.require_version('Gst', '1.0')
+
+gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+# ============================================================================
+# Local Imports (grouped by package, alphabetical)
+# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -20,14 +31,14 @@ logger = get_logger(__name__)
 class AudioEffects:
     """
     Audio effects processor using GStreamer.
-    
+
     Provides equalizer, ReplayGain, and crossfade capabilities.
     """
-    
+
     def __init__(self) -> None:
         """
         Initialize audio effects.
-        
+
         Sets up internal state for equalizer, ReplayGain, and crossfade.
         """
         self.equalizer: Optional[Gst.Element] = None
@@ -36,11 +47,11 @@ class AudioEffects:
         self._replaygain_enabled = False
         self._crossfade_enabled = False
         self._crossfade_duration = 3.0  # seconds
-    
+
     def create_equalizer(self) -> Optional[Gst.Element]:
         """
         Create a 10-band equalizer element.
-        
+
         Returns:
             GStreamer equalizer element, or None if unavailable
         """
@@ -56,11 +67,11 @@ class AudioEffects:
         except Exception as e:
             logger.error("Audio effects: Error creating equalizer: %s", e, exc_info=True)
         return None
-    
+
     def set_equalizer_band(self, band: int, gain: float) -> None:
         """
         Set gain for a specific equalizer band.
-        
+
         Args:
             band: Band index (0-9 for 10-band equalizer)
             gain: Gain in dB (-24.0 to 12.0, will be clamped)
@@ -68,14 +79,14 @@ class AudioEffects:
         if not self.equalizer:
             logger.warning("Audio effects: Equalizer not initialized")
             return
-        
+
         if band < 0 or band >= 10:
             logger.warning("Audio effects: Invalid band index: %d (must be 0-9)", band)
             return
-        
+
         gain = max(-24.0, min(12.0, gain))
         self._equalizer_bands[band] = gain
-        
+
         try:
             # Set band gain property
             # Property names are typically "band0", "band1", etc.
@@ -84,31 +95,31 @@ class AudioEffects:
             logger.debug("Audio effects: Set band %d to %.2f dB", band, gain)
         except Exception as e:
             logger.error("Audio effects: Error setting band %d: %s", band, e, exc_info=True)
-    
+
     def get_equalizer_band(self, band: int) -> float:
         """
         Get gain for a specific equalizer band.
-        
+
         Args:
             band: Band index (0-9)
-            
+
         Returns:
             Current gain in dB
         """
         if band < 0 or band >= 10:
             return 0.0
         return self._equalizer_bands[band]
-    
+
     def reset_equalizer(self) -> None:
         """Reset all equalizer bands to 0 dB."""
         for i in range(10):
             self.set_equalizer_band(i, 0.0)
         logger.debug("Audio effects: Equalizer reset")
-    
+
     def create_replaygain(self) -> Optional[Gst.Element]:
         """
         Create a ReplayGain element.
-        
+
         Returns:
             GStreamer ReplayGain element, or None if unavailable
         """
@@ -125,11 +136,11 @@ class AudioEffects:
         except Exception as e:
             logger.error("Audio effects: Error creating ReplayGain: %s", e, exc_info=True)
         return None
-    
+
     def set_replaygain_enabled(self, enabled: bool) -> None:
         """
         Enable or disable ReplayGain processing.
-        
+
         Args:
             enabled: Whether to enable ReplayGain
         """
@@ -143,14 +154,14 @@ class AudioEffects:
                 logger.debug("Audio effects: ReplayGain %s", "enabled" if enabled else "disabled")
             except Exception as e:
                 logger.error("Audio effects: Error configuring ReplayGain: %s", e, exc_info=True)
-    
+
     def create_crossfade(self, duration: float = 3.0) -> Optional[Gst.Element]:
         """
         Create a crossfade element for smooth transitions.
-        
+
         Args:
             duration: Crossfade duration in seconds
-            
+
         Returns:
             GStreamer crossfade element, or None if unavailable
         """
@@ -167,34 +178,34 @@ class AudioEffects:
         except Exception as e:
             logger.error("Audio effects: Error creating crossfade: %s", e, exc_info=True)
         return None
-    
+
     def set_crossfade_enabled(self, enabled: bool) -> None:
         """
         Enable or disable crossfade between tracks.
-        
+
         Args:
             enabled: Whether to enable crossfade
         """
         self._crossfade_enabled = enabled
         logger.debug("Audio effects: Crossfade %s", "enabled" if enabled else "disabled")
-    
+
     def set_crossfade_duration(self, duration: float) -> None:
         """
         Set crossfade duration.
-        
+
         Args:
             duration: Duration in seconds (0.0 to 10.0, will be clamped)
         """
         self._crossfade_duration = max(0.0, min(10.0, duration))
         logger.debug("Audio effects: Crossfade duration set to %.1fs", self._crossfade_duration)
-    
+
     def get_preset(self, name: str) -> Optional[Dict[str, Any]]:
         """
         Get a named equalizer preset.
-        
+
         Args:
             name: Preset name (e.g., "flat", "bass_boost", "treble_boost")
-            
+
         Returns:
             Dictionary with band gains, or None if preset not found
         """
@@ -205,18 +216,18 @@ class AudioEffects:
             "vocal_boost": [0.0, 0.0, 3.0, 6.0, 6.0, 3.0, 0.0, 0.0, 0.0, 0.0],
             "loudness": [3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0, 0.0, 1.0, 2.0],
         }
-        
+
         if name.lower() in presets:
             return {"bands": presets[name.lower()]}
         return None
-    
+
     def apply_preset(self, name: str) -> bool:
         """
         Apply a named equalizer preset.
-        
+
         Args:
             name: Preset name (e.g., 'flat', 'bass_boost', 'treble_boost')
-            
+
         Returns:
             True if preset was applied, False if preset not found
         """
@@ -229,26 +240,22 @@ class AudioEffects:
             return True
         logger.warning("Audio effects: Preset '%s' not found", name)
         return False
-    
+
     def get_equalizer_state(self) -> Dict[str, Any]:
         """
         Get current equalizer state.
-        
+
         Returns:
             Dictionary with equalizer configuration
         """
-        return {
-            "bands": self._equalizer_bands.copy(),
-            "enabled": self.equalizer is not None
-        }
-    
+        return {"bands": self._equalizer_bands.copy(), "enabled": self.equalizer is not None}
+
     def cleanup(self) -> None:
         """
         Clean up audio effects resources.
-        
+
         Releases GStreamer elements and resets state.
         """
         self.equalizer = None
         self.replaygain = None
         logger.debug("Audio effects: Cleaned up")
-

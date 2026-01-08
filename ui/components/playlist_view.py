@@ -1,128 +1,143 @@
 """Playlist view component - shows current queue/playlist."""
 
+# ============================================================================
+# Standard Library Imports (alphabetical)
+# ============================================================================
 from pathlib import Path
-from typing import Optional, List
+from typing import TYPE_CHECKING, List, Optional
 
+if TYPE_CHECKING:
+    from ui.moc_sync import MocSyncHelper
+
+# ============================================================================
+# Third-Party Imports (alphabetical, with version requirements)
+# ============================================================================
 import gi
-gi.require_version('Gtk', '4.0')
-gi.require_version('Gdk', '4.0')
-gi.require_version('GLib', '2.0')
-from gi.repository import Gtk, GObject, Gdk, GLib
 
+gi.require_version("Gdk", "4.0")
+gi.require_version("GLib", "2.0")
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gdk, GLib, GObject, Gtk
+
+# ============================================================================
+# Local Imports (grouped by package, alphabetical)
+# ============================================================================
 from core.metadata import TrackMetadata
 from core.playlist_manager import PlaylistManager
 
 
 class PlaylistView(Gtk.Box):
     """Component for displaying the current playlist/queue."""
-    
+
     __gsignals__ = {
-        'track-activated': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        'remove-track': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        'move-track-up': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        'move-track-down': (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        'clear-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'save-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'load-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
-        'refresh-playlist': (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        "remove-track": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        "move-track-up": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        "move-track-down": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        "clear-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "save-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "load-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "refresh-playlist": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
-    
-    def __init__(self, playlist_manager: PlaylistManager):
+
+    def __init__(self, playlist_manager: PlaylistManager, moc_sync: Optional["MocSyncHelper"] = None):
         """
         Initialize playlist view.
-        
+
         Args:
             playlist_manager: PlaylistManager instance for data operations
+            moc_sync: Optional MocSyncHelper instance for automatic MOC synchronization
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.playlist_manager = playlist_manager
-        
+        self.moc_sync = moc_sync
+
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         header_box.set_margin_start(5)
         header_box.set_margin_end(5)
         header_box.set_margin_top(5)
         header_box.set_margin_bottom(5)
-        
+
         header_label = Gtk.Label(label="Playlist")
         header_label.add_css_class("title-2")
         header_label.set_halign(Gtk.Align.START)
         header_label.set_hexpand(True)
         header_box.append(header_label)
-        
+
         # Action buttons
         self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
         self.refresh_button.set_tooltip_text("Refresh from MOC")
         self.refresh_button.add_css_class("flat")
         self.refresh_button.set_size_request(36, 36)  # Touch-friendly size
-        self.refresh_button.connect('clicked', lambda w: self.emit('refresh-playlist'))
+        self.refresh_button.connect("clicked", lambda w: self.emit("refresh-playlist"))
         header_box.append(self.refresh_button)
-        
+
         self.clear_button = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
         self.clear_button.set_tooltip_text("Clear Playlist")
         self.clear_button.add_css_class("flat")
         self.clear_button.set_size_request(36, 36)  # Touch-friendly size
-        self.clear_button.connect('clicked', lambda w: self.emit('clear-playlist'))
+        self.clear_button.connect("clicked", lambda w: self.emit("clear-playlist"))
         header_box.append(self.clear_button)
-        
+
         self.save_button = Gtk.Button.new_from_icon_name("document-save-symbolic")
         self.save_button.set_tooltip_text("Save Playlist")
         self.save_button.add_css_class("flat")
         self.save_button.set_size_request(36, 36)  # Touch-friendly size
-        self.save_button.connect('clicked', lambda w: self.emit('save-playlist'))
+        self.save_button.connect("clicked", lambda w: self.emit("save-playlist"))
         header_box.append(self.save_button)
-        
+
         self.load_button = Gtk.Button.new_from_icon_name("document-open-symbolic")
         self.load_button.set_tooltip_text("Load Saved Playlist")
         self.load_button.add_css_class("flat")
         self.load_button.set_size_request(36, 36)  # Touch-friendly size
-        self.load_button.connect('clicked', lambda w: self.emit('load-playlist'))
+        self.load_button.connect("clicked", lambda w: self.emit("load-playlist"))
         header_box.append(self.load_button)
-        
+
         self.append(header_box)
-        
+
         # Scrolled window
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        
+
         # List store: (index, title, artist, duration)
         self.store = Gtk.ListStore(int, str, str, str)
-        
+
         # Tree view
         self.tree_view = Gtk.TreeView(model=self.store)
         self.tree_view.set_headers_visible(True)
-        self.tree_view.connect('row-activated', self._on_row_activated)
+        self.tree_view.connect("row-activated", self._on_row_activated)
         # Add CSS class for touch-friendly styling
         self.tree_view.add_css_class("playlist-tree")
-        
+
         # Add single-tap gesture for touchscreen support (triggers playback)
         single_tap_gesture = Gtk.GestureClick()
         single_tap_gesture.set_button(1)  # Left mouse button or touch
-        single_tap_gesture.connect('pressed', self._on_single_tap)
+        single_tap_gesture.connect("pressed", self._on_single_tap)
         self.tree_view.add_controller(single_tap_gesture)
-        
+
         # Add right-click gesture for context menu
         right_click_gesture = Gtk.GestureClick()
         right_click_gesture.set_button(3)  # Right mouse button
-        right_click_gesture.connect('pressed', self._on_right_click)
+        right_click_gesture.connect("pressed", self._on_right_click)
         self.tree_view.add_controller(right_click_gesture)
-        
+
         # Add long-press gesture for context menu (touch-friendly)
         long_press_gesture = Gtk.GestureLongPress()
         long_press_gesture.set_touch_only(True)  # Only for touch, not mouse
-        long_press_gesture.connect('pressed', self._on_long_press)
+        long_press_gesture.connect("pressed", self._on_long_press)
         self.tree_view.add_controller(long_press_gesture)
-        
+
         # Track tap state to distinguish single tap from double tap
         self._tap_timeout_id = None
         self._tap_path = None
-        
+
         # Context menu
         self.context_menu = None
         self.selected_index = -1
         self._menu_showing = False  # Flag to prevent multiple menus
         self.set_vexpand(True)  # Expand to fill available vertical space
-        
+
         # Columns with touch-friendly padding
         col_index = Gtk.TreeViewColumn("#")
         renderer_index = Gtk.CellRendererText()
@@ -132,7 +147,7 @@ class PlaylistView(Gtk.Box):
         col_index.set_min_width(50)
         col_index.set_resizable(False)
         self.tree_view.append_column(col_index)
-        
+
         col_title = Gtk.TreeViewColumn("Title")
         renderer_title = Gtk.CellRendererText()
         renderer_title.set_padding(8, 12)  # Add padding for touch-friendliness
@@ -141,7 +156,7 @@ class PlaylistView(Gtk.Box):
         col_title.set_expand(True)
         col_title.set_resizable(True)
         self.tree_view.append_column(col_title)
-        
+
         col_artist = Gtk.TreeViewColumn("Artist")
         renderer_artist = Gtk.CellRendererText()
         renderer_artist.set_padding(8, 12)  # Add padding for touch-friendliness
@@ -150,7 +165,7 @@ class PlaylistView(Gtk.Box):
         col_artist.set_expand(True)
         col_artist.set_resizable(True)
         self.tree_view.append_column(col_artist)
-        
+
         col_duration = Gtk.TreeViewColumn("Duration")
         renderer_duration = Gtk.CellRendererText()
         renderer_duration.set_padding(8, 12)  # Add padding for touch-friendliness
@@ -159,131 +174,255 @@ class PlaylistView(Gtk.Box):
         col_duration.set_min_width(80)
         col_duration.set_resizable(False)
         self.tree_view.append_column(col_duration)
-        
+
         scrolled.set_child(self.tree_view)
         scrolled.set_vexpand(True)
         self.append(scrolled)
-        
+
         self.tracks: List[TrackMetadata] = []
         self.current_index: int = -1
-    
+        self._shuffle_enabled: bool = False
+        self._shuffle_queue: List[int] = []  # Queue of shuffled indices for shuffle mode
+
     # ============================================================================
     # Public API - State Reading (Wrapper methods for PlaylistManager)
     # ============================================================================
-    
+
     def get_playlist(self) -> List[TrackMetadata]:
         """Get the current playlist from PlaylistManager."""
         return self.playlist_manager.get_playlist()
-    
+
     def get_current_index(self) -> int:
         """Get the current track index from PlaylistManager."""
         return self.playlist_manager.get_current_index()
-    
+
     def get_current_track(self) -> Optional[TrackMetadata]:
         """Get the currently playing track from PlaylistManager."""
         return self.playlist_manager.get_current_track()
-    
+
     def get_next_track(self) -> Optional[TrackMetadata]:
-        """Get the next track from PlaylistManager."""
-        return self.playlist_manager.get_next_track()
-    
+        """
+        Get the next track from PlaylistManager.
+
+        If shuffle is enabled, returns a random unplayed track.
+        If all tracks have been played, resets and starts over.
+        """
+        if self._shuffle_enabled:
+            return self._get_next_random_track()
+        else:
+            return self.playlist_manager.get_next_track()
+
     def get_previous_track(self) -> Optional[TrackMetadata]:
-        """Get the previous track from PlaylistManager."""
+        """
+        Get the previous track from PlaylistManager.
+
+        Note: In shuffle mode, previous track behavior is not well-defined,
+        so this returns the sequential previous track regardless of shuffle state.
+        """
         return self.playlist_manager.get_previous_track()
-    
+
+    def set_shuffle_enabled(self, enabled: bool):
+        """Enable or disable shuffle mode."""
+        self._shuffle_enabled = enabled
+        # Regenerate shuffle queue when toggling shuffle
+        self._regenerate_shuffle_queue()
+
+    def get_shuffle_enabled(self) -> bool:
+        """Get current shuffle state."""
+        return self._shuffle_enabled
+
+    def _get_next_random_track(self) -> Optional[TrackMetadata]:
+        """
+        Get the next random track from the shuffle queue.
+
+        Uses a shuffled queue of indices. When the queue is empty, regenerates it.
+        This ensures each track is played exactly once before repeating.
+        """
+        tracks = self.playlist_manager.get_playlist()
+        if not tracks:
+            return None
+
+        # If queue is empty, regenerate it
+        if not self._shuffle_queue:
+            self._regenerate_shuffle_queue()
+
+        # If still empty (shouldn't happen, but handle edge case)
+        if not self._shuffle_queue:
+            return None
+
+        # Pop the next index from the queue
+        new_index = self._shuffle_queue.pop(0)
+        self.playlist_manager.set_current_index(new_index)
+        return tracks[new_index]
+
+    def _regenerate_shuffle_queue(self):
+        """
+        Regenerate the shuffle queue with all playlist indices in random order.
+
+        This is called when:
+        - Shuffle is enabled
+        - Playlist is modified (add, remove, clear, load)
+        - Queue is exhausted
+        """
+        import random
+
+        tracks = self.playlist_manager.get_playlist()
+        if not tracks:
+            self._shuffle_queue = []
+            return
+
+        # Create a list of all indices
+        indices = list(range(len(tracks)))
+
+        # Shuffle the list
+        random.shuffle(indices)
+
+        # If there's a current track, remove it from the queue to avoid immediate repeat
+        current_idx = self.playlist_manager.get_current_index()
+        if 0 <= current_idx < len(tracks) and current_idx in indices:
+            indices.remove(current_idx)
+            # Add it at the end so it plays eventually, but not next
+            indices.append(current_idx)
+
+        self._shuffle_queue = indices
+
     # ============================================================================
     # Public API - State Updates
     # ============================================================================
-    
+
     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
         """
         Set the playlist tracks and update the view.
-        
+
         This method updates both the internal display state and the visual representation.
         Note: This does NOT update PlaylistManager - use playlist operation methods for that.
         """
         self.tracks = tracks
         self.current_index = current_index
+        # Regenerate shuffle queue when playlist changes
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._update_view()
-    
+
     def set_current_index(self, index: int):
         """
         Set the currently playing track index.
-        
+
         Updates both PlaylistManager and the UI view.
+        In shuffle mode, removes the index from the shuffle queue if present.
         """
         self.playlist_manager.set_current_index(index)
         self.current_index = index
+        # Remove from shuffle queue if present (to avoid playing it again before queue regenerates)
+        if self._shuffle_enabled and index in self._shuffle_queue:
+            self._shuffle_queue.remove(index)
         self._update_selection()
-    
+
     # ============================================================================
     # Public API - Playlist Operations (Wrapper methods that update both data and UI)
     # ============================================================================
-    
+
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
         """Add a track to the playlist (updates data and UI)."""
         self.playlist_manager.add_track(track, position=position)
         self._sync_view_from_manager()
-    
+        # Regenerate shuffle queue when playlist changes
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        # Auto-sync to MOC
+        if self.moc_sync:
+            self.moc_sync.sync_add_track(track, position)
+
     def add_tracks(self, tracks: List[TrackMetadata]):
         """Add multiple tracks to the playlist (updates data and UI)."""
         self.playlist_manager.add_tracks(tracks)
         self._sync_view_from_manager()
-    
+        # Regenerate shuffle queue when playlist changes
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        # Auto-sync to MOC (use full playlist sync for multiple tracks)
+        if self.moc_sync:
+            self.moc_sync.update_moc_playlist(start_playback=False)
+
     def remove_track(self, index: int):
         """Remove a track from the playlist (updates data and UI)."""
         self.playlist_manager.remove_track(index)
         self._sync_view_from_manager()
-    
+        # Regenerate shuffle queue when playlist changes
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        # Auto-sync to MOC
+        if self.moc_sync:
+            self.moc_sync.sync_remove_track(index)
+
     def move_track(self, from_index: int, to_index: int):
         """Move a track in the playlist (updates data and UI)."""
         self.playlist_manager.move_track(from_index, to_index)
         self._sync_view_from_manager()
-    
+        # Regenerate shuffle queue when playlist changes
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        # Auto-sync to MOC
+        if self.moc_sync:
+            self.moc_sync.sync_move_track(from_index, to_index)
+
     def clear(self):
         """Clear the playlist (updates data and UI)."""
         self.playlist_manager.clear()
+        self._shuffle_queue.clear()  # Clear shuffle queue
         self._sync_view_from_manager()
-    
+        # Auto-sync to MOC
+        if self.moc_sync:
+            self.moc_sync.update_moc_playlist(start_playback=False)
+
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist."""
         return self.playlist_manager.save_playlist(name)
-    
+
     def load_playlist(self, name: str) -> bool:
         """Load a saved playlist (updates data and UI)."""
         result = self.playlist_manager.load_playlist(name)
         if result:
             self._sync_view_from_manager()
+            # Regenerate shuffle queue when playlist changes
+            if self._shuffle_enabled:
+                self._regenerate_shuffle_queue()
+            # Auto-sync to MOC
+            if self.moc_sync:
+                self.moc_sync.update_moc_playlist(start_playback=False)
         return result
-    
+
     def list_playlists(self) -> List[str]:
         """List all saved playlists."""
         return self.playlist_manager.list_playlists()
-    
+
     # ============================================================================
     # UI Configuration
     # ============================================================================
-    
+
     def set_moc_mode(self, enabled: bool):
         """Show or hide the Refresh button based on whether MOC mode is active."""
         self.refresh_button.set_visible(enabled)
-    
+
     # ============================================================================
     # Internal Methods
     # ============================================================================
-    
+
     def _sync_view_from_manager(self):
         """Sync the view from PlaylistManager's current state."""
         self.tracks = self.playlist_manager.get_playlist()
         self.current_index = self.playlist_manager.get_current_index()
+        # Regenerate shuffle queue if shuffle is enabled (playlist may have changed)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._update_view()
-    
+
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""
         has_tracks = len(self.tracks) > 0
         self.clear_button.set_sensitive(has_tracks)
         self.save_button.set_sensitive(has_tracks)
-    
+
     def _update_view(self):
         """Update the tree view with current tracks."""
         self.store.clear()
@@ -296,24 +435,24 @@ class PlaylistView(Gtk.Box):
         self._update_selection()
         # Update button states
         self._update_button_states()
-    
+
     def _update_selection(self):
         """Update the selection to highlight current track."""
         selection = self.tree_view.get_selection()
         selection.unselect_all()
-        
+
         if 0 <= self.current_index < len(self.tracks):
             path = Gtk.TreePath.new_from_indices([self.current_index])
             selection.select_path(path)
             self.tree_view.set_cursor(path, None, False)
             self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
-    
+
     def _format_duration(self, seconds: float) -> str:
         """Format duration in seconds to MM:SS."""
         minutes = int(seconds // 60)
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
-    
+
     def _on_single_tap(self, gesture, n_press, x, y):
         """Handle single tap - for touchscreen support."""
         # On first press, set up timeout for single tap
@@ -322,13 +461,13 @@ class PlaylistView(Gtk.Box):
             if self._tap_timeout_id:
                 GLib.source_remove(self._tap_timeout_id)
                 self._tap_timeout_id = None
-            
+
             # Get the path at tap position
             path_info = self.tree_view.get_path_at_pos(int(x), int(y))
             if path_info:
                 path, column, cell_x, cell_y = path_info
                 self._tap_path = path
-                
+
                 # For single tap on touchscreen, trigger playback after a short delay
                 # This allows double-tap to cancel it if needed
                 self._tap_timeout_id = GLib.timeout_add(250, self._on_tap_timeout)
@@ -340,7 +479,7 @@ class PlaylistView(Gtk.Box):
                 GLib.source_remove(self._tap_timeout_id)
                 self._tap_timeout_id = None
                 self._tap_path = None
-    
+
     def _on_tap_timeout(self):
         """Handle tap timeout - trigger playback if it was a single tap."""
         self._tap_timeout_id = None
@@ -348,10 +487,10 @@ class PlaylistView(Gtk.Box):
             indices = self._tap_path.get_indices()
             if indices:
                 index = indices[0]
-                self.emit('track-activated', index)
+                self.emit("track-activated", index)
             self._tap_path = None
         return False  # Don't repeat
-    
+
     def _on_row_activated(self, tree_view, path, column):
         """Handle row activation (double-click or double-tap)."""
         # Cancel any pending single-tap timeout
@@ -359,24 +498,24 @@ class PlaylistView(Gtk.Box):
             GLib.source_remove(self._tap_timeout_id)
             self._tap_timeout_id = None
             self._tap_path = None
-        
+
         indices = path.get_indices()
         if indices:
             index = indices[0]
-            self.emit('track-activated', index)
-    
+            self.emit("track-activated", index)
+
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
         # Only show menu if not already showing
         if not self._menu_showing:
             self._show_context_menu_at_position(x, y)
-    
+
     def _on_long_press(self, gesture, x, y):
         """Handle long-press to show context menu (touch-friendly)."""
         # Only show menu if not already showing
         if not self._menu_showing:
             self._show_context_menu_at_position(x, y)
-    
+
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position."""
         # Get the path at click position
@@ -388,15 +527,15 @@ class PlaylistView(Gtk.Box):
                 self.selected_index = indices[0]
         else:
             self.selected_index = -1
-        
+
         self._show_context_menu(x, y)
-    
+
     def _show_context_menu(self, x: float, y: float):
         """Show context menu."""
         # Prevent multiple menus
         if self._menu_showing:
             return
-        
+
         # Properly close and remove old menu if exists
         if self.context_menu:
             try:
@@ -411,78 +550,78 @@ class PlaylistView(Gtk.Box):
                 # Widget may have been destroyed
                 pass
             self.context_menu = None
-        
+
         # Set flag to prevent multiple menus
         self._menu_showing = True
-        
+
         # Create popover
         self.context_menu = Gtk.Popover()
         # Set child first, then parent
         self.context_menu.set_has_arrow(True)
-        
+
         # Create menu box with touch-friendly spacing
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         menu_box.set_margin_start(10)
         menu_box.set_margin_end(10)
         menu_box.set_margin_top(10)
         menu_box.set_margin_bottom(10)
-        
+
         if self.selected_index >= 0:
             # Track-specific menu items
             play_item = Gtk.Button(label="Play")
             play_item.add_css_class("flat")
             play_item.set_size_request(150, 40)  # Larger for touch
-            play_item.connect('clicked', lambda w: self._on_menu_play())
+            play_item.connect("clicked", lambda w: self._on_menu_play())
             menu_box.append(play_item)
-            
+
             remove_item = Gtk.Button(label="Remove")
             remove_item.add_css_class("flat")
             remove_item.set_size_request(150, 40)  # Larger for touch
-            remove_item.connect('clicked', lambda w: self._on_menu_remove())
+            remove_item.connect("clicked", lambda w: self._on_menu_remove())
             menu_box.append(remove_item)
-            
+
             menu_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-            
+
             move_up_item = Gtk.Button(label="Move Up")
             move_up_item.add_css_class("flat")
             move_up_item.set_size_request(150, 40)  # Larger for touch
-            move_up_item.connect('clicked', lambda w: self._on_menu_move_up())
+            move_up_item.connect("clicked", lambda w: self._on_menu_move_up())
             move_up_item.set_sensitive(self.selected_index > 0)
             menu_box.append(move_up_item)
-            
+
             move_down_item = Gtk.Button(label="Move Down")
             move_down_item.add_css_class("flat")
             move_down_item.set_size_request(150, 40)  # Larger for touch
-            move_down_item.connect('clicked', lambda w: self._on_menu_move_down())
+            move_down_item.connect("clicked", lambda w: self._on_menu_move_down())
             move_down_item.set_sensitive(self.selected_index < len(self.tracks) - 1)
             menu_box.append(move_down_item)
-            
+
             menu_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-        
+
         # General menu items
         clear_item = Gtk.Button(label="Clear Playlist")
         clear_item.add_css_class("flat")
         clear_item.set_size_request(150, 40)  # Larger for touch
-        clear_item.connect('clicked', lambda w: self._on_menu_clear())
+        clear_item.connect("clicked", lambda w: self._on_menu_clear())
         clear_item.set_sensitive(len(self.tracks) > 0)
         menu_box.append(clear_item)
-        
+
         save_item = Gtk.Button(label="Save Playlist...")
         save_item.add_css_class("flat")
         save_item.set_size_request(150, 40)  # Larger for touch
-        save_item.connect('clicked', lambda w: self._on_menu_save())
+        save_item.connect("clicked", lambda w: self._on_menu_save())
         save_item.set_sensitive(len(self.tracks) > 0)
         menu_box.append(save_item)
-        
+
         # Set child before parent
         self.context_menu.set_child(menu_box)
-        
+
         # Set parent after child is set
         self.context_menu.set_parent(self.tree_view)
-        
+
         # Connect to closed signal for cleanup
-        self.context_menu.connect('closed', self._on_popover_closed)
-        
+        self.context_menu.connect("closed", self._on_popover_closed)
+
         # Position and show menu
         rect = Gdk.Rectangle()
         rect.x = int(x)
@@ -491,14 +630,14 @@ class PlaylistView(Gtk.Box):
         rect.height = 1
         self.context_menu.set_pointing_to(rect)
         self.context_menu.popup()
-    
+
     def _on_popover_closed(self, popover):
         """Handle popover closed signal for cleanup."""
         # Reset flag immediately
         self._menu_showing = False
         # Clean up after a short delay to avoid issues
         GLib.timeout_add(100, self._cleanup_popover)
-    
+
     def _cleanup_popover(self):
         """Clean up the popover properly."""
         if self.context_menu:
@@ -515,41 +654,41 @@ class PlaylistView(Gtk.Box):
         # Ensure flag is reset
         self._menu_showing = False
         return False  # Don't repeat
-    
+
     def _on_menu_play(self):
         """Handle 'Play' from context menu."""
         self._close_menu()
         if self.selected_index >= 0:
-            self.emit('track-activated', self.selected_index)
-    
+            self.emit("track-activated", self.selected_index)
+
     def _on_menu_remove(self):
         """Handle 'Remove' from context menu."""
         self._close_menu()
         if self.selected_index >= 0:
-            self.emit('remove-track', self.selected_index)
-    
+            self.emit("remove-track", self.selected_index)
+
     def _on_menu_move_up(self):
         """Handle 'Move Up' from context menu."""
         self._close_menu()
         if self.selected_index > 0:
-            self.emit('move-track-up', self.selected_index)
-    
+            self.emit("move-track-up", self.selected_index)
+
     def _on_menu_move_down(self):
         """Handle 'Move Down' from context menu."""
         self._close_menu()
         if self.selected_index < len(self.tracks) - 1:
-            self.emit('move-track-down', self.selected_index)
-    
+            self.emit("move-track-down", self.selected_index)
+
     def _on_menu_clear(self):
         """Handle 'Clear Playlist' from context menu."""
         self._close_menu()
-        self.emit('clear-playlist')
-    
+        self.emit("clear-playlist")
+
     def _on_menu_save(self):
         """Handle 'Save Playlist' from context menu."""
         self._close_menu()
-        self.emit('save-playlist')
-    
+        self.emit("save-playlist")
+
     def _close_menu(self):
         """Close the context menu safely."""
         if self.context_menu:
@@ -559,4 +698,3 @@ class PlaylistView(Gtk.Box):
                 # Widget may have been destroyed
                 pass
         self._menu_showing = False
-
