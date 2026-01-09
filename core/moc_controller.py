@@ -18,7 +18,7 @@ import subprocess
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -141,6 +141,7 @@ class MocController:
         Start the MOC server if it is not already running.
 
         Uses explicit state machine to track server connection state.
+        Avoids redundant connection attempts to prevent overloading.
 
         Returns:
             True if server is available, False otherwise
@@ -151,12 +152,22 @@ class MocController:
 
         if self._server_state == ServerState.CONNECTED:
             return True
+        
+        # If we're already trying to connect, wait a bit and check again
+        # This prevents multiple simultaneous connection attempts
+        if self._server_state == ServerState.CONNECTING:
+            time.sleep(0.1)
+            # Check if connection succeeded (another thread might have completed it)
+            if self._server_state == ServerState.CONNECTED:
+                return True
+            # Still connecting - return False to avoid overload
+            return False
 
         # Attempt to start server
         self._server_state = ServerState.CONNECTING
         result = self._run("--server", capture_output=True)
         if result.returncode == 0:
-            time.sleep(0.1)
+            time.sleep(0.2)  # Increased delay to give server time to initialize
             self._server_state = ServerState.CONNECTED
             return True
 
@@ -182,11 +193,23 @@ class MocController:
         # Parse M3U file using the standard parser
         parsed_tracks = self._parse_m3u_playlist()
 
-        # Convert to TrackMetadata objects
-        for _, _, file_path in parsed_tracks:
+        # Convert to TrackMetadata objects, using EXTINF metadata if available
+        for _, extinf_line, file_path in parsed_tracks:
             # Only include files that actually exist
             if Path(file_path).exists():
+                # Create TrackMetadata from file (will extract metadata from file)
                 metadata = TrackMetadata(file_path)
+                
+                # Override with EXTINF metadata if available (preserves title/artist from M3U)
+                if extinf_line:
+                    extinf_meta = self._extinf_to_metadata(extinf_line)
+                    if extinf_meta.get("title"):
+                        metadata.title = extinf_meta["title"]
+                    if extinf_meta.get("artist"):
+                        metadata.artist = extinf_meta["artist"]
+                    if extinf_meta.get("duration") is not None:
+                        metadata.duration = extinf_meta["duration"]
+                
                 tracks.append(metadata)
 
         # Find current track index
@@ -451,28 +474,41 @@ class MocController:
         """Enable autonext (autoplay) in MOC."""
         if not self.is_available():
             return
-        self.ensure_server()
+        # Only ensure server if not already connected
+        # This avoids redundant calls when server is already running
+        if self._server_state != ServerState.CONNECTED:
+            if not self.ensure_server():
+                return
         self._run("--on=autonext")
 
     def disable_autonext(self):
         """Disable autonext (autoplay) in MOC."""
         if not self.is_available():
             return
-        self.ensure_server()
+        # Only ensure server if not already connected
+        if self._server_state != ServerState.CONNECTED:
+            if not self.ensure_server():
+                return
         self._run("--off=autonext")
 
     def enable_shuffle(self):
         """Enable shuffle mode in MOC."""
         if not self.is_available():
             return
-        self.ensure_server()
+        # Only ensure server if not already connected
+        if self._server_state != ServerState.CONNECTED:
+            if not self.ensure_server():
+                return
         self._run("--on=shuffle")
 
     def disable_shuffle(self):
         """Disable shuffle mode in MOC."""
         if not self.is_available():
             return
-        self.ensure_server()
+        # Only ensure server if not already connected
+        if self._server_state != ServerState.CONNECTED:
+            if not self.ensure_server():
+                return
         self._run("--off=shuffle")
 
     def get_shuffle_state(self) -> Optional[bool]:
@@ -548,6 +584,54 @@ class MocController:
 
         return tracks
 
+    def _track_to_extinf(self, track: TrackMetadata) -> str:
+        """Convert TrackMetadata to EXTINF line.
+        
+        Format: #EXTINF:duration,title - artist
+        """
+        duration = int(track.duration) if track.duration and track.duration > 0 else -1
+        title = track.title or Path(track.file_path).stem
+        artist = track.artist or "Unknown Artist"
+        return f"#EXTINF:{duration},{title} - {artist}"
+    
+    def _extinf_to_metadata(self, extinf_line: str) -> Dict[str, Any]:
+        """Parse EXTINF line to extract metadata.
+        
+        Format: #EXTINF:duration,title - artist
+        Returns dict with duration, title, artist (or None if parsing fails)
+        """
+        try:
+            # Remove #EXTINF: prefix
+            if not extinf_line.startswith("#EXTINF:"):
+                return {}
+            content = extinf_line[8:].strip()  # Remove "#EXTINF:"
+            
+            # Find comma separator
+            if "," not in content:
+                return {}
+            
+            duration_str, rest = content.split(",", 1)
+            duration = int(duration_str) if duration_str and duration_str != "-1" else None
+            
+            # Parse "title - artist" format
+            title = rest
+            artist = None
+            if " - " in rest:
+                parts = rest.split(" - ", 1)
+                title = parts[0].strip()
+                artist = parts[1].strip() if len(parts) > 1 else None
+            
+            result = {}
+            if duration is not None:
+                result["duration"] = float(duration)
+            if title:
+                result["title"] = title
+            if artist:
+                result["artist"] = artist
+            return result
+        except Exception:
+            return {}
+    
     def _write_m3u_playlist(self, tracks: List[Tuple[Optional[str], str]]) -> bool:
         """
         Write tracks to M3U playlist file following the standard format.
@@ -688,11 +772,12 @@ class MocController:
             start_playback: If True and current_index is valid, start playback of that track.
         """
         # Build track list for M3U file (extinf_line, file_path pairs)
-        # For now, we don't generate EXTINF lines - MOC will handle that
+        # Generate EXTINF lines to preserve metadata
         track_list = []
         valid_tracks = []
+        original_to_valid_index = {}  # Map original index to valid_tracks index
 
-        for track in tracks:
+        for orig_idx, track in enumerate(tracks):
             if not track or not track.file_path:
                 continue
             # Validate that file exists
@@ -702,7 +787,10 @@ class MocController:
                 continue
             # Use absolute path
             abs_path = str(file_path.resolve())
-            track_list.append((None, abs_path))  # No EXTINF line for now
+            # Generate EXTINF line from track metadata
+            extinf_line = self._track_to_extinf(track)
+            track_list.append((extinf_line, abs_path))
+            original_to_valid_index[orig_idx] = len(valid_tracks)
             valid_tracks.append(track)
 
         # Write entire playlist to M3U file (always write, even if server isn't available)
@@ -712,14 +800,29 @@ class MocController:
             return
 
         # Optionally start playback from the selected track (only if server is available)
-        if start_playback and self.is_available() and 0 <= current_index < len(valid_tracks):
-            track = valid_tracks[current_index]
+        # Map current_index from original tracks list to valid_tracks list
+        valid_index = -1
+        if 0 <= current_index < len(tracks):
+            valid_index = original_to_valid_index.get(current_index, -1)
+        
+        if start_playback and self.is_available() and 0 <= valid_index < len(valid_tracks):
+            track = valid_tracks[valid_index]
             if track and track.file_path:
                 file_path = Path(track.file_path)
                 if file_path.exists() and file_path.is_file():
                     abs_path = str(file_path.resolve())
+                    
+                    # Ensure server is running - only call once here
+                    # get_status() will also check, but it's optimized to avoid redundant calls
+                    if not self.ensure_server():
+                        logger.warning("MOC server is not available, cannot start playback")
+                        return
+                    
+                    # Small delay after ensuring server to let it stabilize
+                    time.sleep(0.1)
+                    
                     # Check if MOC is already paused on this track - if so, just resume instead of restarting
-                    self.ensure_server()
+                    # get_status() will call ensure_server() but it's already connected, so it returns immediately
                     status = self.get_status(force_refresh=False)
                     if status:
                         moc_state = status.get("state", "STOP")
@@ -738,9 +841,15 @@ class MocController:
                     # This will restart from the beginning
                     result = self._run("--playit", abs_path, capture_output=True)
                     if result.returncode != 0:
-                        # Fallback: use jump with 0-based index
-                        self._run("-j", str(current_index), capture_output=False)
-                        self._run("-p", capture_output=False)
+                        # Check if it's a server connection error
+                        if result.stderr and "can't connect" in result.stderr.lower():
+                            logger.error("MOC server connection failed: %s", result.stderr)
+                            return
+                        # Fallback: use jump with mapped valid_index
+                        if valid_index >= 0:
+                            time.sleep(0.1)  # Small delay before fallback
+                            self._run("-j", str(valid_index), capture_output=False)
+                            self._run("-p", capture_output=False)
 
     def play_file(self, file_path: str):
         """Play a specific file via MOC, keeping the playlist intact."""

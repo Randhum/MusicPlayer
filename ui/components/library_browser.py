@@ -243,14 +243,22 @@ class LibraryBrowser(Gtk.Box):
             name, item_type, data = model.get(tree_iter, 0, 1, 2)
 
             if item_type == "track" and isinstance(data, TrackMetadata):
-                self.emit("track-selected", data)
+                if self.playlist_view:
+                    self.playlist_view.replace_and_play_track(data)
+                else:
+                    # Fallback to signal if playlist_view not available
+                    self.emit("track-selected", data)
             elif item_type == "folder":
                 # Select all tracks in folder (recursively)
                 folder_iter = tree_iter
                 tracks = []
                 self._collect_tracks(model, folder_iter, tracks)
                 if tracks:
-                    self.emit("album-selected", tracks)
+                    if self.playlist_view:
+                        self.playlist_view.replace_and_play_album(tracks)
+                    else:
+                        # Fallback to signal if playlist_view not available
+                        self.emit("album-selected", tracks)
 
     def _collect_tracks(self, model, parent_iter, tracks):
         """Recursively collect all tracks from a folder."""
@@ -411,7 +419,11 @@ class LibraryBrowser(Gtk.Box):
     def _on_menu_play_track(self, track: TrackMetadata):
         """Handle 'Play Now' from context menu."""
         self._close_menu()
-        self.emit("track-selected", track)
+        if self.playlist_view:
+            self.playlist_view.replace_and_play_track(track)
+        else:
+            # Fallback to signal if playlist_view not available
+            self.emit("track-selected", track)
 
     def _on_menu_add_track(self, track: TrackMetadata):
         """Handle 'Add to Playlist' from context menu."""
@@ -422,7 +434,11 @@ class LibraryBrowser(Gtk.Box):
     def _on_menu_play_album(self, tracks):
         """Handle 'Play Album' from context menu."""
         self._close_menu()
-        self.emit("album-selected", tracks)
+        if self.playlist_view:
+            self.playlist_view.replace_and_play_album(tracks)
+        else:
+            # Fallback to signal if playlist_view not available
+            self.emit("album-selected", tracks)
 
     def _on_menu_add_album(self, tracks):
         """Handle 'Add Album to Playlist' from context menu."""

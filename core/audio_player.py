@@ -176,6 +176,18 @@ class AudioPlayer:
 
         elif msg_type == Gst.MessageType.EOS:
             self._playback_state = PlaybackState.STOPPED
+            # Stop position updates
+            if self._position_timeout_id is not None:
+                try:
+                    GLib.source_remove(self._position_timeout_id)
+                except (ValueError, TypeError):
+                    pass
+                self._position_timeout_id = None
+            # Send final position update (position = duration) to show "00:00" left
+            if self.duration > 0:
+                self.position = self.duration
+                if self.on_position_changed:
+                    self.on_position_changed(self.position, self.duration)
             if self.on_state_changed:
                 self.on_state_changed(False)
             if self.on_track_finished:

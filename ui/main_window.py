@@ -111,6 +111,13 @@ class MainWindow(Gtk.ApplicationWindow):
         # Update library_browser with playlist_view and player_controls references
         self.library_browser.playlist_view = self.playlist_view
         self.library_browser.player_controls = self.player_controls
+        
+        # Load current playlist from auto-save file on startup (after playlist_view is created)
+        if self.playlist_manager.load_current_playlist():
+            # Restore UI state from saved playlist
+            tracks = self.playlist_manager.get_playlist()
+            current_index = self.playlist_manager.get_current_index()
+            self.playlist_view.set_playlist(tracks, current_index)
 
         # Setup player callbacks (after player_controls is created)
         self.player.on_state_changed = lambda is_playing: self._on_player_state_changed(is_playing)
@@ -508,30 +515,23 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _on_track_selected(self, browser, track: TrackMetadata):
         """Handle track selection from library browser."""
-        self.playlist_view.clear()
-        self.playlist_view.add_track(track)
-        self.playlist_view.set_current_index(0)
-        # Trigger playback through player_controls
-        self.player_controls.play_current_track()
+        self.playlist_view.replace_and_play_track(track)
 
     def _on_album_selected(self, browser, tracks: List[TrackMetadata]):
         """Handle album selection from library browser."""
-        self.playlist_view.clear()
-        self.playlist_view.add_tracks(tracks)
-        self.playlist_view.set_current_index(0)
-        # Trigger playback through player_controls
-        self.player_controls.play_current_track()
+        self.playlist_view.replace_and_play_album(tracks)
 
     def _on_playlist_track_activated(self, view, index: int):
-        """Handle track activation in playlist."""
-        self.playlist_view.set_current_index(index)
-        # Trigger playback through player_controls
-        self.player_controls.play_current_track()
+        """Handle track activation in playlist - delegate to playlist_view."""
+        # PlaylistView now handles this internally via play_track_at_index()
+        # Keep signal connection for potential external coordination if needed
+        pass
 
     def _on_playlist_current_index_changed(self, view, index: int):
-        """Handle current index change in playlist and sync to MOC."""
-        if self.use_moc and self.moc_sync:
-            self.moc_sync.sync_set_current_index(index)
+        """Handle current index change - for external coordination only."""
+        # MOC sync is now handled internally in playlist_view.play_track_at_index()
+        # Keep this handler only if needed for metadata panel or other external coordination
+        pass
 
     def _on_track_changed(self, controls, track: TrackMetadata):
         """Handle track change from player_controls."""
@@ -595,10 +595,14 @@ class MainWindow(Gtk.ApplicationWindow):
         # MOC handles auto-advancement internally for audio files
 
         # Only auto-advance if autonext is enabled
-        if not self.player_controls.get_autonext_enabled():
+        # Use player_controls.autonext_enabled directly (not MOC's state)
+        if not self.player_controls.autonext_enabled:
+            # Autonext disabled - just stop
+            self.player.stop()
+            self.playlist_view.set_current_index(-1)
             return
 
-        loop_mode = self.player_controls.get_loop_mode()
+        loop_mode = self.player_controls.loop_mode
         tracks = self.playlist_view.get_playlist()
         current_index = self.playlist_view.get_current_index()
 
@@ -650,7 +654,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Sync shuffle state from MOC to UI."""
         if not self.use_moc or not self.moc_sync:
             return False
-        moc_shuffle = self.moc_sync.get_shuffle_enabled()
+        moc_shuffle = self.moc_sync.shuffle_enabled
         if moc_shuffle is not None:
             self.shuffle_enabled = moc_shuffle
             self.player_controls.shuffle_button.set_active(moc_shuffle)

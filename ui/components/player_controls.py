@@ -218,12 +218,16 @@ class PlayerControls(Gtk.Box):
 
     def update_time_labels(self, position: float, duration: float) -> None:
         """Update time labels only (current time, duration, time left)."""
+        # Clamp position to valid range
         position = max(0.0, min(position, duration if duration > 0 else position))
         self.time_label.set_text(self._format_time(position))
         self.duration_label.set_text(self._format_time(duration))
-        self.time_left_label.set_text(
-            f"-{self._format_time(max(0, duration - position))}" if duration > 0 else "-00:00"
-        )
+        # Calculate time left, ensuring it's never negative
+        if duration > 0:
+            time_left = max(0.0, duration - position)
+            self.time_left_label.set_text(f"-{self._format_time(time_left)}")
+        else:
+            self.time_left_label.set_text("-00:00")
 
     def update_progress(self, position: float, duration: float) -> None:
         """
@@ -439,17 +443,21 @@ class PlayerControls(Gtk.Box):
             self.shuffle_button.set_active(enabled)
             self._updating_toggle = False
 
-    def get_autonext_enabled(self) -> bool:
+    @property
+    def autonext_enabled(self) -> bool:
         return self._autonext_enabled
 
-    def set_autonext_enabled(self, enabled: bool):
+    @autonext_enabled.setter
+    def autonext_enabled(self, enabled: bool):
         self._autonext_enabled = enabled
         self._sync_moc_options()
 
-    def get_loop_mode(self) -> int:
+    @property
+    def loop_mode(self) -> int:
         return self._loop_mode
 
-    def set_loop_mode(self, mode: int):
+    @loop_mode.setter
+    def loop_mode(self, mode: int):
         if 0 <= mode <= 2:
             self._loop_mode = mode
             if not self._updating_toggle:
@@ -461,6 +469,24 @@ class PlayerControls(Gtk.Box):
             return False
         return not is_video_file(track.file_path)
 
+    def _play_with_moc(self, track: TrackMetadata) -> None:
+        """Play track using MOC."""
+        self._stop_internal_player()
+        if self.moc_sync:
+            self.moc_sync.enable_sync()
+            self.moc_sync.update_moc_playlist(start_playback=True)
+            self._sync_moc_options()
+
+    def _play_with_internal(self, track: TrackMetadata) -> None:
+        """Play track using internal player."""
+        # For video files, ensure MOC is stopped
+        if self.moc_sync and self.moc_sync.use_moc:
+            status = self.moc_sync.moc_controller.get_status(force_refresh=False)
+            if status and status.get("state") in ("PLAY", "PAUSE"):
+                self.moc_sync.moc_controller.stop()
+        self.player.load_track(track)
+        self.player.play()
+
     def play_current_track(self):
         track = self.playlist_view.get_current_track()
         if not track or not track.file_path or not Path(track.file_path).exists():
@@ -470,21 +496,10 @@ class PlayerControls(Gtk.Box):
         self.update_progress(0.0, 0.0)
 
         if self.should_use_moc(track):
-            self._stop_internal_player()
-            if self.moc_sync:
-                self.moc_sync.reset_end_detection()  # Reset for new MOC track
-                self.moc_sync.enable_sync()
-                self.moc_sync.update_moc_playlist(start_playback=True)
-                self._sync_moc_options()
+            self._play_with_moc(track)
         else:
-            # For video files, ensure MOC is stopped
-            if self.moc_sync and self.moc_sync.use_moc:
-                status = self.moc_sync.moc_controller.get_status(force_refresh=False)
-                if status and status.get("state") in ("PLAY", "PAUSE"):
-                    self.moc_sync.moc_controller.stop()
-            self.player.load_track(track)
-            self.player.play()
-            # Don't sync MOC playlist for video files - it might interfere
+            self._play_with_internal(track)
+        
         self.playlist_view._update_view()
         self.set_playing(True)
         self._duration = (
@@ -577,11 +592,15 @@ class PlayerControls(Gtk.Box):
 
     def get_current_duration(self) -> float:
         track = self.playlist_view.get_current_track()
-        return (
-            (self.moc_sync.get_cached_duration() if self.moc_sync else 0.0)
-            if self.should_use_moc(track)
-            else self.player.get_duration()
-        )
+        if self.should_use_moc(track) and self.moc_sync:
+            # Use cached duration or get from status
+            duration = self.moc_sync.last_duration if self.moc_sync.last_duration > 0 else 0.0
+            if duration == 0:
+                status = self.moc_sync.get_status(force_refresh=False)
+                if status:
+                    duration = float(status.get("duration", 0.0))
+            return duration
+        return self.player.get_duration()
 
     def _stop_internal_player(self):
         if self.player.is_playing or self.player.current_track:
@@ -617,11 +636,24 @@ class PlayerControls(Gtk.Box):
         # Ensure internal player is stopped first
         self._stop_internal_player()
         if self.moc_sync:
-            if self.moc_sync.can_resume_track(track, self._normalize_path):
-                self.moc_sync.play()
-                self.set_playing(True)
-            elif not self.moc_sync.is_track_playing(track, self._normalize_path):
-                self.play_current_track()
+            # Check if track is paused and can be resumed
+            status = self.moc_sync.get_status(force_refresh=True)
+            if status:
+                moc_state = status.get("state", "STOP")
+                moc_file = status.get("file_path")
+                if moc_file and track.file_path:
+                    moc_file_abs = self._normalize_path(moc_file)
+                    track_file_abs = self._normalize_path(track.file_path)
+                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
+                        if moc_state == "PAUSE":
+                            self.moc_sync.play()
+                            self.set_playing(True)
+                            return
+                        elif moc_state == "PLAY":
+                            self.set_playing(True)
+                            return
+            # Track not playing or paused - start playback
+            self.play_current_track()
 
     def _resume_internal(self) -> None:
         # Ensure MOC is stopped first
@@ -665,7 +697,7 @@ class PlayerControls(Gtk.Box):
             track = self.playlist_view.get_current_track()
             if track:
                 pos = (
-                    self.moc_sync.get_cached_position()
+                    (self.moc_sync.last_position if self.moc_sync else 0.0)
                     if self.should_use_moc(track) and self.moc_sync
                     else self.player.get_position()
                 )

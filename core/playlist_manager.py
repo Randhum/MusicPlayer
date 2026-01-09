@@ -44,6 +44,9 @@ class PlaylistManager:
 
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
+        
+        # Auto-save flag to prevent recursive saves during load
+        self._auto_save_enabled: bool = True
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None) -> None:
         """
@@ -57,6 +60,7 @@ class PlaylistManager:
             self.current_playlist.append(track)
         else:
             self.current_playlist.insert(position, track)
+        self._sync_to_file()
 
     def add_tracks(self, tracks: List[TrackMetadata], position: Optional[int] = None) -> None:
         """
@@ -71,6 +75,7 @@ class PlaylistManager:
         else:
             for i, track in enumerate(tracks):
                 self.current_playlist.insert(position + i, track)
+        self._sync_to_file()
 
     def remove_track(self, index: int) -> None:
         """
@@ -86,6 +91,7 @@ class PlaylistManager:
                 self.current_index -= 1
             elif index == self.current_index:
                 self.current_index = -1
+            self._sync_to_file()
 
     def move_track(self, from_index: int, to_index: int) -> None:
         """
@@ -107,11 +113,13 @@ class PlaylistManager:
                 self.current_index -= 1
             elif to_index <= self.current_index < from_index:
                 self.current_index += 1
+            self._sync_to_file()
 
     def clear(self) -> None:
         """Clear the current playlist and reset index."""
         self.current_playlist.clear()
         self.current_index = -1
+        self._sync_to_file()
 
     def get_current_track(self) -> Optional[TrackMetadata]:
         """Get the currently playing track."""
@@ -128,6 +136,7 @@ class PlaylistManager:
         """
         if 0 <= index < len(self.current_playlist):
             self.current_index = index
+            self._sync_to_file()
 
     def get_next_track(self) -> Optional[TrackMetadata]:
         """Get the next track in the playlist."""
@@ -201,11 +210,20 @@ class PlaylistManager:
             with open(playlist_file, "r", encoding="utf-8") as f:
                 playlist_data = json.load(f)
 
-            self.current_playlist = [
-                TrackMetadata.from_dict(track_dict)
-                for track_dict in playlist_data.get("tracks", [])
-            ]
-            self.current_index = -1
+            self._auto_save_enabled = False  # Prevent save during load
+            try:
+                self.current_playlist = [
+                    TrackMetadata.from_dict(track_dict)
+                    for track_dict in playlist_data.get("tracks", [])
+                ]
+                self.current_index = playlist_data.get("current_index", -1)
+                # Clamp index to valid range
+                if self.current_index >= len(self.current_playlist):
+                    self.current_index = -1
+            finally:
+                self._auto_save_enabled = True
+            # Sync after load to ensure consistency
+            self._sync_to_file()
 
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
@@ -257,3 +275,51 @@ class PlaylistManager:
     def get_current_index(self) -> int:
         """Get the current playing index."""
         return self.current_index
+    
+    @property
+    def current_playlist_file(self) -> Path:
+        """Get the path to the current playlist auto-save file."""
+        return self.playlists_dir / "current_playlist.json"
+    
+    def _sync_to_file(self) -> None:
+        """Auto-save current playlist to JSON file."""
+        if not self._auto_save_enabled:
+            return
+        try:
+            playlist_data = {
+                "tracks": [track.to_dict() for track in self.current_playlist],
+                "current_index": self.current_index
+            }
+            with open(self.current_playlist_file, "w", encoding="utf-8") as f:
+                json.dump(playlist_data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning("Failed to auto-save current playlist: %s", e)
+    
+    def load_current_playlist(self) -> bool:
+        """Load the current playlist from auto-save file."""
+        if not self.current_playlist_file.exists():
+            return False
+        try:
+            with open(self.current_playlist_file, "r", encoding="utf-8") as f:
+                playlist_data = json.load(f)
+            
+            self._auto_save_enabled = False  # Prevent save during load
+            try:
+                self.current_playlist = [
+                    TrackMetadata.from_dict(track_dict)
+                    for track_dict in playlist_data.get("tracks", [])
+                ]
+                self.current_index = playlist_data.get("current_index", -1)
+                # Clamp index to valid range
+                if self.current_index >= len(self.current_playlist):
+                    self.current_index = -1
+            finally:
+                self._auto_save_enabled = True
+            
+            return True
+        except (OSError, IOError, json.JSONDecodeError) as e:
+            logger.error("Error loading current playlist: %s", e, exc_info=True)
+            return False
+        except Exception as e:
+            logger.error("Unexpected error loading current playlist: %s", e, exc_info=True)
+            return False
