@@ -12,11 +12,9 @@ This module lets us:
 # ============================================================================
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import time
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,24 +33,6 @@ from core.metadata import TrackMetadata
 logger = get_logger(__name__)
 
 
-class ServerState(Enum):
-    """State machine for MOC server connection."""
-
-    UNAVAILABLE = "unavailable"  # mocp not in PATH
-    DISCONNECTED = "disconnected"  # Server not running
-    CONNECTING = "connecting"  # Attempting to start server
-    CONNECTED = "connected"  # Server is running and available
-
-
-class CacheState(Enum):
-    """State machine for status cache."""
-
-    EMPTY = "empty"  # No cache available
-    VALID = "valid"  # Cache is valid and can be used
-    STALE = "stale"  # Cache exists but is expired
-    ERROR = "error"  # Cache invalidated due to error
-
-
 class MocController:
     """Minimal wrapper around `mocp` for playlist and playback control."""
 
@@ -62,20 +42,13 @@ class MocController:
         config = get_config()
         self._playlist_path: Path = config.moc_playlist_path
 
-        # Explicit state machines (replace boolean flags)
-        self._server_state: ServerState = (
-            ServerState.UNAVAILABLE if not self._mocp_path else ServerState.DISCONNECTED
-        )
-        self._cache_state: CacheState = CacheState.EMPTY
+        # Simple server state tracking
+        self._server_connected: bool = False
 
-        # Status caching to reduce MOC server load
+        # Simple status caching to reduce MOC server load
         self._status_cache: Optional[Dict] = None
         self._status_cache_time: float = 0.0
-        self._status_cache_ttl: float = 0.2  # Cache for 200ms to reduce calls
-
-        # Error tracking for backoff
-        self._last_error_time: float = 0.0
-        self._error_backoff: float = 1.0  # Start with 1 second backoff
+        self._status_cache_ttl: float = 0.2  # Cache for 200ms
 
     # ------------------------------------------------------------------
     # Availability / helpers
@@ -88,11 +61,9 @@ class MocController:
         """
         Run `mocp` with the given arguments.
 
-        Handles errors gracefully and prevents overwhelming the MOC server.
-        Silently handles "server not running" errors to avoid spam.
+        Handles errors gracefully. Silently handles "server not running" errors.
         """
         if not self._mocp_path:
-            # Simulate a failed process
             return subprocess.CompletedProcess(
                 args=["mocp", *args], returncode=127, stdout="", stderr="mocp not found"
             )
@@ -104,74 +75,65 @@ class MocController:
                 capture_output=capture_output,
                 text=True,
                 check=False,
-                timeout=5.0,  # 5 second timeout to prevent hanging
+                timeout=5.0,
             )
 
-            # Check for server connection errors and handle gracefully
+            # Handle server connection errors gracefully
             if result.returncode != 0 and result.stderr:
                 stderr_lower = result.stderr.lower()
-                if (
-                    "server is not running" in stderr_lower
-                    or "can't receive value" in stderr_lower
-                    or "can't connect" in stderr_lower
-                ):
-                    self._server_state = ServerState.DISCONNECTED
-                    self._cache_state = CacheState.EMPTY
+                if any(msg in stderr_lower for msg in [
+                    "server is not running", "can't receive value", "can't connect"
+                ]):
+                    self._server_connected = False
                     self._status_cache = None
                     return subprocess.CompletedProcess(
                         args=cmd, returncode=125, stdout="", stderr=""
                     )
 
-            # Clear status cache on successful command (except for --info and --server)
+            # Clear cache on commands that change state
             if "--info" not in args and "--server" not in args:
-                self._cache_state = CacheState.EMPTY
                 self._status_cache = None
             return result
         except subprocess.TimeoutExpired:
-            # Timeout - return error result
             return subprocess.CompletedProcess(
                 args=cmd, returncode=124, stdout="", stderr="Command timed out"
             )
         except Exception as e:
-            # Other errors - return error result
             return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
     def ensure_server(self) -> bool:
         """
         Start the MOC server if it is not already running.
 
-        Uses explicit state machine to track server connection state.
-        Avoids redundant connection attempts to prevent overloading.
-
         Returns:
             True if server is available, False otherwise
         """
         if not self.is_available():
-            self._server_state = ServerState.UNAVAILABLE
             return False
 
-        if self._server_state == ServerState.CONNECTED:
+        if self._server_connected:
             return True
-        
-        # If we're already trying to connect, wait a bit and check again
-        # This prevents multiple simultaneous connection attempts
-        if self._server_state == ServerState.CONNECTING:
-            time.sleep(0.1)
-            # Check if connection succeeded (another thread might have completed it)
-            if self._server_state == ServerState.CONNECTED:
-                return True
-            # Still connecting - return False to avoid overload
-            return False
 
         # Attempt to start server
-        self._server_state = ServerState.CONNECTING
         result = self._run("--server", capture_output=True)
         if result.returncode == 0:
-            time.sleep(0.2)  # Increased delay to give server time to initialize
-            self._server_state = ServerState.CONNECTED
-            return True
+            # Wait for server to be fully ready by polling --info
+            # This ensures we don't send commands before server is accepting them
+            for _ in range(10):  # Try up to 10 times (1 second total)
+                time.sleep(0.1)
+                test_result = subprocess.run(
+                    [self._mocp_path, "--info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+                if test_result.returncode == 0:
+                    self._server_connected = True
+                    return True
+            # Server started but not responding - consider it failed
+            logger.warning("MOC server started but not responding to --info")
+            return False
 
-        self._server_state = ServerState.DISCONNECTED
         return False
 
     # ------------------------------------------------------------------
@@ -235,56 +197,27 @@ class MocController:
         """
         Get current MOC status (state, file, position, duration, volume).
 
-        Uses explicit state machine for cache management and caching to reduce server load.
-        Set force_refresh=True to bypass cache.
+        Uses caching to reduce server load. Set force_refresh=True to bypass cache.
 
         Returns None if status can't be read.
         """
         if not self.is_available():
-            self._server_state = ServerState.UNAVAILABLE
             return None
 
         # Check cache first (unless forced refresh)
         current_time = time.time()
-        if (
-            not force_refresh
-            and self._cache_state == CacheState.VALID
-            and self._status_cache is not None
-        ):
+        if not force_refresh and self._status_cache is not None:
             if current_time - self._status_cache_time < self._status_cache_ttl:
                 return self._status_cache
-            else:
-                # Cache expired but still exists
-                self._cache_state = CacheState.STALE
-
-        # Check if we're in error backoff period
-        if current_time - self._last_error_time < self._error_backoff:
-            # Return cached status if available, otherwise None
-            if (
-                self._cache_state in (CacheState.VALID, CacheState.STALE)
-                and self._status_cache is not None
-            ):
-                return self._status_cache
-            return None
 
         if not self.ensure_server():
-            self._cache_state = CacheState.EMPTY
             self._status_cache = None
             return None
 
         result = self._run("--info", capture_output=True)
-
-        # Handle errors with backoff
         if result.returncode != 0 or not result.stdout:
-            self._last_error_time = current_time
-            self._error_backoff = min(self._error_backoff * 2, 5.0)
-            self._cache_state = CacheState.ERROR
             self._status_cache = None
             return None
-
-        # Success - reset backoff
-        self._error_backoff = 0.2  # Reset to minimal backoff
-        self._last_error_time = 0.0
 
         info: Dict[str, str] = {}
         for line in result.stdout.splitlines():
@@ -355,10 +288,9 @@ class MocController:
             "autonext": autonext,
         }
 
-        # Update cache and state
+        # Update cache
         self._status_cache = status
         self._status_cache_time = current_time
-        self._cache_state = CacheState.VALID
 
         return status
 
@@ -366,19 +298,37 @@ class MocController:
     # Controls
     # ------------------------------------------------------------------
     def play(self):
-        """Start / resume playback."""
+        """Start / resume playback.
+        
+        Uses --toggle-pause for simplicity - this handles both paused and stopped states.
+        - If paused: resumes from current position
+        - If stopped: starts playing from current playlist position
+        - If playing: does nothing harmful (toggles to pause then back)
+        
+        For starting from the first track, use play_first() instead.
+        """
         if not self.is_available():
             return
         self.ensure_server()
-        # Check if MOC is paused - if so, use --unpause to resume from pause position
-        # Otherwise use --play to start/resume
+        # Use --toggle-pause which handles both resume and play scenarios
+        # This is simpler than checking state first
         status = self.get_status(force_refresh=False)
-        if status and status.get("state", "STOP") == "PAUSE":
-            # MOC is paused - use --unpause to resume from pause position
-            self._run("--unpause", capture_output=False)
-        else:
-            # MOC is stopped or in other state - use --play
-            self._run("--play", capture_output=False)
+        if status:
+            state = status.get("state", "STOP")
+            if state == "PAUSE":
+                # Resume from pause position
+                self._run("--unpause", capture_output=False)
+            elif state == "STOP":
+                # Start playing from first item (or current position if set)
+                self._run("--play", capture_output=False)
+            # If already playing, do nothing
+    
+    def play_first(self):
+        """Start playing from the first item on the playlist."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--play", capture_output=False)
 
     def pause(self):
         """Pause playback."""
@@ -386,6 +336,13 @@ class MocController:
             return
         self.ensure_server()
         self._run("--pause")
+
+    def toggle_pause(self):
+        """Toggle between playing and paused states."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--toggle-pause")
 
     def stop(self):
         """Stop playback."""
@@ -397,13 +354,10 @@ class MocController:
     def shutdown(self):
         """Completely stop the MOC server (equivalent to `mocp --exit`)."""
         if not self.is_available():
-            self._server_state = ServerState.UNAVAILABLE
             return
-        # We don't call ensure_server() here on purpose – if the server is not
-        # running, there is nothing to shut down.
+        # Don't call ensure_server() - if server isn't running, nothing to shut down
         self._run("--exit")
-        self._server_state = ServerState.DISCONNECTED
-        self._cache_state = CacheState.EMPTY
+        self._server_connected = False
         self._status_cache = None
 
     def next(self):
@@ -424,6 +378,10 @@ class MocController:
         """
         Jump to a specific track index in MOC's playlist.
 
+        Note: MOC doesn't have a direct "jump to index" command, so this reads
+        the playlist and uses play_file() on the track at that index.
+        Prefer using play_file() directly when you have the file path.
+
         Args:
             index: Index of track to jump to (0-based)
             start_playback: If True, start playback after jumping
@@ -434,19 +392,26 @@ class MocController:
         if not self.is_available():
             return False
 
-        self.ensure_server()
-        # MOC uses -j (jump) with index
-        # Format: mocp -j <index>
-        result = self._run("-j", str(index), capture_output=True)
+        # Read playlist and get track at index
+        tracks, _ = self.get_playlist()
+        if not (0 <= index < len(tracks)):
+            logger.warning("Index %d out of range (playlist has %d tracks)", index, len(tracks))
+            return False
 
-        if result.returncode == 0:
-            if start_playback:
-                self.play()
-            logger.debug("Jumped to index %d", index)
+        track = tracks[index]
+        if not track or not track.file_path:
+            logger.warning("Track at index %d has no file path", index)
+            return False
+
+        # Use play_file() which uses --playit
+        if start_playback:
+            self.play_file(track.file_path)
             return True
         else:
-            logger.warning("Failed to jump to index %d", index)
-            return False
+            # If not starting playback, we can't really "jump" without playing
+            # Just return True as there's nothing to do
+            logger.debug("jump_to_index called with start_playback=False - no action taken")
+            return True
 
     def set_volume(self, volume: float):
         """Set volume as a float 0.0–1.0."""
@@ -474,42 +439,49 @@ class MocController:
         """Enable autonext (autoplay) in MOC."""
         if not self.is_available():
             return
-        # Only ensure server if not already connected
-        # This avoids redundant calls when server is already running
-        if self._server_state != ServerState.CONNECTED:
-            if not self.ensure_server():
-                return
+        if not self.ensure_server():
+            return
         self._run("--on=autonext")
 
     def disable_autonext(self):
         """Disable autonext (autoplay) in MOC."""
         if not self.is_available():
             return
-        # Only ensure server if not already connected
-        if self._server_state != ServerState.CONNECTED:
-            if not self.ensure_server():
-                return
+        if not self.ensure_server():
+            return
         self._run("--off=autonext")
+
+    def toggle_autonext(self):
+        """Toggle autonext (autoplay) in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--toggle=autonext")
 
     def enable_shuffle(self):
         """Enable shuffle mode in MOC."""
         if not self.is_available():
             return
-        # Only ensure server if not already connected
-        if self._server_state != ServerState.CONNECTED:
-            if not self.ensure_server():
-                return
+        if not self.ensure_server():
+            return
         self._run("--on=shuffle")
 
     def disable_shuffle(self):
         """Disable shuffle mode in MOC."""
         if not self.is_available():
             return
-        # Only ensure server if not already connected
-        if self._server_state != ServerState.CONNECTED:
-            if not self.ensure_server():
-                return
+        if not self.ensure_server():
+            return
         self._run("--off=shuffle")
+
+    def toggle_shuffle(self):
+        """Toggle shuffle mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--toggle=shuffle")
 
     def get_shuffle_state(self) -> Optional[bool]:
         """Get current shuffle state from MOC. Returns None if unavailable."""
@@ -771,85 +743,36 @@ class MocController:
             current_index: Index of the track that should start playing (if start_playback is True).
             start_playback: If True and current_index is valid, start playback of that track.
         """
-        # Build track list for M3U file (extinf_line, file_path pairs)
-        # Generate EXTINF lines to preserve metadata
+        # Build track list for M3U file
         track_list = []
         valid_tracks = []
-        original_to_valid_index = {}  # Map original index to valid_tracks index
+        original_to_valid_index = {}
 
         for orig_idx, track in enumerate(tracks):
             if not track or not track.file_path:
                 continue
-            # Validate that file exists
             file_path = Path(track.file_path)
             if not file_path.exists() or not file_path.is_file():
                 logger.warning("Track file does not exist: %s", track.file_path)
                 continue
-            # Use absolute path
             abs_path = str(file_path.resolve())
-            # Generate EXTINF line from track metadata
             extinf_line = self._track_to_extinf(track)
             track_list.append((extinf_line, abs_path))
             original_to_valid_index[orig_idx] = len(valid_tracks)
             valid_tracks.append(track)
 
-        # Write entire playlist to M3U file (always write, even if server isn't available)
-        # This ensures the file is ready when MOC starts
+        # Write playlist to M3U file
         if not self._write_m3u_playlist(track_list):
             logger.error("Failed to write playlist to M3U file")
             return
 
-        # Optionally start playback from the selected track (only if server is available)
-        # Map current_index from original tracks list to valid_tracks list
-        valid_index = -1
-        if 0 <= current_index < len(tracks):
-            valid_index = original_to_valid_index.get(current_index, -1)
-        
-        if start_playback and self.is_available() and 0 <= valid_index < len(valid_tracks):
-            track = valid_tracks[valid_index]
-            if track and track.file_path:
-                file_path = Path(track.file_path)
-                if file_path.exists() and file_path.is_file():
-                    abs_path = str(file_path.resolve())
-                    
-                    # Ensure server is running - only call once here
-                    # get_status() will also check, but it's optimized to avoid redundant calls
-                    if not self.ensure_server():
-                        logger.warning("MOC server is not available, cannot start playback")
-                        return
-                    
-                    # Small delay after ensuring server to let it stabilize
-                    time.sleep(0.1)
-                    
-                    # Check if MOC is already paused on this track - if so, just resume instead of restarting
-                    # get_status() will call ensure_server() but it's already connected, so it returns immediately
-                    status = self.get_status(force_refresh=False)
-                    if status:
-                        moc_state = status.get("state", "STOP")
-                        moc_file = status.get("file_path")
-                        if moc_state == "PAUSE" and moc_file:
-                            moc_file_abs = str(Path(moc_file).resolve())
-                            if moc_file_abs == abs_path:
-                                # MOC is already paused on this track - just resume, don't restart
-                                logger.debug(
-                                    "MOC is paused on target track - using --unpause to resume instead of restarting"
-                                )
-                                self._run("--unpause", capture_output=False)
-                                return
-
-                    # Use --playit to play the specific file (works even if it's in playlist)
-                    # This will restart from the beginning
-                    result = self._run("--playit", abs_path, capture_output=True)
-                    if result.returncode != 0:
-                        # Check if it's a server connection error
-                        if result.stderr and "can't connect" in result.stderr.lower():
-                            logger.error("MOC server connection failed: %s", result.stderr)
-                            return
-                        # Fallback: use jump with mapped valid_index
-                        if valid_index >= 0:
-                            time.sleep(0.1)  # Small delay before fallback
-                            self._run("-j", str(valid_index), capture_output=False)
-                            self._run("-p", capture_output=False)
+        # Start playback if requested
+        if start_playback and self.is_available():
+            valid_index = original_to_valid_index.get(current_index, -1) if 0 <= current_index < len(tracks) else -1
+            if 0 <= valid_index < len(valid_tracks):
+                track = valid_tracks[valid_index]
+                if track and track.file_path:
+                    self.play_file(track.file_path)
 
     def play_file(self, file_path: str):
         """Play a specific file via MOC, keeping the playlist intact."""

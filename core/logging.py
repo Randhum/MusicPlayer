@@ -27,11 +27,11 @@ from typing import Optional
 
 class LinuxLogger:
     """
-    Linux-native logger with syslog/journald integration.
+    Linux-native logger with file and console output.
 
     Supports:
     - File logging to XDG data directory
-    - Syslog/journald integration
+    - Console output for warnings and errors
     - Structured logging with context
     - Environment variable control (MUSICPLAYER_DEBUG)
     """
@@ -39,12 +39,11 @@ class LinuxLogger:
     _instance: Optional["LinuxLogger"] = None
     _initialized: bool = False
 
-    def __init__(self, use_syslog: bool = True, log_dir: Optional[Path] = None):
+    def __init__(self, log_dir: Optional[Path] = None):
         """
         Initialize the logger.
 
         Args:
-            use_syslog: If True, also log to syslog/journald
             log_dir: Directory for log files (defaults to XDG data dir)
         """
         if LinuxLogger._initialized:
@@ -84,23 +83,9 @@ class LinuxLogger:
         file_handler.setFormatter(formatter)
         self.logger.addHandler(file_handler)
 
-        # Syslog/journald handler
-        if use_syslog:
-            try:
-                # Try Unix socket first (journald)
-                syslog_handler = logging.handlers.SysLogHandler(
-                    address="/dev/log", facility=logging.handlers.SysLogHandler.LOG_USER
-                )
-                syslog_handler.setLevel(logging.INFO)
-                # Simpler format for syslog
-                syslog_formatter = logging.Formatter(
-                    "%(name)s[%(process)d]: %(levelname)s: %(message)s"
-                )
-                syslog_handler.setFormatter(syslog_formatter)
-                self.logger.addHandler(syslog_handler)
-            except (OSError, AttributeError):
-                # Fallback if syslog unavailable
-                pass
+        # Note: Syslog/journald handler disabled due to unreliable socket connections
+        # on some Linux systems (socket can become stale causing "Bad file descriptor"
+        # errors). File logging provides sufficient persistence for debugging.
 
         LinuxLogger._initialized = True
 

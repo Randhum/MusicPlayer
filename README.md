@@ -233,7 +233,7 @@ The application follows the **XDG Base Directory Specification** for Linux stand
 - **Config**: `~/.config/musicplayer/settings.json`
 - **Cache**: `~/.cache/musicplayer/` (includes album art cache)
 - **Data**: `~/.local/share/musicplayer/` (includes playlists)
-- **Logs**: `~/.cache/musicplayer/logs/`
+- **Logs**: `~/.local/share/musicplayer/logs/`
 
 ### Environment Variables
 
@@ -279,7 +279,8 @@ sudo /etc/init.d/musicplayer start
 
 #### Logging System
 - **Structured logging** with rotating file handlers
-- Log files in `~/.cache/musicplayer/logs/`
+- Log files in `~/.local/share/musicplayer/logs/`
+- Console output for warnings and errors (stderr)
 - Environment variable `MUSICPLAYER_DEBUG=1` for debug mode
 - All `print()` statements replaced with proper logging
 
@@ -1152,25 +1153,56 @@ The codebase is undergoing systematic harmonization to ensure consistency and ma
 - 🔄 Documentation improvements
 - 🔄 Error handling improvements
 
-#### Sustainable State Management
+#### MOC Integration Architecture
 
-The codebase uses explicit state machines to prevent race conditions and improve maintainability:
+The MOC (Music On Console) integration follows a simple, direct approach:
+
+**Design Principles:**
+- **`play_file()`** is the primary playback method - uses `mocp --playit <filepath>` for reliable track selection
+- **Simple state tracking** - boolean `_server_connected` flag instead of complex state machines
+- **Lightweight caching** - 200ms TTL cache for status to reduce MOC server load
+- **Direct M3U writing** - playlist changes are written directly to MOC's playlist file
+
+**Key Methods:**
+- `play_file(filepath)` - Play a specific file using `--playit` (preferred method)
+- `play()` - Resume playback (uses `--unpause` if paused, `--play` if stopped)
+- `toggle_pause()` - Toggle play/pause using `--toggle-pause`
+- `get_status()` - Get current playback state via `--info` with caching
+- `set_playlist()` - Write playlist to M3U and optionally start playback
+- `toggle_shuffle()` / `toggle_autonext()` - Toggle controls using `--toggle=CONTROL`
+
+**MOC Commands Used (verified against `mocp --help`):**
+- `--server` - Start server
+- `--playit FILE` - Play specific file without modifying playlist
+- `--play` - Start from first playlist item
+- `--pause` / `--unpause` / `--toggle-pause` - Pause controls
+- `--stop` - Stop playback
+- `--next` / `--previous` - Track navigation
+- `--seek N` - Seek by N seconds (positive/negative)
+- `--on=CONTROL` / `--off=CONTROL` / `--toggle=CONTROL` - For shuffle, autonext, repeat
+- `--info` - Get current track info
+- `--exit` - Shutdown server
+
+**Why This Approach:**
+- MOC has no "jump to playlist index" command (`-j` is for seeking within a track, not track selection)
+- `play_file()` with `--playit` is the most reliable way to play a specific track
+- Simpler code is easier to debug and maintain
+- Let MOC handle its own features (autonext, shuffle) rather than re-implementing them
+
+#### UI State Management
+
+The UI components use explicit state machines for user interaction:
 
 **State Machines:**
 - **`SeekState`** (player_controls.py): `IDLE`, `DRAGGING`, `SEEKING` - Manages progress bar interactions
 - **`PlaybackState`** (audio_player.py): `STOPPED`, `LOADING`, `PAUSED`, `PLAYING`, `SEEKING` - Tracks GStreamer playback state
 - **`OperationState`** (moc_sync.py): `IDLE`, `RESUMING`, `SEEKING`, `SYNCING` - Prevents race conditions in MOC operations
 - **`SyncState`** (moc_sync.py): `ENABLED`, `DISABLED`, `INITIALIZING` - Tracks sync mode between app and MOC
-- **`ServerState`** (moc_controller.py): `UNAVAILABLE`, `DISCONNECTED`, `CONNECTING`, `CONNECTED` - Tracks MOC server connection
-- **`CacheState`** (moc_controller.py): `EMPTY`, `VALID`, `STALE`, `ERROR` - Manages status cache lifecycle
 
 **Benefits:**
 - **No race conditions**: State machines prevent conflicts between UI updates and playback operations
 - **Self-documenting**: Enums make code intent clear
 - **Easier debugging**: Explicit state transitions are easier to trace
-- **More maintainable**: Changes are localized and predictable
-
-See `SUSTAINABLE_ARCHITECTURE_SUMMARY.md` for detailed documentation.
 
 ### Development
 

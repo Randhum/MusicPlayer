@@ -450,12 +450,11 @@ class MocSyncHelper:
         else:
             track = self.playlist_view.get_previous_track()
         
-        if track:
-            # get_next_track()/get_previous_track() already updated the index
-            current_index = self.playlist_view.get_current_index()
-            # Use moc_controller.jump_to_index() to jump to the new track and play
-            self.moc_controller.jump_to_index(current_index, start_playback=True)
+        if track and track.file_path:
+            # Use play_file() directly - more reliable than index-based jumping
+            self.moc_controller.play_file(track.file_path)
             # Update UI
+            current_index = self.playlist_view.get_current_index()
             tracks = self.playlist_view.get_playlist()
             self.playlist_view.set_playlist(tracks, current_index)
         else:
@@ -474,39 +473,19 @@ class MocSyncHelper:
         self.navigate_track(-1)
     
     def play_track(self) -> None:
-        """Play current track - uses moc_controller.set_playlist() for coordination."""
+        """Play current track using play_file() for direct playback."""
         if not self.use_moc:
             return
         track = self.playlist_view.get_current_track()
-        if not track or (track.file_path and is_video_file(track.file_path)):
+        if not track or not track.file_path or is_video_file(track.file_path):
             return
         
-        # Validate track file exists
-        file_path = Path(track.file_path)
-        if not file_path.exists() or not file_path.is_file():
-            logger.error("Track file does not exist: %s", track.file_path)
-            return
+        # Play the file directly
+        self.moc_controller.play_file(track.file_path)
         
-        # Stop MOC if playing different track
-        moc_status = self.moc_controller.get_status(force_refresh=False)
-        if moc_status:
-            moc_state = moc_status.get("state", "STOP")
-            moc_file = moc_status.get("file_path")
-            if moc_state == "PLAY" and moc_file and moc_file != track.file_path:
-                self.moc_controller.stop()
-        
-        # Sync playlist and start playback using moc_controller.set_playlist()
+        # Update UI
         tracks = self.playlist_view.get_playlist()
         current_index = self.playlist_view.get_current_index()
-        self.moc_controller.set_playlist(tracks, current_index, start_playback=True)
-        
-        # Set shuffle state if needed
-        if self.shuffle_enabled:
-            self.moc_controller.enable_shuffle()
-        else:
-            self.moc_controller.disable_shuffle()
-        
-        # Update UI with current state from playlist_view
         self.playlist_view.set_playlist(tracks, current_index)
         self.metadata_panel.set_track(track)
         if hasattr(self, "mpris2") and self.mpris2:

@@ -669,12 +669,23 @@ class PlayerControls(Gtk.Box):
             self.play_current_track()
 
     def _sync_moc_options(self) -> None:
-        """Sync shuffle and autonext options to MOC."""
+        """Sync shuffle and autonext options to MOC.
+        
+        Only sends commands if MOC's state differs from our desired state.
+        This reduces unnecessary MOC commands and prevents race conditions.
+        """
         if not (self.moc_sync and self.moc_sync.use_moc):
             return
         moc = self.moc_sync.moc_controller
-        if hasattr(moc, "enable_shuffle"):
+        
+        # Get current MOC state to avoid unnecessary commands
+        moc_shuffle = moc.get_shuffle_state()
+        moc_autonext = moc.get_autonext_state()
+        
+        # Only sync if state differs
+        if moc_shuffle is not None and moc_shuffle != self._shuffle_enabled:
             (moc.enable_shuffle if self._shuffle_enabled else moc.disable_shuffle)()
+        if moc_autonext is not None and moc_autonext != self._autonext_enabled:
             (moc.enable_autonext if self._autonext_enabled else moc.disable_autonext)()
 
     def _update_mpris2_nav(self) -> None:
