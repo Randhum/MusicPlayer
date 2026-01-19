@@ -58,7 +58,6 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
         self.connect("activate", self._on_activate)
         self.connect("open", self._on_open)
         self.window: Optional[MainWindow] = None
-        self._is_primary_instance: bool = True
 
     def do_startup(self) -> None:
         """
@@ -74,40 +73,6 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
             Gtk.Application.do_startup(self)
         logger.info("Music Player starting up (primary instance)")
 
-    def do_local_command_line(self, arguments: list) -> tuple:
-        """
-        Handle command line before remote check.
-
-        This runs on ALL instances before determining primary/secondary.
-        We use this to detect and log when we're a secondary instance.
-
-        Args:
-            arguments: Command line arguments
-
-        Returns:
-            Tuple of (handled: bool, exit_status: int)
-        """
-        # Register with D-Bus to determine if we're primary or secondary
-        self.register(None)
-
-        if self.get_is_remote():
-            # Another instance is already running
-            self._is_primary_instance = False
-            logger.info(
-                "Another instance of Music Player is already running. "
-                "Activating existing window and exiting."
-            )
-            print(
-                "Another instance is already running. Activating existing window.",
-                file=sys.stderr,
-            )
-            # Let the parent class handle forwarding to primary instance
-            # This will send activate/open signal to the primary and exit
-
-        # Return False to let parent class continue processing
-        # (which will forward to primary instance if remote)
-        return (False, 0)
-
     def _on_activate(self, app: Gtk.Application) -> None:
         """
         Handle application activation.
@@ -122,7 +87,8 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
             self.window = MainWindow(app)
             logger.debug("Main window created")
         else:
-            logger.debug("Presenting existing window (activated by another instance)")
+            # Window already exists - this is activation from another instance
+            logger.info("Presenting existing window (activated by another instance)")
         self.window.present()
 
     def _on_open(self, app: Gtk.Application, files: Any, n_files: int, hint: str) -> None:
@@ -186,8 +152,26 @@ def main() -> int:
 
     logger.debug("GTK and GStreamer initialized successfully")
 
-    # Create and run the application
+    # Create the application
     app = MusicPlayerApp()
+
+    # Register early to detect if another instance is running
+    try:
+        app.register(None)
+        if app.get_is_remote():
+            # Another instance is already running
+            logger.info(
+                "Another instance of Music Player is already running. "
+                "Activating existing window."
+            )
+            print(
+                "Another instance is already running. Activating existing window.",
+                file=sys.stderr,
+            )
+    except Exception as e:
+        logger.debug("Could not register application early: %s", e)
+
+    # Run the application
     exit_code = app.run(sys.argv)
 
     if exit_code == 0:
