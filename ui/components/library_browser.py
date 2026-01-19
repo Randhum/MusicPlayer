@@ -105,7 +105,7 @@ class LibraryBrowser(Gtk.Box):
 
         # Single-click expand/collapse state
         self._click_timeout_id = None
-        self._click_path = None
+        self._click_in_progress = False
 
         # Column
         column = Gtk.TreeViewColumn("Library")
@@ -187,12 +187,11 @@ class LibraryBrowser(Gtk.Box):
                 self._populate_tree(folder_iter, value, key)
 
     def _on_click_pressed(self, gesture, n_press, x, y):
-        """Handle click press - store path for potential expand/collapse."""
-        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-        if path_info:
-            self._click_path = path_info[0]
-        else:
-            self._click_path = None
+        """Handle click press - mark that a click is in progress."""
+        # Note: We'll get the actual path from selection in the timeout handler
+        # GTK handles selection correctly (accounting for scroll offset),
+        # while get_path_at_pos with gesture coordinates may have offset issues
+        self._click_in_progress = True
 
     def _on_click_released(self, gesture, n_press, x, y):
         """Handle click release - expand/collapse on single click after delay."""
@@ -202,31 +201,32 @@ class LibraryBrowser(Gtk.Box):
             self._click_timeout_id = None
 
         # Only handle single clicks (n_press == 1)
-        if n_press == 1 and self._click_path:
+        if n_press == 1 and getattr(self, '_click_in_progress', False):
             # Delay to allow double-click to cancel it
             self._click_timeout_id = GLib.timeout_add(250, self._expand_collapse_folder)
+        
+        self._click_in_progress = False
 
     def _expand_collapse_folder(self):
         """Expand or collapse folder after single-click delay."""
         self._click_timeout_id = None
 
-        if not self._click_path:
-            return False
-
-        model = self.tree_view.get_model()
-        tree_iter = model.get_iter(self._click_path)
+        # Use selection instead of stored click path
+        # GTK handles selection correctly (accounting for scroll offset)
+        selection = self.tree_view.get_selection()
+        model, tree_iter = selection.get_selected()
 
         if tree_iter:
             name, item_type, data = model.get(tree_iter, 0, 1, 2)
 
             # Only handle folders for expand/collapse
             if item_type == "folder":
-                if self.tree_view.row_expanded(self._click_path):
-                    self.tree_view.collapse_row(self._click_path)
+                path = model.get_path(tree_iter)
+                if self.tree_view.row_expanded(path):
+                    self.tree_view.collapse_row(path)
                 else:
-                    self.tree_view.expand_row(self._click_path, False)
+                    self.tree_view.expand_row(path, False)
 
-        self._click_path = None
         return False  # Don't repeat
 
     def _on_row_activated(self, tree_view, path, column):
@@ -235,7 +235,7 @@ class LibraryBrowser(Gtk.Box):
         if self._click_timeout_id:
             GLib.source_remove(self._click_timeout_id)
             self._click_timeout_id = None
-            self._click_path = None
+        self._click_in_progress = False
 
         model = tree_view.get_model()
         tree_iter = model.get_iter(path)
@@ -286,20 +286,15 @@ class LibraryBrowser(Gtk.Box):
 
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position."""
-        # Get the path at click position
-        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-        if not path_info:
-            return
-
-        path, column, cell_x, cell_y = path_info
-        self.selected_path = path
-
-        # Get the item type and data
-        model = self.tree_view.get_model()
-        tree_iter = model.get_iter(path)
+        # Use selection instead of coordinate-based path lookup
+        # GTK handles selection correctly (accounting for scroll offset),
+        # while get_path_at_pos with gesture coordinates may have offset issues
+        selection = self.tree_view.get_selection()
+        model, tree_iter = selection.get_selected()
         if not tree_iter:
             return
 
+        self.selected_path = model.get_path(tree_iter)
         name, item_type, data = model.get(tree_iter, 0, 1, 2)
 
         # Create context menu

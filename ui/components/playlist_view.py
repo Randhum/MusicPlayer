@@ -617,13 +617,18 @@ class PlaylistView(Gtk.Box):
 
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position."""
-        # Get the path at click position
-        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-        if path_info:
-            path, column, cell_x, cell_y = path_info
+        # Use selection instead of coordinate-based path lookup
+        # GTK handles selection correctly (accounting for scroll offset),
+        # while get_path_at_pos with gesture coordinates may have offset issues
+        selection = self.tree_view.get_selection()
+        model, tree_iter = selection.get_selected()
+        if tree_iter:
+            path = model.get_path(tree_iter)
             indices = path.get_indices()
             if indices:
                 self.selected_index = indices[0]
+            else:
+                self.selected_index = -1
         else:
             self.selected_index = -1
 
@@ -775,7 +780,7 @@ class PlaylistView(Gtk.Box):
     def _on_menu_move_down(self):
         """Handle 'Move Down' from context menu."""
         self._close_menu()
-        if self.selected_index < len(self.tracks) - 1:
+        if self.selected_index < len(self._state.playlist) - 1:
             self.move_track(self.selected_index, self.selected_index + 1)
 
     def _on_menu_clear(self):

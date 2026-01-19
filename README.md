@@ -580,8 +580,15 @@ If tapping or clicking a row in the playlist plays the next track (or 2nd next) 
 **What was fixed:**
 - In GTK4 with a TreeView inside a ScrolledWindow, `get_path_at_pos()` with gesture coordinates may not correctly account for scroll offset
 - The tap/click handler was using stored coordinates which could be incorrect when the view was scrolled
-- Now the handler uses the TreeView's actual selection (which GTK handles correctly) instead of coordinate-based path lookup
+- Now all handlers (single-tap, context menu) use the TreeView's actual selection (which GTK handles correctly) instead of coordinate-based path lookup
 - This ensures the clicked row is always the one that plays, regardless of scroll position
+- The same fix was applied to the library browser for folder expand/collapse and context menus
+
+### "Move Down in playlist context menu crashes!"
+
+**What was fixed:**
+- The "Move Down" context menu action referenced a non-existent `self.tracks` attribute
+- Changed to use `self._state.playlist` which is the correct way to access the playlist
 
 ### "Music keeps playing when Bluetooth speaker mode is enabled!"
 
