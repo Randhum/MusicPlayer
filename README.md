@@ -533,6 +533,23 @@ If playback stops when a song finishes instead of automatically playing the next
 
 The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. The app is the single source of truth for track navigation, preventing conflicts between MOC's internal state and the app's playlist management.
 
+### "App silently quits when I start it again!"
+
+This is expected behavior. The app uses GTK's **single-instance pattern** — only one instance can run at a time with the same application ID.
+
+**What happens:**
+1. First instance registers itself via D-Bus under `com.musicplayer.app`
+2. Second instance detects the existing app
+3. Second instance activates the first app's window and exits
+
+**You'll see this message in the terminal:**
+```
+Another instance is already running. Activating existing window.
+```
+
+**If you really need multiple instances** (not recommended for a music player):
+- This would require code changes to remove the application ID or use `NON_UNIQUE` flag
+
 ### "Panel layout is messed up!"
 
 ```bash
