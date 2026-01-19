@@ -114,6 +114,7 @@ class PlaybackController:
         self._events.subscribe(EventBus.ACTION_SET_SHUFFLE, self._on_action_set_shuffle)
         self._events.subscribe(EventBus.ACTION_SET_LOOP_MODE, self._on_action_set_loop_mode)
         self._events.subscribe(EventBus.ACTION_SET_VOLUME, self._on_action_set_volume)
+        self._events.subscribe(EventBus.ACTION_REFRESH_MOC, self._on_action_refresh_moc)
 
         # Subscribe to playlist changes to sync with MOC
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
@@ -366,6 +367,32 @@ class PlaybackController:
         # Volume is controlled by SystemVolume, not by backends
         # The SystemVolume class will handle the actual volume change
 
+    def _on_action_refresh_moc(self, data: Optional[dict]) -> None:
+        """Handle refresh from MOC action - reload playlist from MOC."""
+        if not self._use_moc:
+            logger.debug("Refresh MOC requested but MOC mode not active")
+            return
+
+        # Sync MOC's in-memory playlist to disk first
+        self._moc_controller.sync_playlist()
+
+        # Get current playing file from MOC status
+        status = self._moc_controller.get_status(force_refresh=True)
+        current_file = status.get("file") if status else None
+
+        # Load playlist from MOC's M3U file
+        tracks, current_index = self._moc_controller.get_playlist(current_file=current_file)
+        if tracks:
+            logger.info("Refreshed playlist from MOC: %d tracks", len(tracks))
+            self._state.set_playlist(tracks, current_index)
+            # Update mtime to prevent duplicate reload from polling
+            config = get_config()
+            moc_playlist_path = config.moc_playlist_path
+            if moc_playlist_path.exists():
+                self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
+        else:
+            logger.warning("No tracks found in MOC playlist")
+
     # ============================================================================
     # Playback Methods
     # ============================================================================
@@ -458,10 +485,15 @@ class PlaybackController:
         # Only start playback if track is audio (not video)
         should_start = start_playback and track is not None and not is_video_file(track.file_path)
 
+        # Write playlist to M3U file
         self._moc_controller.set_playlist(playlist, current_index, start_playback=should_start)
 
         # Track when we write to MOC
         self._recent_moc_write = time.time()
+
+        # Trigger MOC to reload the playlist from disk
+        # This syncs our M3U file changes to MOC's in-memory playlist
+        self._moc_controller.sync_playlist()
 
         # Update playlist mtime
         try:

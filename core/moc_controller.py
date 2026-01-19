@@ -374,6 +374,42 @@ class MocController:
         self.ensure_server()
         self._run("--previous")
 
+    def sync_playlist(self) -> bool:
+        """
+        Trigger MOC to sync its playlist to disk.
+        
+        This briefly connects to MOC with --sync and immediately sends 'q' to detach.
+        The connection triggers MOC to write its in-memory playlist to the M3U file.
+        Playback is not interrupted.
+        
+        Returns:
+            True if sync was successful, False otherwise.
+        """
+        if not self.is_available():
+            return False
+        if not self.ensure_server():
+            return False
+        
+        try:
+            # Run mocp --sync and immediately send 'q' to detach
+            # This triggers playlist sync without stopping playback
+            proc = subprocess.Popen(
+                [self._mocp_path, "--sync"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            proc.communicate(input="q\n", timeout=3.0)
+            return proc.returncode == 0
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("Failed to sync MOC playlist: %s", e)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+
     def jump_to_index(self, index: int, start_playback: bool = False):
         """
         Jump to a specific track index in MOC's playlist.

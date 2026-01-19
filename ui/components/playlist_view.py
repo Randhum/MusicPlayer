@@ -116,29 +116,40 @@ class PlaylistView(Gtk.Box):
         # Add CSS class for touch-friendly styling
         self.tree_view.add_css_class("playlist-tree")
 
-        # Add single-tap gesture for touchscreen support (triggers playback)
-        single_tap_gesture = Gtk.GestureClick()
-        single_tap_gesture.set_button(1)  # Left mouse button or touch
-        single_tap_gesture.connect("pressed", self._on_single_tap)
-        self.tree_view.add_controller(single_tap_gesture)
-
         # Add right-click gesture for context menu
         right_click_gesture = Gtk.GestureClick()
         right_click_gesture.set_button(3)  # Right mouse button
         right_click_gesture.connect("pressed", self._on_right_click)
         self.tree_view.add_controller(right_click_gesture)
 
-        # Add long-press gesture for context menu (touch-friendly)
-        long_press_gesture = Gtk.GestureLongPress()
-        long_press_gesture.set_touch_only(True)  # Only for touch, not mouse
-        long_press_gesture.connect("pressed", self._on_long_press)
-        self.tree_view.add_controller(long_press_gesture)
+        # Add drag gesture for long-press-to-reorder
+        drag_gesture = Gtk.GestureDrag()
+        drag_gesture.set_button(1)  # Left mouse button
+        drag_gesture.connect("drag-begin", self._on_drag_begin)
+        drag_gesture.connect("drag-update", self._on_drag_update)
+        drag_gesture.connect("drag-end", self._on_drag_end)
+        self.tree_view.add_controller(drag_gesture)
 
-        # Track tap state to distinguish single tap from double tap
-        self._tap_timeout_id = None
-        self._tap_path = None
+        # Playback state
         self._playback_in_progress = False  # Guard to prevent concurrent playback
         self._playback_lock = False  # Prevent concurrent play_track_at_index calls
+
+        # Single-tap behavior configuration
+        # True = single tap plays track, False = single tap only selects (double-tap to play)
+        self._single_tap_plays = True
+
+        # Tap/double-tap detection state
+        self._tap_pending = False  # True when waiting for potential double-tap
+        self._tap_timeout_id = None  # GLib timeout source ID
+        self._pending_tap_index = -1  # Index of track for pending single-tap
+        self._double_tap_window = 300  # ms to wait for second tap
+
+        # Drag-to-reorder state
+        self._drag_mode = False  # True when long-press activated drag mode
+        self._drag_source_index = -1  # Index of row being dragged
+        self._drag_target_index = -1  # Index where row will be dropped
+        self._drag_start_time = 0  # Timestamp when drag started (for long-press detection)
+        self._long_press_threshold = 500000  # 500ms in microseconds
 
         # Context menu
         self.context_menu = None
@@ -460,6 +471,33 @@ class PlaylistView(Gtk.Box):
         """Show or hide the Refresh button based on whether MOC mode is active."""
         self.refresh_button.set_visible(enabled)
 
+    def set_single_tap_plays(self, enabled: bool):
+        """
+        Configure single-tap behavior.
+        
+        Args:
+            enabled: If True, single tap plays the track (after double-tap detection window).
+                     If False, single tap only selects (use double-tap to play).
+        """
+        self._single_tap_plays = enabled
+
+    def get_single_tap_plays(self) -> bool:
+        """Get current single-tap behavior setting."""
+        return self._single_tap_plays
+
+    def set_double_tap_window(self, ms: int):
+        """
+        Configure the double-tap detection window.
+        
+        Args:
+            ms: Time in milliseconds to wait for a second tap (default: 300).
+        """
+        self._double_tap_window = max(100, min(ms, 1000))  # Clamp to 100-1000ms
+
+    def get_double_tap_window(self) -> int:
+        """Get current double-tap detection window in milliseconds."""
+        return self._double_tap_window
+
     # ============================================================================
     # Internal Methods
     # ============================================================================
@@ -531,54 +569,6 @@ class PlaylistView(Gtk.Box):
         secs = int(seconds % 60)
         return f"{minutes:02d}:{secs:02d}"
 
-    def _on_single_tap(self, gesture, n_press, x, y):
-        """Handle single tap - for touchscreen support."""
-        # On first press, set up timeout for single tap
-        if n_press == 1:
-            # Cancel any pending timeout
-            if self._tap_timeout_id:
-                GLib.source_remove(self._tap_timeout_id)
-                self._tap_timeout_id = None
-
-            # Get the path at tap position
-            path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-            if path_info:
-                path, column, cell_x, cell_y = path_info
-                self._tap_path = path
-
-                # For single tap on touchscreen, trigger playback after a short delay
-                # This allows double-tap to cancel it if needed
-                self._tap_timeout_id = GLib.timeout_add(250, self._on_tap_timeout)
-            else:
-                self._tap_path = None
-        # On second press (double-tap), cancel the timeout
-        elif n_press == 2:
-            if self._tap_timeout_id:
-                GLib.source_remove(self._tap_timeout_id)
-                self._tap_timeout_id = None
-                self._tap_path = None
-
-    def _on_tap_timeout(self):
-        """Handle tap timeout - trigger playback if it was a single tap."""
-        self._tap_timeout_id = None
-        self._tap_path = None
-        
-        # Use the current selection instead of stored tap coordinates
-        # GTK handles selection correctly (accounting for scroll offset),
-        # while get_path_at_pos with gesture coordinates may have offset issues
-        selection = self.tree_view.get_selection()
-        model, tree_iter = selection.get_selected()
-        if tree_iter:
-            path = model.get_path(tree_iter)
-            indices = path.get_indices()
-            if indices:
-                index = indices[0]
-                # Verify index is still valid (playlist might have changed)
-                playlist = self._state.playlist
-                if 0 <= index < len(playlist):
-                    self.play_track_at_index(index)
-        
-        return False  # Don't repeat
     
     def _release_playback_lock(self):
         """Release playback lock."""
@@ -590,18 +580,38 @@ class PlaylistView(Gtk.Box):
         self._playback_in_progress = False
         return False  # Don't repeat
 
-    def _on_row_activated(self, tree_view, path, column):
-        """Handle row activation (double-click or double-tap)."""
-        # Cancel any pending single-tap timeout
+    def _cancel_tap_timeout(self):
+        """Cancel any pending single-tap timeout."""
         if self._tap_timeout_id:
             GLib.source_remove(self._tap_timeout_id)
             self._tap_timeout_id = None
-            self._tap_path = None
+        self._tap_pending = False
+        self._pending_tap_index = -1
 
+    def _on_single_tap_timeout(self):
+        """Execute single-tap playback after timeout (no double-tap detected)."""
+        self._tap_timeout_id = None
+        self._tap_pending = False
+        index = self._pending_tap_index
+        self._pending_tap_index = -1
+        
+        if index >= 0 and not self._playback_lock:
+            playlist = self._state.playlist
+            if 0 <= index < len(playlist):
+                self.play_track_at_index(index)
+        return False  # Don't repeat
+
+    def _on_row_activated(self, tree_view, path, column):
+        """Handle row activation (double-click or Enter key)."""
+        # Cancel any pending single-tap timeout to prevent double-play
+        self._cancel_tap_timeout()
+        
         indices = path.get_indices()
         if indices:
             index = indices[0]
-            self.play_track_at_index(index)
+            # Only play if not already locked (prevents double-play from double-tap detection)
+            if not self._playback_lock:
+                self.play_track_at_index(index)
 
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
@@ -609,11 +619,149 @@ class PlaylistView(Gtk.Box):
         if not self._menu_showing:
             self._show_context_menu_at_position(x, y)
 
-    def _on_long_press(self, gesture, x, y):
-        """Handle long-press to show context menu (touch-friendly)."""
-        # Only show menu if not already showing
-        if not self._menu_showing:
-            self._show_context_menu_at_position(x, y)
+    def _on_drag_begin(self, gesture, start_x, start_y):
+        """Handle drag begin - record start time for long-press detection."""
+        self._drag_start_time = GLib.get_monotonic_time()
+        self._drag_mode = False
+        self._drag_source_index = -1
+        self._drag_target_index = -1
+        
+        # Get the row at the press location and select it
+        # Using get_path_at_pos immediately (not in a timeout) with set_cursor is safe
+        path_info = self.tree_view.get_path_at_pos(int(start_x), int(start_y))
+        if path_info:
+            path = path_info[0]
+            # Select the row to ensure GTK selection matches the pressed row
+            self.tree_view.set_cursor(path, None, False)
+            # Get index directly from path (more reliable than querying selection)
+            indices = path.get_indices()
+            if indices:
+                self._drag_source_index = indices[0]
+                self._drag_target_index = self._drag_source_index
+
+    def _on_drag_update(self, gesture, offset_x, offset_y):
+        """Handle drag update - enter drag mode if held long enough and moved."""
+        if self._drag_source_index < 0:
+            return
+
+        # Check if user has held long enough to enter drag mode
+        current_time = GLib.get_monotonic_time()
+        time_held = current_time - self._drag_start_time
+        
+        # Check if movement is significant (more than a few pixels)
+        movement = abs(offset_x) + abs(offset_y)
+        
+        # Enter drag mode if: held for long-press threshold AND moved significantly
+        if not self._drag_mode and time_held >= self._long_press_threshold and movement > 10:
+            self._drag_mode = True
+            self.tree_view.add_css_class("dragging")
+
+        # If in drag mode, track where the row would be dropped
+        if not self._drag_mode:
+            return
+
+        # Get current drag position
+        success, start_x, start_y = gesture.get_start_point()
+        if not success:
+            return
+
+        current_y = start_y + offset_y
+
+        # Find the row at the current position using tree view allocation
+        playlist = self._state.playlist
+        if not playlist:
+            return
+
+        # Calculate target row based on y position
+        allocation = self.tree_view.get_allocation()
+        if allocation.height <= 0:
+            return
+
+        row_count = len(playlist)
+        if row_count == 0:
+            return
+
+        # Account for header height (approximately 30px)
+        header_height = 30
+        content_height = allocation.height - header_height
+        row_height = content_height / max(row_count, 1)
+
+        # Calculate target index from y position
+        adjusted_y = current_y - header_height
+        target_index = int(adjusted_y / row_height) if row_height > 0 else 0
+        target_index = max(0, min(target_index, row_count - 1))
+
+        if target_index != self._drag_target_index:
+            self._drag_target_index = target_index
+            # Update visual feedback - highlight target row
+            self._highlight_drop_target(target_index)
+
+    def _on_drag_end(self, gesture, offset_x, offset_y):
+        """Handle drag end - play track (tap), show menu (long-press), or reorder (drag)."""
+        current_time = GLib.get_monotonic_time()
+        time_held = current_time - self._drag_start_time
+        movement = abs(offset_x) + abs(offset_y)
+        
+        source_idx = self._drag_source_index
+        target_idx = self._drag_target_index
+        was_drag_mode = self._drag_mode
+
+        # Remove visual feedback
+        if was_drag_mode:
+            self.tree_view.remove_css_class("dragging")
+            self._clear_drop_highlight()
+
+        # Reset drag state first
+        self._drag_mode = False
+        self._drag_source_index = -1
+        self._drag_target_index = -1
+        self._drag_start_time = 0
+
+        # Determine what action to take based on time held and movement
+        tap_threshold = 200000  # 200ms in microseconds - quick tap
+        long_press_time = self._long_press_threshold  # 500ms
+        movement_threshold = 15  # pixels
+
+        if time_held < tap_threshold and movement < movement_threshold:
+            # Quick tap with minimal movement
+            if source_idx >= 0 and not self._playback_lock:
+                playlist = self._state.playlist
+                if 0 <= source_idx < len(playlist):
+                    if self._single_tap_plays:
+                        if self._tap_pending and self._pending_tap_index == source_idx:
+                            # Second tap on same row - double-tap detected, play immediately
+                            self._cancel_tap_timeout()
+                            self.play_track_at_index(source_idx)
+                        else:
+                            # First tap - wait for potential second tap
+                            self._cancel_tap_timeout()  # Cancel any previous pending tap
+                            self._tap_pending = True
+                            self._pending_tap_index = source_idx
+                            self._tap_timeout_id = GLib.timeout_add(
+                                self._double_tap_window, self._on_single_tap_timeout
+                            )
+                    # else: single tap only selects (already selected by GTK)
+        elif was_drag_mode and movement >= movement_threshold:
+            # Was in drag mode and moved - reorder
+            if source_idx != target_idx and 0 <= target_idx < len(self._state.playlist):
+                self.move_track(source_idx, target_idx)
+        elif time_held >= long_press_time and movement < movement_threshold:
+            # Long press without significant movement - show context menu
+            success, start_x, start_y = gesture.get_start_point()
+            if success and not self._menu_showing:
+                self._show_context_menu_at_position(start_x, start_y)
+
+    def _highlight_drop_target(self, target_index: int):
+        """Highlight the row where the dragged item will be dropped."""
+        # Select the target row to show where it will be dropped
+        if 0 <= target_index < len(self._state.playlist):
+            path = Gtk.TreePath.new_from_indices([target_index])
+            self.tree_view.set_cursor(path, None, False)
+
+    def _clear_drop_highlight(self):
+        """Clear the drop target highlight."""
+        # Restore selection to current playing track
+        self._update_selection()
 
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position."""
@@ -899,10 +1047,7 @@ class PlaylistView(Gtk.Box):
     
     def _handle_refresh(self):
         """Handle refresh from MOC - publish action to reload playlist."""
-        # This will be handled by PlaybackController
-        # For now, just publish an event that PlaybackController can handle
-        # (PlaybackController manages MOC playlist sync)
-        pass
+        self._events.publish(EventBus.ACTION_REFRESH_MOC, {})
 
     def _close_menu(self):
         """Close the context menu safely."""

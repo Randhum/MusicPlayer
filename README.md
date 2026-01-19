@@ -224,6 +224,14 @@ You should see a window with your music library, playlist, and Bluetooth control
   - **Shuffle**: Toggle to play the current playlist in **random order**
   - **Seek & Volume**: Touch-friendly sliders for scrubbing through tracks and adjusting volume
 
+- **Playlist management** (touch-friendly, see [Playlist View Options](#playlist-view-options) for configuration):
+  - **Single tap**: Play the selected track (after 300ms double-tap detection window)
+  - **Double-tap**: Play the selected track immediately
+  - **Double-click or Enter**: Play the selected track
+  - **Long-press + drag** (hold > 500ms, then drag): Reorder tracks by dragging them up or down
+  - **Long-press (hold > 500ms, release in place)**: Show context menu with options (Play, Remove, Move Up/Down)
+  - **Right-click**: Show context menu (mouse users)
+
 ---
 
 ## ⚙️ Configuration
@@ -321,6 +329,16 @@ sudo /etc/init.d/musicplayer start
 - Battery level monitoring for connected devices
 - Connection quality indicators (RSSI, link quality)
 - Multiple device support
+
+#### Bluetooth Security & Stability
+- **Trusted device whitelist** - Limit connections to approved devices only
+- **Configurable discoverable timeout** - Auto-disable discoverability after timeout (default: 5 minutes)
+- **D-Bus path validation** - All Bluetooth D-Bus paths are validated for security
+- **Connection authorization** - Option to require explicit user approval for connections
+- **Automatic reconnection** - Reconnects to last device after unexpected disconnection (max 3 attempts)
+- **Connection health monitoring** - Periodic checks to detect and recover from connection issues
+- **A2DP transport state tracking** - Monitors audio stream state for stability
+- **Thread-safe state management** - Prevents race conditions in concurrent events
 
 #### Security Hardening
 - **Path validation** to prevent path traversal attacks
@@ -603,9 +621,27 @@ If tapping or clicking a row in the playlist plays the next track (or 2nd next) 
 - `BluetoothSink` was missing a `cleanup()` method to properly shut down when the application closes
 - The main window wasn't calling cleanup on the BT sink
 - Now `BluetoothSink.cleanup()` properly:
+  - Stops health monitoring timers
+  - Cancels reconnection attempts
   - Disables sink mode if enabled
   - Unsubscribes from EventBus events
   - Logs cleanup completion
+
+### "Bluetooth connection drops and doesn't recover!"
+
+**What was fixed:**
+- Added automatic reconnection logic with configurable retry attempts (max 3 by default)
+- Added connection health monitoring that runs every 5 seconds
+- A2DP transport state is now tracked and recovered if lost
+- When a device disconnects unexpectedly, reconnection is automatically scheduled
+
+### "Unauthorized devices can connect to my speaker!"
+
+**Security improvements:**
+- **Trusted device whitelist**: Use `bt_sink.add_trusted_device("AA:BB:CC:DD:EE:FF")` to allow only specific devices
+- **Discoverable timeout**: Default is 5 minutes (was indefinite) - configurable via `bt_sink.set_discoverable_timeout(300)`
+- **Connection authorization**: Enable with `bt_sink.set_require_authorization(True)` for explicit approval
+- **D-Bus path validation**: All Bluetooth paths are validated to prevent injection attacks
 
 ### "Missing icons (placeholders shown)!"
 

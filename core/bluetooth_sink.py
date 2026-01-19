@@ -4,7 +4,9 @@
 # Standard Library Imports (alphabetical)
 # ============================================================================
 import subprocess
-from typing import Callable, Optional
+import threading
+import time
+from typing import Callable, Dict, List, Optional, Set
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -13,7 +15,8 @@ import dbus
 import gi
 
 gi.require_version("Gst", "1.0")
-from gi.repository import Gst
+gi.require_version("GLib", "2.0")
+from gi.repository import GLib, Gst
 
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
@@ -21,8 +24,18 @@ from gi.repository import Gst
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
 from core.events import EventBus
 from core.logging import get_logger
+from core.security import SecurityValidator
 
 logger = get_logger(__name__)
+
+# Default timeout for discoverability (seconds) - 0 means indefinite
+DEFAULT_DISCOVERABLE_TIMEOUT = 300  # 5 minutes
+# Connection health check interval (milliseconds)
+CONNECTION_HEALTH_CHECK_INTERVAL = 5000  # 5 seconds
+# Reconnection attempt delay (milliseconds)
+RECONNECTION_DELAY = 3000  # 3 seconds
+# Maximum reconnection attempts
+MAX_RECONNECTION_ATTEMPTS = 3
 
 
 class BluetoothSink:
@@ -62,6 +75,32 @@ class BluetoothSink:
         # Callback for when audio stream stops (can be set externally)
         self.on_audio_stream_stopped: Optional[Callable[[], None]] = None
 
+        # ====================================================================
+        # Security Settings
+        # ====================================================================
+        # Trusted device whitelist (MAC addresses in uppercase, colon-separated)
+        # Empty set means all paired devices are allowed
+        self._trusted_devices: Set[str] = set()
+        # Whether to require explicit authorization for new connections
+        self._require_authorization = False
+        # Discoverable timeout in seconds (0 = indefinite, not recommended)
+        self._discoverable_timeout = DEFAULT_DISCOVERABLE_TIMEOUT
+
+        # ====================================================================
+        # Stability/Reconnection Settings
+        # ====================================================================
+        # Track last connected device for reconnection
+        self._last_connected_address: Optional[str] = None
+        # Reconnection state
+        self._reconnection_attempts = 0
+        self._reconnection_timer_id: Optional[int] = None
+        # Connection health monitoring
+        self._health_check_timer_id: Optional[int] = None
+        # A2DP transport state
+        self._transport_state: Optional[str] = None
+        # Thread lock for state changes
+        self._state_lock = threading.Lock()
+
         # Register sink mode checker callback with BT manager (avoids circular dependency)
         if hasattr(self.bt_manager, "register_sink_mode_checker"):
             self.bt_manager.register_sink_mode_checker(lambda: self.is_sink_enabled)
@@ -70,6 +109,112 @@ class BluetoothSink:
         if self._event_bus:
             self._event_bus.subscribe(EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected)
             self._event_bus.subscribe(EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected)
+
+    # ========================================================================
+    # Security Configuration Methods
+    # ========================================================================
+
+    def add_trusted_device(self, address: str) -> bool:
+        """
+        Add a device to the trusted whitelist.
+
+        Args:
+            address: Bluetooth MAC address (e.g., "AA:BB:CC:DD:EE:FF")
+
+        Returns:
+            True if added successfully, False otherwise
+        """
+        try:
+            # Normalize address format
+            normalized = address.upper().strip()
+            if not self._validate_mac_address(normalized):
+                logger.warning("Invalid MAC address format: %s", address)
+                return False
+            
+            self._trusted_devices.add(normalized)
+            logger.info("Added trusted device: %s", normalized)
+            return True
+        except Exception as e:
+            logger.error("Error adding trusted device: %s", e, exc_info=True)
+            return False
+
+    def remove_trusted_device(self, address: str) -> bool:
+        """
+        Remove a device from the trusted whitelist.
+
+        Args:
+            address: Bluetooth MAC address
+
+        Returns:
+            True if removed, False if not found
+        """
+        normalized = address.upper().strip()
+        if normalized in self._trusted_devices:
+            self._trusted_devices.discard(normalized)
+            logger.info("Removed trusted device: %s", normalized)
+            return True
+        return False
+
+    def get_trusted_devices(self) -> List[str]:
+        """Get list of trusted device addresses."""
+        return list(self._trusted_devices)
+
+    def clear_trusted_devices(self) -> None:
+        """Clear all trusted devices (allow any paired device)."""
+        self._trusted_devices.clear()
+        logger.info("Cleared trusted device whitelist")
+
+    def set_require_authorization(self, require: bool) -> None:
+        """
+        Set whether to require explicit authorization for connections.
+
+        Args:
+            require: If True, user must approve each connection
+        """
+        self._require_authorization = require
+        logger.info("Connection authorization requirement: %s", require)
+
+    def set_discoverable_timeout(self, timeout_seconds: int) -> None:
+        """
+        Set discoverable timeout.
+
+        Args:
+            timeout_seconds: Timeout in seconds (0 = indefinite, NOT recommended)
+        """
+        if timeout_seconds < 0:
+            timeout_seconds = DEFAULT_DISCOVERABLE_TIMEOUT
+        
+        self._discoverable_timeout = timeout_seconds
+        logger.info("Discoverable timeout set to %d seconds", timeout_seconds)
+        
+        # Update if already discoverable
+        if self.is_discoverable:
+            self._set_discoverable(True, timeout_seconds)
+
+    def is_device_authorized(self, device: BluetoothDevice) -> bool:
+        """
+        Check if a device is authorized to connect.
+
+        Args:
+            device: BluetoothDevice to check
+
+        Returns:
+            True if authorized, False otherwise
+        """
+        # If whitelist is empty, all paired devices are authorized
+        if not self._trusted_devices:
+            return device.paired
+        
+        # Check whitelist
+        address = device.address.upper().strip()
+        return address in self._trusted_devices and device.paired
+
+    @staticmethod
+    def _validate_mac_address(address: str) -> bool:
+        """Validate MAC address format."""
+        import re
+        pattern = r'^([0-9A-F]{2}:){5}[0-9A-F]{2}$'
+        return bool(re.match(pattern, address))
 
     def _check_gst_bluez_plugin(self) -> None:
         """
@@ -160,9 +305,12 @@ class BluetoothSink:
             # Set device name
             self._set_adapter_name(self.device_name)
 
-            # Make adapter discoverable and pairable
-            self._set_discoverable(True)
+            # Make adapter discoverable and pairable (with timeout for security)
+            self._set_discoverable(True, self._discoverable_timeout)
             self._set_pairable(True)
+
+            # Start connection health monitoring
+            self._start_health_monitoring()
 
             # Configure audio subsystem
             # Prefer GStreamer BlueZ plugin if available
@@ -195,6 +343,7 @@ class BluetoothSink:
         Disable Bluetooth A2DP sink mode.
 
         Properly terminates all A2DP connections and cleans up resources:
+        - Stops health monitoring and reconnection attempts
         - Disconnects all connected devices
         - Terminates A2DP transport connections
         - Stops being discoverable and pairable
@@ -202,6 +351,10 @@ class BluetoothSink:
         """
         try:
             logger.info("Disabling Bluetooth sink mode...")
+
+            # Stop health monitoring and reconnection
+            self._stop_health_monitoring()
+            self._cancel_reconnection()
 
             # First, disconnect and terminate A2DP connections for all connected devices
             connected_devices = []
@@ -338,16 +491,21 @@ class BluetoothSink:
         except Exception as e:
             logger.error("Error setting adapter name: %s", e, exc_info=True)
 
-    def _set_discoverable(self, discoverable: bool, timeout: int = 0):
+    def _set_discoverable(self, discoverable: bool, timeout: int = DEFAULT_DISCOVERABLE_TIMEOUT):
         """
         Set the Bluetooth adapter's discoverability.
 
         Args:
             discoverable: Whether to be discoverable
-            timeout: Timeout in seconds (0 = indefinite)
+            timeout: Timeout in seconds (0 = indefinite, NOT recommended for security)
         """
         try:
             if not self.bt_manager.adapter_path:
+                return
+
+            # Validate D-Bus path for security
+            if not SecurityValidator.validate_dbus_path(self.bt_manager.adapter_path):
+                logger.error("Security: Invalid adapter path")
                 return
 
             props = dbus.Interface(
@@ -359,12 +517,16 @@ class BluetoothSink:
 
             props.Set(self.bt_manager.ADAPTER_INTERFACE, "Discoverable", dbus.Boolean(discoverable))
 
-            if discoverable and timeout == 0:
-                # Set no timeout for indefinite discoverability
-                props.Set(self.bt_manager.ADAPTER_INTERFACE, "DiscoverableTimeout", dbus.UInt32(0))
+            if discoverable:
+                # Set timeout (0 = indefinite, but we recommend using a timeout for security)
+                props.Set(self.bt_manager.ADAPTER_INTERFACE, "DiscoverableTimeout", dbus.UInt32(timeout))
+                if timeout == 0:
+                    logger.warning("Security: Discoverable with no timeout - consider setting a timeout")
+                else:
+                    logger.info("Discoverable for %d seconds", timeout)
 
             self.is_discoverable = discoverable
-            logger.debug("Discoverable: %s", discoverable)
+            logger.debug("Discoverable: %s (timeout: %ds)", discoverable, timeout if discoverable else 0)
         except Exception as e:
             logger.error("Error setting discoverable: %s", e, exc_info=True)
 
@@ -461,13 +623,182 @@ class BluetoothSink:
             logger.error("Error enabling basic sink: %s", e, exc_info=True)
             return False
 
+    # ========================================================================
+    # Connection Health Monitoring & Reconnection
+    # ========================================================================
+
+    def _start_health_monitoring(self) -> None:
+        """Start periodic connection health checks."""
+        if self._health_check_timer_id:
+            GLib.source_remove(self._health_check_timer_id)
+        
+        self._health_check_timer_id = GLib.timeout_add(
+            CONNECTION_HEALTH_CHECK_INTERVAL, self._check_connection_health
+        )
+        logger.debug("Started connection health monitoring")
+
+    def _stop_health_monitoring(self) -> None:
+        """Stop connection health checks."""
+        if self._health_check_timer_id:
+            GLib.source_remove(self._health_check_timer_id)
+            self._health_check_timer_id = None
+        logger.debug("Stopped connection health monitoring")
+
+    def _check_connection_health(self) -> bool:
+        """
+        Periodically check connection health.
+
+        Returns:
+            True to continue polling, False to stop
+        """
+        if not self.is_sink_enabled:
+            return False
+
+        try:
+            with self._state_lock:
+                if self.connected_device:
+                    # Check A2DP transport state
+                    transport_ok = self._check_a2dp_transport(self.connected_device)
+                    if not transport_ok:
+                        logger.warning("A2DP transport lost for %s", self.connected_device.name)
+                        # Transport lost but device might still be connected
+                        # Try to re-establish transport
+                        GLib.timeout_add(1000, lambda: self._retry_audio_routing(self.connected_device))
+
+                    # Update transport state
+                    self._update_transport_state()
+
+        except Exception as e:
+            logger.error("Error in health check: %s", e, exc_info=True)
+
+        return True  # Continue polling
+
+    def _update_transport_state(self) -> None:
+        """Update the current A2DP transport state."""
+        if not self.connected_device:
+            self._transport_state = None
+            return
+
+        try:
+            manager = dbus.Interface(
+                self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, "/"),
+                "org.freedesktop.DBus.ObjectManager",
+            )
+            objects = manager.GetManagedObjects()
+
+            for path, interfaces in objects.items():
+                if self.MEDIA_TRANSPORT_INTERFACE in interfaces:
+                    transport_props = interfaces[self.MEDIA_TRANSPORT_INTERFACE]
+                    device_path = str(transport_props.get("Device", ""))
+                    if device_path == self.connected_device.path:
+                        new_state = str(transport_props.get("State", ""))
+                        if new_state != self._transport_state:
+                            logger.debug("A2DP transport state: %s -> %s", self._transport_state, new_state)
+                            self._transport_state = new_state
+                        return
+
+            self._transport_state = None
+        except Exception as e:
+            logger.debug("Error updating transport state: %s", e)
+            self._transport_state = None
+
+    def _schedule_reconnection(self) -> None:
+        """Schedule a reconnection attempt."""
+        if self._reconnection_attempts >= MAX_RECONNECTION_ATTEMPTS:
+            logger.warning("Max reconnection attempts reached for %s", self._last_connected_address)
+            self._reconnection_attempts = 0
+            return
+
+        if not self._last_connected_address:
+            logger.debug("No last connected device to reconnect to")
+            return
+
+        if self._reconnection_timer_id:
+            GLib.source_remove(self._reconnection_timer_id)
+
+        self._reconnection_attempts += 1
+        logger.info(
+            "Scheduling reconnection attempt %d/%d in %dms",
+            self._reconnection_attempts, MAX_RECONNECTION_ATTEMPTS, RECONNECTION_DELAY
+        )
+
+        self._reconnection_timer_id = GLib.timeout_add(
+            RECONNECTION_DELAY, self._attempt_reconnection
+        )
+
+    def _attempt_reconnection(self) -> bool:
+        """
+        Attempt to reconnect to the last connected device.
+
+        Returns:
+            False to remove from timer queue
+        """
+        self._reconnection_timer_id = None
+
+        if not self.is_sink_enabled or not self._last_connected_address:
+            return False
+
+        # Find device by address
+        target_device = None
+        for device in self.bt_manager.get_devices():
+            if device.address.upper() == self._last_connected_address.upper():
+                target_device = device
+                break
+
+        if not target_device:
+            logger.warning("Last connected device not found: %s", self._last_connected_address)
+            return False
+
+        if target_device.connected:
+            logger.debug("Device already connected: %s", target_device.name)
+            self._reconnection_attempts = 0
+            return False
+
+        # Check if device is authorized
+        if not self.is_device_authorized(target_device):
+            logger.warning("Device not authorized for reconnection: %s", target_device.name)
+            return False
+
+        logger.info("Attempting reconnection to %s (%s)", target_device.name, target_device.address)
+        success = self.bt_manager.connect_device(target_device.path)
+
+        if success:
+            logger.info("Reconnection initiated for %s", target_device.name)
+            self._reconnection_attempts = 0
+        else:
+            logger.warning("Reconnection failed for %s", target_device.name)
+            # Schedule another attempt
+            self._schedule_reconnection()
+
+        return False  # Remove from timer queue
+
+    def _cancel_reconnection(self) -> None:
+        """Cancel any pending reconnection attempts."""
+        if self._reconnection_timer_id:
+            GLib.source_remove(self._reconnection_timer_id)
+            self._reconnection_timer_id = None
+        self._reconnection_attempts = 0
+
     def _on_bt_device_connected(self, data: Optional[dict]) -> None:
         """Handle Bluetooth device connection event from EventBus."""
         if not data or "device" not in data:
             return
 
         device = data["device"]
-        self.connected_device = device
+
+        # Security: Check if device is authorized
+        if self._trusted_devices and not self.is_device_authorized(device):
+            logger.warning("Security: Unauthorized device attempted connection: %s (%s)",
+                          device.name, device.address)
+            # Disconnect unauthorized device
+            GLib.idle_add(lambda: self.bt_manager.disconnect_device(device.path))
+            return
+
+        with self._state_lock:
+            self.connected_device = device
+            self._last_connected_address = device.address
+            self._reconnection_attempts = 0
+            self._cancel_reconnection()
 
         # If sink mode is enabled, ensure audio is routed properly
         if self.is_sink_enabled:
@@ -481,8 +812,25 @@ class BluetoothSink:
             return
 
         device = data["device"]
-        if self.connected_device and self.connected_device.path == device.path:
-            self.connected_device = None
+        
+        with self._state_lock:
+            was_our_device = self.connected_device and self.connected_device.path == device.path
+            
+            if was_our_device:
+                self.connected_device = None
+                self._transport_state = None
+                
+                # Notify that audio stream stopped
+                if self.on_audio_stream_stopped:
+                    try:
+                        self.on_audio_stream_stopped()
+                    except Exception as e:
+                        logger.error("Error in audio stream stopped callback: %s", e)
+                
+                # If sink mode is still enabled, attempt reconnection
+                if self.is_sink_enabled and self._last_connected_address:
+                    logger.info("Device disconnected unexpectedly, scheduling reconnection: %s", device.name)
+                    self._schedule_reconnection()
 
     def _configure_audio_routing(self, device: BluetoothDevice):
         """Configure audio routing for the connected device."""
@@ -939,7 +1287,7 @@ class BluetoothSink:
             return False
 
     def get_status(self) -> dict:
-        """Get current sink status."""
+        """Get current sink status including security and stability info."""
         audio_system = self._detect_audio_system()
         if self.gst_bluez_available:
             audio_system = "gstreamer-bluez"
@@ -952,6 +1300,14 @@ class BluetoothSink:
             "bluetooth_powered": self.bt_manager.is_powered(),
             "audio_system": audio_system,
             "gst_bluez_available": self.gst_bluez_available,
+            # Security info
+            "trusted_devices_count": len(self._trusted_devices),
+            "require_authorization": self._require_authorization,
+            "discoverable_timeout": self._discoverable_timeout,
+            # Stability info
+            "transport_state": self._transport_state,
+            "reconnection_attempts": self._reconnection_attempts,
+            "last_connected_address": self._last_connected_address,
         }
 
     def set_device_name(self, name: str):
@@ -965,10 +1321,17 @@ class BluetoothSink:
         Clean up Bluetooth sink resources.
 
         This should be called when the application shuts down to:
+        - Stop health monitoring and reconnection timers
         - Disable sink mode if enabled
         - Unsubscribe from events
         """
         try:
+            # Stop health monitoring
+            self._stop_health_monitoring()
+            
+            # Cancel any pending reconnection
+            self._cancel_reconnection()
+            
             # Disable sink mode if enabled
             if self.is_sink_enabled:
                 self.disable_sink_mode()

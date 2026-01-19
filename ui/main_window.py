@@ -267,6 +267,16 @@ class MainWindow(Gtk.ApplicationWindow):
                 opacity: 0.6;
                 font-size: 0.9em;
             }
+            
+            /* Playlist drag-to-reorder visual feedback */
+            .playlist-tree.dragging {
+                background: alpha(@theme_selected_bg_color, 0.1);
+            }
+            
+            .playlist-tree.dragging row:selected {
+                background: @theme_selected_bg_color;
+                color: @theme_selected_fg_color;
+            }
         """
         )
 

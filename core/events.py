@@ -76,6 +76,7 @@ class EventBus:
     ACTION_SET_SHUFFLE = "action.set_shuffle"
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
+    ACTION_REFRESH_MOC = "action.refresh_moc"  # Reload playlist from MOC
 
     def __init__(self):
         """Initialize the event bus."""
