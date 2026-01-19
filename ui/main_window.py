@@ -18,13 +18,17 @@ from gi.repository import GLib, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
+from core.app_state import AppState
 from core.audio_player import AudioPlayer
 from core.bluetooth_manager import BluetoothManager
+from core.bluetooth_sink import BluetoothSink
+from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 from core.moc_controller import MocController
 from core.mpris2 import MPRIS2Manager
 from core.music_library import MusicLibrary
+from core.playback_controller import PlaybackController
 from core.playlist_manager import PlaylistManager
 from core.system_volume import SystemVolume
 from ui.components.bluetooth_panel import BluetoothPanel
@@ -33,14 +37,11 @@ from ui.components.metadata_panel import MetadataPanel
 from ui.components.player_controls import PlayerControls
 from ui.components.playlist_view import PlaylistView
 from ui.dock_manager import DockManager
-from ui.moc_sync import MocSyncHelper
 
 logger = get_logger(__name__)
 
 
-# Update intervals (milliseconds)
-POSITION_UPDATE_INTERVAL = 500
-MOC_STATUS_UPDATE_INTERVAL = 500
+# Update intervals (milliseconds) - moved to PlaybackController
 
 # Window defaults
 DEFAULT_WINDOW_WIDTH = 1200
@@ -57,12 +58,18 @@ class MainWindow(Gtk.ApplicationWindow):
         # Ensure window can be maximized
         self.set_resizable(True)
 
-        # Initialize core components
+        # Initialize event bus and state (foundation layer)
+        self.event_bus = EventBus()
+        self.app_state = AppState(self.event_bus)
+
+        # Initialize core components (backends)
         self.library = MusicLibrary()
         self.player = AudioPlayer()
         self.playlist_manager = PlaylistManager()
-        # Initialize BT manager with this window for pairing dialogs
-        self.bt_manager = BluetoothManager(parent_window=self)
+        # Initialize BT manager with event bus
+        self.bt_manager = BluetoothManager(parent_window=self, event_bus=self.event_bus)
+        # Initialize BT sink with event bus
+        self.bt_sink = BluetoothSink(self.bt_manager, event_bus=self.event_bus)
         # System volume control
         self.system_volume = SystemVolume(on_volume_changed=self._on_system_volume_changed)
         # MOC integration (Music On Console)
@@ -72,80 +79,33 @@ class MainWindow(Gtk.ApplicationWindow):
         # MPRIS2 integration for desktop/media key support
         self.mpris2 = MPRIS2Manager()
 
+        # Initialize playback controller (mediator)
+        self.playback_controller = PlaybackController(
+            app_state=self.app_state,
+            event_bus=self.event_bus,
+            internal_player=self.player,
+            moc_controller=self.moc_controller,
+            bt_sink=self.bt_sink,
+        )
+
         # Initialize dock manager (needed before UI creation)
         self.dock_manager = DockManager(self)
 
-        # Playback options
-        self.shuffle_enabled: bool = False
-
-        # Setup player callbacks (will be connected after player_controls is created)
-        # These are set up in _create_player_controls
-
-        # Playlist manager is initialized with empty state by default
-
-        # Create UI with dockable panels (needed before MOC sync helper)
+        # Create UI with dockable panels
         self._create_ui()
 
-        # MPRIS2 is now set up in player_controls constructor
-
-        # Initialize MOC sync helper (after UI is created)
-        self.moc_sync = MocSyncHelper(
-            self.moc_controller,
-            self.playlist_manager,
-            self.player_controls,
-            self.metadata_panel,
-            self.playlist_view,
-        )
-        self.moc_sync.on_track_finished = self._on_moc_track_finished
-        self.moc_sync.on_shuffle_changed = self._on_moc_shuffle_changed
-
-        # Update player_controls with moc_sync and bt_panel references
-        self.player_controls.moc_sync = self.moc_sync
-        self.player_controls.bt_panel = self.bt_panel
-        
-        # Update playlist_view with moc_sync, player_controls, and window references
-        self.playlist_view.moc_sync = self.moc_sync
-        self.playlist_view.player_controls = self.player_controls
-        self.playlist_view.window = self
-        
-        # Update library_browser with playlist_view and player_controls references
-        self.library_browser.playlist_view = self.playlist_view
-        self.library_browser.player_controls = self.player_controls
-        
-        # Load current playlist from auto-save file on startup (after playlist_view is created)
+        # Load current playlist from auto-save file on startup
         if self.playlist_manager.load_current_playlist():
-            # Restore UI state from saved playlist
+            # Restore state from saved playlist
             tracks = self.playlist_manager.get_playlist()
             current_index = self.playlist_manager.get_current_index()
-            self.playlist_view.set_playlist(tracks, current_index)
-
-        # Setup player callbacks (after player_controls is created)
-        self.player.on_state_changed = lambda is_playing: self._on_player_state_changed(is_playing)
-        self.player.on_position_changed = lambda pos, dur: self._on_player_position_changed(
-            pos, dur
-        )
-        self.player.on_track_finished = self._on_track_finished
-        self.player.on_track_loaded = self._on_track_loaded
+            self.app_state.set_playlist(tracks, current_index)
 
         # Load saved layout
         GLib.idle_add(self.dock_manager.load_layout)
 
         # Start library scan
         self.library.scan_library(callback=self._on_library_scan_complete)
-
-        # Position updates are handled by:
-        # - GStreamer on_position_changed callback (for internal player)
-        # - MOC status updates (for MOC player)
-        # No separate timer needed
-        # If MOC is available, initialize and start status updates
-        if self.use_moc:
-            # Delay MOC initialization to avoid conflicts during library scan
-            GLib.timeout_add(1000, self._initialize_moc)  # Delay 1 second
-            GLib.timeout_add(MOC_STATUS_UPDATE_INTERVAL, self._update_moc_status)
-
-        # Initialize volume slider with current system volume
-        initial_volume = self.system_volume.get_volume()
-        self.player_controls.set_volume(initial_volume)
 
         # Connect close signal to save layout
         self.connect("close-request", self._on_close)
@@ -344,7 +304,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_library_browser(self):
         """Create and configure the library browser."""
-        # Note: playlist_view and player_controls will be set after they are created
+        # Library browser will be created after playlist_view
+        # We'll set references after UI creation
         self.library_browser = LibraryBrowser(
             playlist_view=None,  # Will be set after playlist_view is created
             player_controls=None,  # Will be set after player_controls is created
@@ -354,12 +315,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_playlist_view(self):
         """Create and configure the playlist view."""
-        # Note: player_controls and window will be set after player_controls is created
         self.playlist_view = PlaylistView(
-            self.playlist_manager,
-            moc_sync=None,  # Will be set after moc_sync is created
-            player_controls=None,  # Will be set after player_controls is created
-            window=None,  # Will be set after player_controls is created
+            app_state=self.app_state,
+            event_bus=self.event_bus,
+            playlist_manager=self.playlist_manager,
+            window=self,
         )
         self.playlist_view.connect("track-activated", self._on_playlist_track_activated)
         self.playlist_view.connect("current-index-changed", self._on_playlist_current_index_changed)
@@ -368,28 +328,26 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_metadata_panel(self):
         """Create the metadata panel."""
-        self.metadata_panel = MetadataPanel()
+        self.metadata_panel = MetadataPanel(event_bus=self.event_bus)
 
     def _create_bluetooth_panel(self):
         """Create the Bluetooth panel with speaker mode support."""
-        self.bt_panel = BluetoothPanel(self.bt_manager)
+        self.bt_panel = BluetoothPanel(
+            bt_manager=self.bt_manager,
+            bt_sink=self.bt_sink,
+            event_bus=self.event_bus,
+        )
         # Device selection is handled internally by bluetooth_panel
 
     def _create_player_controls(self):
         """Create player controls."""
-        # Note: moc_sync and bt_panel will be set up after UI creation
         self.player_controls = PlayerControls(
-            player=self.player,
-            playlist_view=self.playlist_view,
-            moc_sync=None,  # Will be set after moc_sync is created
-            bt_panel=None,  # Will be set after bt_panel is created
+            app_state=self.app_state,
+            event_bus=self.event_bus,
             mpris2=self.mpris2,
             system_volume=self.system_volume,
             window=self,
         )
-        # Connect signals for metadata updates
-        self.player_controls.connect("track-changed", self._on_track_changed)
-        self.player_controls.connect("shuffle-toggled", self._on_shuffle_toggled)
 
     def _reattach_panel(self, panel_id: str):
         """Reattach a detached panel to its original position."""
@@ -440,13 +398,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Cleanup player controls (includes MPRIS2 and system volume)
         if hasattr(self, "player_controls"):
             self.player_controls.cleanup()
-        # Cleanly stop MOC server if we started it
-        if self.use_moc and hasattr(self, "moc_sync"):
-            try:
-                self.moc_sync.shutdown()
-            except OSError:
-                # Ignore errors shutting down MOC server (may already be stopped)
-                pass
+        # Cleanup playback controller (includes MOC shutdown)
+        if hasattr(self, "playback_controller"):
+            self.playback_controller.cleanup()
         # Cleanup Bluetooth resources
         if hasattr(self, "bt_manager"):
             self.bt_manager.cleanup()
@@ -461,57 +415,22 @@ class MainWindow(Gtk.ApplicationWindow):
         """Called when library scan is complete."""
         # Use idle_add to populate browser incrementally (non-blocking)
         GLib.idle_add(self._populate_library_browser)
-        # Playlist view will be updated when MOC loads playlist
-        # Delay MOC operations to ensure server is ready
-        if self.use_moc:
-            GLib.timeout_add(500, lambda: self.moc_sync.load_playlist_from_moc())  # Delay 500ms
+        # PlaybackController handles MOC playlist loading
 
     def _populate_library_browser(self):
         """Populate library browser (called via idle_add for non-blocking)."""
         self.library_browser.populate(self.library)
         return False  # Don't repeat
 
-    def _initialize_moc(self):
-        """Initialize MOC server and settings (called after startup delay)."""
-        if self.use_moc:
-            self.moc_sync.initialize()
-        return False  # Don't repeat
-
-    def _on_moc_track_finished(self):
-        """Handle track finished from MOC - advance to next track."""
-        # This is called when MOC has advanced to the next track
-        # MOC sync handles the actual advancement, we just need to sync UI
-        tracks = self.playlist_view.get_playlist()
-        current_index = self.playlist_view.get_current_index()
-
-        # Check if there's a next track available
-        if current_index < len(tracks) - 1:
-            # There's a next track - MOC should already be playing it (autonext)
-            # Just verify and sync playlist to ensure consistency
-            if self.moc_sync:
-                self.moc_sync.update_moc_playlist(start_playback=True)
-                self.moc_sync.set_autonext_enabled(True)
-        else:
-            # End of playlist - stop playback
-            if self.moc_sync:
-                self.moc_sync.stop()
-            self.playlist_view.set_current_index(-1)
-
-    def _on_moc_shuffle_changed(self, shuffle_enabled: bool):
-        """Handle shuffle state change from MOC."""
-        self.shuffle_enabled = shuffle_enabled
-        # Update player_controls shuffle state
-        self.player_controls.set_shuffle_enabled(shuffle_enabled)
-
     def _on_search_changed(self, entry):
         """Handle search entry changes."""
         query = entry.get_text()
         if query:
             results = self.library.search(query)
-            self.playlist_view.clear()  # Auto-syncs to MOC
-            self.playlist_view.add_tracks(results)  # Auto-syncs to MOC
+            self.playlist_view.clear()
+            self.playlist_view.add_tracks(results)
         else:
-            self.playlist_view.clear()  # Auto-syncs to MOC
+            self.playlist_view.clear()
 
     def _on_track_selected(self, browser, track: TrackMetadata):
         """Handle track selection from library browser."""
@@ -534,129 +453,17 @@ class MainWindow(Gtk.ApplicationWindow):
         pass
 
     def _on_track_changed(self, controls, track: TrackMetadata):
-        """Handle track change from player_controls."""
-        # Update metadata panel
-        self.metadata_panel.set_track(track)
-
-        # Update MPRIS2 navigation capabilities
-        self.player_controls.update_mpris2_navigation_capabilities()
+        """Handle track change from player_controls (legacy signal)."""
+        # Metadata panel now subscribes to events directly
+        # MPRIS2 navigation is updated via events
+        pass
 
     def _on_system_volume_changed(self, volume: float):
         """Handle system volume change from external source (e.g., volume keys) - update UI."""
-        self.player_controls.set_volume(volume)
-
-    def _on_player_state_changed(self, is_playing: bool):
-        """Handle player state change - only for internal player (video files)."""
-        # Only update if we're using internal player (video files)
-        track = self.playlist_view.get_current_track()
-        if track and not self.player_controls.should_use_moc(track):
-            self.player_controls.set_playing(is_playing)
-            # Update MPRIS2
-            if self.mpris2:
-                self.mpris2.update_playback_status(is_playing, is_paused=False)
-
-    def _on_player_position_changed(self, position: float, duration: float):
-        """Handle player position change - only for internal player (video files)."""
-        # Only update if we're using internal player (video files)
-        track = self.playlist_view.get_current_track()
-        if track and not self.player_controls.should_use_moc(track):
-            self.player_controls.update_progress(position, duration)
-
-    def _on_track_loaded(self):
-        """Handle track loaded - update duration and sync MOC."""
-
-        # Wait a bit for GStreamer to determine duration, then update
-        def update_after_load():
-            duration = self.player.get_duration()
-            position = self.player.get_position()
-            # Update progress even if duration is 0 (will be updated when available)
-            self.player_controls.update_progress(position, duration)
-            # If duration is still 0, try again after a short delay
-            if duration == 0:
-                GLib.timeout_add(200, update_after_load)
-            return False
-
-        # Initial update
-        GLib.timeout_add(100, update_after_load)
-
-        # Sync MOC after track is loaded (only if using MOC for this track)
-        track = self.playlist_view.get_current_track()
-        if self.use_moc and track and self.player_controls.should_use_moc(track):
-            if self.moc_sync:
-                self.moc_sync.enable_sync()
-                self.moc_sync.update_moc_playlist(start_playback=True)
-                self.moc_sync.set_autonext_enabled(True)
-                # Sync shuffle state
-                self.moc_sync.set_shuffle(self.shuffle_enabled)
-
-    def _on_track_finished(self):
-        """Handle track finished - auto-advance based on loop mode and autonext (internal player only)."""
-        # This callback is only for internal player (video files)
-        # MOC handles auto-advancement internally for audio files
-
-        # Only auto-advance if autonext is enabled
-        # Use player_controls.autonext_enabled directly (not MOC's state)
-        if not self.player_controls.autonext_enabled:
-            # Autonext disabled - just stop
-            self.player.stop()
-            self.playlist_view.set_current_index(-1)
-            return
-
-        loop_mode = self.player_controls.loop_mode
-        tracks = self.playlist_view.get_playlist()
-        current_index = self.playlist_view.get_current_index()
-
-        if loop_mode == self.player_controls.LOOP_TRACK:
-            # Loop current track - restart it
-            self.player_controls.play_current_track()
-        elif loop_mode == self.player_controls.LOOP_PLAYLIST:
-            # Loop playlist - advance to next or wrap to first
-            next_track = self.playlist_view.get_next_track()
-            if next_track:
-                self.player_controls.play_current_track()
-            else:
-                # End of playlist - wrap to beginning
-                if tracks:
-                    self.playlist_view.set_current_index(0)
-                    self.player_controls.play_current_track()
-                else:
-                    self.player.stop()
-                    self.playlist_view.set_current_index(-1)
-        else:  # LOOP_FORWARD
-            # Forward mode - advance to next track or stop at end
-            next_track = self.playlist_view.get_next_track()
-            if next_track:
-                self.player_controls.play_current_track()
-            else:
-                # End of playlist reached - stop
-                self.player.stop()
-                self.playlist_view.set_current_index(-1)
-
-    def _update_moc_status(self):
-        """Periodically pull status from MOC - sync UI and detect track changes."""
-        if not self.use_moc:
-            return False
-        return self.moc_sync.update_status()
+        self.app_state.set_volume(volume)
 
     def _on_shuffle_toggled(self, controls, active: bool):
-        """Handle shuffle toggle state changes."""
-        self.shuffle_enabled = active
-        # Sync shuffle state with playlist view (manages shuffle order)
-        if self.playlist_view:
-            self.playlist_view.set_shuffle_enabled(active)
-        # Sync shuffle state with MOC (delegated to moc_sync)
-        if self.use_moc and self.moc_sync:
-            self.moc_sync.set_shuffle(active)
-        # Update player_controls internal state to keep in sync
-        self.player_controls.set_shuffle_enabled(active)
-
-    def _sync_shuffle_from_moc(self):
-        """Sync shuffle state from MOC to UI."""
-        if not self.use_moc or not self.moc_sync:
-            return False
-        moc_shuffle = self.moc_sync.shuffle_enabled
-        if moc_shuffle is not None:
-            self.shuffle_enabled = moc_shuffle
-            self.player_controls.shuffle_button.set_active(moc_shuffle)
-        return False
+        """Handle shuffle toggle state changes (legacy signal)."""
+        # Shuffle state is now managed by AppState and events
+        pass
 

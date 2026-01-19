@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from ui.components.bluetooth_panel import BluetoothPanel
     from ui.components.playlist_view import PlaylistView
-    from ui.moc_sync import MocSyncHelper
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -24,8 +23,8 @@ from gi.repository import GLib, GObject, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
-from core.audio_player import AudioPlayer
-from core.workflow_utils import is_video_file, normalize_path
+from core.app_state import AppState, PlaybackState
+from core.events import EventBus
 from core.metadata import TrackMetadata
 from core.mpris2 import MPRIS2Manager
 from core.system_volume import SystemVolume
@@ -61,29 +60,21 @@ class PlayerControls(Gtk.Box):
 
     def __init__(
         self,
-        player: AudioPlayer,
-        playlist_view: "PlaylistView",
-        moc_sync: Optional["MocSyncHelper"] = None,
-        bt_panel: Optional["BluetoothPanel"] = None,
+        app_state: AppState,
+        event_bus: EventBus,
         mpris2: Optional[MPRIS2Manager] = None,
         system_volume: Optional[SystemVolume] = None,
         window: Optional[Gtk.Window] = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15)
 
-        self.player = player
-        self.playlist_view = playlist_view
-        self.moc_sync = moc_sync
-        self.bt_panel = bt_panel
+        self._state = app_state
+        self._events = event_bus
         self.mpris2 = mpris2
         self.system_volume = system_volume
         self.window = window
 
-        self._shuffle_enabled = False
-        self._autonext_enabled = True
-        self._loop_mode = self.LOOP_FORWARD
         self._seek_state = SeekState.IDLE
-        self._duration = 0.0
         self._updating_volume = False
         self._updating_toggle = False
         self._updating_progress = (
@@ -92,21 +83,39 @@ class PlayerControls(Gtk.Box):
         self._value_changed_count: int = 0  # Track value-changed events during drag
         self._last_value_changed_time: int = 0  # Track when value-changed last fired
         self._drag_timeout_id: Optional[int] = None  # Timeout to detect drag end
+        self._press_x: float = 0.0  # X coordinate of press for click-to-seek
+        self._press_time: int = 0  # Time of press for click detection
+        self._press_handled: bool = False  # Whether press was handled as drag
 
         for margin in ["top", "bottom", "start", "end"]:
             getattr(self, f"set_margin_{margin}")(15)
 
         self._create_ui()
 
+        # Subscribe to state events
+        self._events.subscribe(EventBus.PLAYBACK_STARTED, self._on_playback_started)
+        self._events.subscribe(EventBus.PLAYBACK_PAUSED, self._on_playback_paused)
+        self._events.subscribe(EventBus.PLAYBACK_STOPPED, self._on_playback_stopped)
+        self._events.subscribe(EventBus.POSITION_CHANGED, self._on_position_changed)
+        self._events.subscribe(EventBus.DURATION_CHANGED, self._on_duration_changed)
+        self._events.subscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
+        self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
+        self._events.subscribe(EventBus.LOOP_MODE_CHANGED, self._on_loop_mode_changed)
+        self._events.subscribe(EventBus.VOLUME_CHANGED, self._on_volume_changed)
+
+        # Initialize UI from state
         if self.system_volume:
-            self.set_volume(self.system_volume.get_volume())
+            initial_volume = self.system_volume.get_volume()
+            self._state.set_volume(initial_volume)
+            self.set_volume(initial_volume)
         if self.mpris2:
             self._setup_mpris2()
 
-        self.connect("seek-changed", lambda c, p: self.seek(p))
+        # Connect UI signals
+        self.connect("seek-changed", lambda c, p: self._on_seek_changed(p))
         self.connect(
             "volume-changed",
-            lambda c, v: self.system_volume.set_volume(v) if self.system_volume else None,
+            lambda c, v: self._on_volume_slider_changed(v),
         )
 
     def _create_ui(self):
@@ -154,23 +163,23 @@ class PlayerControls(Gtk.Box):
         bs = 56
 
         for name, icon, action in [
-            ("prev", "media-skip-backward-symbolic", lambda: self.previous_track()),
+            ("prev", "media-skip-backward-symbolic", lambda: self._events.publish(EventBus.ACTION_PREV)),
             (
                 "play",
                 "media-playback-start-symbolic",
-                lambda: (self.resume(), self.emit("play-clicked")),
+                lambda: self._events.publish(EventBus.ACTION_PLAY),
             ),
             (
                 "pause",
                 "media-playback-pause-symbolic",
-                lambda: (self.pause(), self.emit("pause-clicked")),
+                lambda: self._events.publish(EventBus.ACTION_PAUSE),
             ),
             (
                 "stop",
                 "media-playback-stop-symbolic",
-                lambda: (self.stop(), self.emit("stop-clicked")),
+                lambda: self._events.publish(EventBus.ACTION_STOP),
             ),
-            ("next", "media-skip-forward-symbolic", lambda: self.next_track()),
+            ("next", "media-skip-forward-symbolic", lambda: self._events.publish(EventBus.ACTION_NEXT)),
         ]:
             b = Gtk.Button.new_from_icon_name(icon)
             b.set_size_request(bs, bs)
@@ -206,7 +215,7 @@ class PlayerControls(Gtk.Box):
         self.volume_scale.set_value(1.0)
         self.volume_scale.set_draw_value(False)
         self.volume_scale.set_size_request(140, 36)
-        self.volume_scale.connect("value-changed", self._on_volume_changed)
+        self.volume_scale.connect("value-changed", self._on_volume_scale_changed)
         vb.append(self.volume_scale)
         cb.append(vb)
         self.append(cb)
@@ -248,7 +257,6 @@ class PlayerControls(Gtk.Box):
             return
 
         position = max(0.0, min(position, duration if duration > 0 else position))
-        self._duration = duration
 
         # Final check right before set_value() - critical for preventing race conditions
         # Even if we passed the first check, if drag started in the meantime, abort now
@@ -279,8 +287,9 @@ class PlayerControls(Gtk.Box):
 
     def _ensure_duration(self):
         """Ensure duration is set."""
-        if self._duration <= 0:
-            self._duration = self.get_current_duration()
+        if self._state.duration <= 0:
+            # Duration will be updated via events
+            pass
 
     def _on_scale_button_pressed(self, controller, n_press, x, y):
         """Handle button press on scale - store position for potential click-to-seek."""
@@ -301,19 +310,25 @@ class PlayerControls(Gtk.Box):
             # If press and release happened within 200ms and no drag was detected, it's a click
             if time_since_press < 200000:  # 200ms in microseconds
                 self._ensure_duration()
-                if self._duration > 0:
-                    w = self.progress_scale.get_allocation().width
-                    if w > 0:
-                        pct = max(0.0, min(100.0, (self._press_x / w) * 100.0))
-                        pos = (pct / 100.0) * self._duration
-                        
-                        # Update scale and labels
-                        self._updating_progress = True
-                        self.progress_scale.set_value(pct)
-                        self.update_time_labels(pos, self._duration)
-                        self._updating_progress = False
-                        
-                        # Seek immediately (click, not drag)
+                duration = self._state.duration
+                w = self.progress_scale.get_allocation().width
+                if w > 0:
+                    pct = max(0.0, min(100.0, (self._press_x / w) * 100.0))
+                    if duration > 0:
+                        pos = (pct / 100.0) * duration
+                    else:
+                        # If no duration, can't seek - just update UI to show click position
+                        pos = 0.0
+                    
+                    # Update scale and labels
+                    self._updating_progress = True
+                    self.progress_scale.set_value(pct)
+                    if duration > 0:
+                        self.update_time_labels(pos, duration)
+                    self._updating_progress = False
+                    
+                    # Seek immediately (click, not drag) - only if duration > 0
+                    if duration > 0:
                         self._seek_state = SeekState.SEEKING
                         self.emit("seek-changed", pos)
                         self._seek_state = SeekState.IDLE
@@ -356,11 +371,12 @@ class PlayerControls(Gtk.Box):
         if self._seek_state == SeekState.DRAGGING:
             self._value_changed_count += 1
             self._ensure_duration()
-            if self._duration > 0:
+            duration = self._state.duration
+            if duration > 0:
                 scale_value = scale.get_value()
-                pos = (scale_value / 100.0) * self._duration
+                pos = (scale_value / 100.0) * duration
                 # Always update labels from scale value during drag
-                self.update_time_labels(pos, self._duration)
+                self.update_time_labels(pos, duration)
             
             # Reset timeout - if value-changed doesn't fire for 200ms, drag has ended
             if self._drag_timeout_id is not None:
@@ -375,14 +391,15 @@ class PlayerControls(Gtk.Box):
         """
         if self._seek_state == SeekState.DRAGGING:
             self._ensure_duration()
+            duration = self._state.duration
             
-            if self._duration > 0:
+            if duration > 0:
                 # Get current scale value and seek to that position
                 scale_value = self.progress_scale.get_value()
-                pos = (scale_value / 100.0) * self._duration
+                pos = (scale_value / 100.0) * duration
                 
                 # Update labels
-                self.update_time_labels(pos, self._duration)
+                self.update_time_labels(pos, duration)
                 
                 # Seek to that position
                 self._seek_state = SeekState.SEEKING
@@ -399,303 +416,133 @@ class PlayerControls(Gtk.Box):
         return False  # Don't repeat
 
 
-    def _on_volume_changed(self, scale):
-        """Handle volume change."""
+    def _on_volume_scale_changed(self, scale: Gtk.Scale) -> None:
+        """Handle volume scale value-changed signal - extract value and call slider handler."""
         if not self._updating_volume:
-            self.emit("volume-changed", scale.get_value())
+            volume = scale.get_value()
+            self._on_volume_slider_changed(volume)
+
+    def _on_volume_slider_changed(self, volume: float) -> None:
+        """Handle volume slider change - publish action event."""
+        if not self._updating_volume:
+            self._events.publish(EventBus.ACTION_SET_VOLUME, {"volume": volume})
+            if self.system_volume:
+                self.system_volume.set_volume(volume)
 
     def _on_shuffle_toggled(self, button):
+        """Handle shuffle toggle - publish action event."""
         if not self._updating_toggle:
             self._updating_toggle = True
-            self.set_shuffle_enabled(button.get_active())
-            self.emit("shuffle-toggled", button.get_active())
+            enabled = button.get_active()
+            self._events.publish(EventBus.ACTION_SET_SHUFFLE, {"enabled": enabled})
             self._updating_toggle = False
 
     def _on_loop_clicked(self, button):
+        """Handle loop button click - publish action event."""
         if not self._updating_toggle:
             self._updating_toggle = True
-            self._loop_mode = (self._loop_mode + 1) % 3
-            self._update_loop_icon()
-            self.emit("loop-mode-changed", self._loop_mode)
+            current_mode = self._state.loop_mode
+            new_mode = (current_mode + 1) % 3
+            self._events.publish(EventBus.ACTION_SET_LOOP_MODE, {"mode": new_mode})
             self._updating_toggle = False
 
     def _update_loop_icon(self):
+        """Update loop button icon based on state."""
+        loop_mode = self._state.loop_mode
         icons = {
-            self.LOOP_FORWARD: ("media-playback-start-symbolic", "Loop mode: Forward"),
-            self.LOOP_TRACK: ("media-playlist-repeat-song-symbolic", "Loop mode: Loop Track"),
-            self.LOOP_PLAYLIST: ("media-playlist-repeat-symbolic", "Loop mode: Loop Playlist"),
+            0: ("media-playback-start-symbolic", "Loop mode: Forward"),
+            1: ("media-playlist-repeat-song-symbolic", "Loop mode: Loop Track"),
+            2: ("media-playlist-repeat-symbolic", "Loop mode: Loop Playlist"),
         }
-        icon, tip = icons.get(self._loop_mode, icons[self.LOOP_FORWARD])
+        icon, tip = icons.get(loop_mode, icons[0])
         self.loop_button.set_child(Gtk.Image.new_from_icon_name(icon))
         self.loop_button.set_tooltip_text(tip)
         (
             self.loop_button.add_css_class
-            if self._loop_mode != self.LOOP_FORWARD
+            if loop_mode != 0
             else self.loop_button.remove_css_class
         )("suggested-action")
 
-    def set_shuffle_enabled(self, enabled: bool):
-        self._shuffle_enabled = enabled
-        if self.playlist_view:
-            self.playlist_view.set_shuffle_enabled(enabled)
+    def _on_seek_changed(self, position: float) -> None:
+        """Handle seek from UI - publish action event."""
+        self._events.publish(EventBus.ACTION_SEEK, {"position": position})
+
+    # ============================================================================
+    # Event Handlers (State Updates)
+    # ============================================================================
+
+    def _on_playback_started(self, data: Optional[dict]) -> None:
+        """Handle playback started event."""
+        self.set_playing(True)
+
+    def _on_playback_paused(self, data: Optional[dict]) -> None:
+        """Handle playback paused event."""
+        self.set_playing(False)
+
+    def _on_playback_stopped(self, data: Optional[dict]) -> None:
+        """Handle playback stopped event."""
+        self.set_playing(False)
+        # Reset timeline to 00:00
+        self.update_progress(0.0, 0.0)
+
+    def _on_position_changed(self, data: Optional[dict]) -> None:
+        """Handle position changed event."""
+        if not data:
+            return
+        position = data.get("position", 0.0)
+        duration = data.get("duration", 0.0)
+        self.update_progress(position, duration)
+
+    def _on_duration_changed(self, data: Optional[dict]) -> None:
+        """Handle duration changed event."""
+        if not data:
+            return
+        duration = data.get("duration", 0.0)
+        position = self._state.position
+        self.update_progress(position, duration)
+
+    def _on_track_changed(self, data: Optional[dict]) -> None:
+        """Handle track changed event."""
+        if not data or "track" not in data:
+            return
+        track = data["track"]
+        if self.mpris2:
+            self.mpris2.update_metadata(track)
+        self._update_mpris2_nav()
+
+    def _on_shuffle_changed(self, data: Optional[dict]) -> None:
+        """Handle shuffle changed event."""
+        if not data:
+            return
+        enabled = data.get("enabled", False)
         if not self._updating_toggle and self.shuffle_button.get_active() != enabled:
             self._updating_toggle = True
             self.shuffle_button.set_active(enabled)
             self._updating_toggle = False
 
-    @property
-    def autonext_enabled(self) -> bool:
-        return self._autonext_enabled
-
-    @autonext_enabled.setter
-    def autonext_enabled(self, enabled: bool):
-        self._autonext_enabled = enabled
-        self._sync_moc_options()
-
-    @property
-    def loop_mode(self) -> int:
-        return self._loop_mode
-
-    @loop_mode.setter
-    def loop_mode(self, mode: int):
-        if 0 <= mode <= 2:
-            self._loop_mode = mode
-            if not self._updating_toggle:
-                self._update_loop_icon()
-
-    def should_use_moc(self, track: Optional[TrackMetadata]) -> bool:
-        """Check if MOC should be used for this track."""
-        if not (self.moc_sync and self.moc_sync.use_moc and track and track.file_path):
-            return False
-        return not is_video_file(track.file_path)
-
-    def _play_with_moc(self, track: TrackMetadata) -> None:
-        """Play track using MOC."""
-        self._stop_internal_player()
-        if self.moc_sync:
-            self.moc_sync.enable_sync()
-            self.moc_sync.update_moc_playlist(start_playback=True)
-            self._sync_moc_options()
-
-    def _play_with_internal(self, track: TrackMetadata) -> None:
-        """Play track using internal player."""
-        # For video files, ensure MOC is stopped
-        if self.moc_sync and self.moc_sync.use_moc:
-            status = self.moc_sync.moc_controller.get_status(force_refresh=False)
-            if status and status.get("state") in ("PLAY", "PAUSE"):
-                self.moc_sync.moc_controller.stop()
-        self.player.load_track(track)
-        self.player.play()
-
-    def play_current_track(self):
-        track = self.playlist_view.get_current_track()
-        if not track or not track.file_path or not Path(track.file_path).exists():
+    def _on_loop_mode_changed(self, data: Optional[dict]) -> None:
+        """Handle loop mode changed event."""
+        if not data:
             return
+        mode = data.get("mode", 0)
+        self._update_loop_icon()
 
-        self._stop_all_players()
-        self.update_progress(0.0, 0.0)
-
-        if self.should_use_moc(track):
-            self._play_with_moc(track)
-        else:
-            self._play_with_internal(track)
-        
-        self.playlist_view._update_view()
-        self.set_playing(True)
-        self._duration = (
-            track.duration if track.duration and track.duration > 0 else self.get_current_duration()
-        )
-        self.emit("track-changed", track)
-        if self.mpris2:
-            self.mpris2.update_metadata(track)
-
-    def resume(self):
-        if self._handle_bt("play"):
+    def _on_volume_changed(self, data: Optional[dict]) -> None:
+        """Handle volume changed event."""
+        if not data:
             return
-        track = self.playlist_view.get_current_track()
-        if not track:
-            tracks = self.playlist_view.get_playlist()
-            if tracks:
-                self.playlist_view.set_current_index(0)
-                if self.playlist_view.get_current_track():
-                    self.play_current_track()
-            return
-
-        # Check if we have a paused track with duration available
-        if track.duration and track.duration > 0:
-            self._duration = track.duration
-
-        if self.should_use_moc(track):
-            self._resume_moc(track)
-        else:
-            self._resume_internal()
-
-    def play(self):
-        self.resume()
-
-    def pause(self):
-        if self._handle_bt("pause"):
-            return
-        track = self.playlist_view.get_current_track()
-        if track:
-            (
-                self.moc_sync.pause
-                if self.should_use_moc(track) and self.moc_sync
-                else self.player.pause
-            )()
-        self.set_playing(False)
-
-    def stop(self):
-        if self._handle_bt("stop"):
-            return
-        track = self.playlist_view.get_current_track()
-        if track:
-            (
-                self.moc_sync.stop
-                if self.should_use_moc(track) and self.moc_sync
-                else self.player.stop
-            )()
-        self.playlist_view.set_current_index(-1)
-        self.set_playing(False)
-        if self.mpris2:
-            self.mpris2.update_playback_status(False, is_paused=False)
-
-    def next_track(self):
-        if not self._handle_bt("next"):
-            track = self.playlist_view.get_next_track()
-            if track:
-                self.play_current_track()
-
-    def previous_track(self):
-        if not self._handle_bt("prev"):
-            track = self.playlist_view.get_previous_track()
-            if track:
-                self.play_current_track()
-            self._update_mpris2_nav()
-
-    def seek(self, position: float):
-        """
-        Perform actual seek operation.
-
-        This is called by the seek-changed signal handler.
-        It performs the seek operation only - UI updates are handled separately.
-        """
-        track = self.playlist_view.get_current_track()
-        if track:
-            if self.should_use_moc(track) and self.moc_sync:
-                self.moc_sync.seek(position, force=True)
-            else:
-                self.player.seek(position)
-
-        # Don't update UI here - let position updates from player handle it
-        # This prevents conflicts with drag operations and ensures single source of truth
-
-    def get_current_duration(self) -> float:
-        track = self.playlist_view.get_current_track()
-        if self.should_use_moc(track) and self.moc_sync:
-            # Use cached duration or get from status
-            duration = self.moc_sync.last_duration if self.moc_sync.last_duration > 0 else 0.0
-            if duration == 0:
-                status = self.moc_sync.get_status(force_refresh=False)
-                if status:
-                    duration = float(status.get("duration", 0.0))
-            return duration
-        return self.player.get_duration()
-
-    def _stop_internal_player(self):
-        if self.player.is_playing or self.player.current_track:
-            self.player.stop()
-
-    def _stop_all_players(self):
-        self._stop_internal_player()
-        if self.moc_sync and self.moc_sync.use_moc:
-            status = self.moc_sync.moc_controller.get_status(force_refresh=False)
-            if status and status.get("state") in ("PLAY", "PAUSE"):
-                self.moc_sync.moc_controller.stop()
-
-    def _normalize_path(self, file_path: Optional[str]) -> Optional[str]:
-        """Normalize file path using centralized utility.
-
-        Args:
-            file_path: File path to normalize.
-
-        Returns:
-            Normalized path as string, or None if invalid.
-        """
-        normalized = normalize_path(file_path)
-        return str(normalized) if normalized else None
-
-    def _handle_bt(self, action: str) -> bool:
-        if self.bt_panel and self.bt_panel.is_bt_playback_active():
-            self.bt_panel.handle_playback_control(action)
-            return True
-        return False
-
-    def _resume_moc(self, track: TrackMetadata) -> None:
-        """Resume playback using MOC player."""
-        # Ensure internal player is stopped first
-        self._stop_internal_player()
-        if self.moc_sync:
-            # Check if track is paused and can be resumed
-            status = self.moc_sync.get_status(force_refresh=True)
-            if status:
-                moc_state = status.get("state", "STOP")
-                moc_file = status.get("file_path")
-                if moc_file and track.file_path:
-                    moc_file_abs = self._normalize_path(moc_file)
-                    track_file_abs = self._normalize_path(track.file_path)
-                    if moc_file_abs and track_file_abs and moc_file_abs == track_file_abs:
-                        if moc_state == "PAUSE":
-                            self.moc_sync.play()
-                            self.set_playing(True)
-                            return
-                        elif moc_state == "PLAY":
-                            self.set_playing(True)
-                            return
-            # Track not playing or paused - start playback
-            self.play_current_track()
-
-    def _resume_internal(self) -> None:
-        # Ensure MOC is stopped first
-        if self.moc_sync and self.moc_sync.use_moc:
-            status = self.moc_sync.moc_controller.get_status(force_refresh=False)
-            if status and status.get("state") in ("PLAY", "PAUSE"):
-                self.moc_sync.moc_controller.stop()
-
-        if self.player.current_track and not self.player.is_playing:
-            self.player.play()
-            self.set_playing(True)
-        elif not self.player.current_track:
-            self.play_current_track()
-
-    def _sync_moc_options(self) -> None:
-        """Sync shuffle and autonext options to MOC.
-        
-        Only sends commands if MOC's state differs from our desired state.
-        This reduces unnecessary MOC commands and prevents race conditions.
-        """
-        if not (self.moc_sync and self.moc_sync.use_moc):
-            return
-        moc = self.moc_sync.moc_controller
-        
-        # Get current MOC state to avoid unnecessary commands
-        moc_shuffle = moc.get_shuffle_state()
-        moc_autonext = moc.get_autonext_state()
-        
-        # Only sync if state differs
-        if moc_shuffle is not None and moc_shuffle != self._shuffle_enabled:
-            (moc.enable_shuffle if self._shuffle_enabled else moc.disable_shuffle)()
-        if moc_autonext is not None and moc_autonext != self._autonext_enabled:
-            (moc.enable_autonext if self._autonext_enabled else moc.disable_autonext)()
+        volume = data.get("volume", 1.0)
+        self.set_volume(volume)
 
     def _update_mpris2_nav(self) -> None:
         """Update MPRIS2 navigation capabilities."""
         if not self.mpris2:
             return
-        tracks = self.playlist_view.get_playlist()
-        idx = self.playlist_view.get_current_index()
+        playlist = self._state.playlist
+        idx = self._state.current_index
+        shuffle_enabled = self._state.shuffle_enabled
         self.mpris2.update_can_go_next(
-            len(tracks) > 0 and (self._shuffle_enabled or idx < len(tracks) - 1)
+            len(playlist) > 0 and (shuffle_enabled or idx < len(playlist) - 1)
         )
         self.mpris2.update_can_go_previous(idx > 0)
 
@@ -705,23 +552,18 @@ class PlayerControls(Gtk.Box):
             return
 
         def on_seek(offset_us: int) -> None:
-            track = self.playlist_view.get_current_track()
-            if track:
-                pos = (
-                    (self.moc_sync.last_position if self.moc_sync else 0.0)
-                    if self.should_use_moc(track) and self.moc_sync
-                    else self.player.get_position()
-                )
-                self.seek(max(0.0, pos + (offset_us / 1_000_000.0)))
+            pos = self._state.position
+            new_pos = max(0.0, pos + (offset_us / 1_000_000.0))
+            self._events.publish(EventBus.ACTION_SEEK, {"position": new_pos})
 
         self.mpris2.set_playback_callbacks(
-            on_play=self.resume,
-            on_pause=self.pause,
-            on_stop=self.stop,
-            on_next=self.next_track,
-            on_previous=self.previous_track,
+            on_play=lambda: self._events.publish(EventBus.ACTION_PLAY),
+            on_pause=lambda: self._events.publish(EventBus.ACTION_PAUSE),
+            on_stop=lambda: self._events.publish(EventBus.ACTION_STOP),
+            on_next=lambda: self._events.publish(EventBus.ACTION_NEXT),
+            on_previous=lambda: self._events.publish(EventBus.ACTION_PREV),
             on_seek=on_seek,
-            on_set_volume=lambda v: self.set_volume(v) if 0.0 <= v <= 1.0 else None,
+            on_set_volume=lambda v: self._events.publish(EventBus.ACTION_SET_VOLUME, {"volume": v}) if 0.0 <= v <= 1.0 else None,
         )
         if self.window:
             self.mpris2.set_window_callbacks(

@@ -19,6 +19,7 @@ from gi.repository import Gst
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
+from core.events import EventBus
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -39,8 +40,16 @@ class BluetoothSink:
     PROFILE_INTERFACE = "org.bluez.Profile1"
     PROFILE_MANAGER_INTERFACE = "org.bluez.ProfileManager1"
 
-    def __init__(self, bt_manager: BluetoothManager):
+    def __init__(self, bt_manager: BluetoothManager, event_bus: Optional[EventBus] = None):
+        """
+        Initialize Bluetooth sink.
+
+        Args:
+            bt_manager: BluetoothManager instance
+            event_bus: EventBus instance for publishing events (optional)
+        """
         self.bt_manager = bt_manager
+        self._event_bus = event_bus
         self.is_sink_enabled = False
         self.is_discoverable = False
         self.connected_device: Optional[BluetoothDevice] = None
@@ -50,38 +59,14 @@ class BluetoothSink:
         self.gst_bluez_available = False
         self._check_gst_bluez_plugin()
 
-        # Callbacks
-        self.on_sink_enabled: Optional[Callable[[], None]] = None
-        self.on_sink_disabled: Optional[Callable[[], None]] = None
-        self.on_device_connected: Optional[Callable[[BluetoothDevice], None]] = None
-        self.on_device_disconnected: Optional[Callable[[BluetoothDevice], None]] = None
-        # Optional callbacks for audio stream events (not currently used in UI)
-        # These are called internally when A2DP audio streams start/stop
-        # Can be set for future features like notifications or status updates
-        self.on_audio_stream_started: Optional[Callable[[], None]] = None
-        self.on_audio_stream_stopped: Optional[Callable[[], None]] = None
-
         # Register sink mode checker callback with BT manager (avoids circular dependency)
         if hasattr(self.bt_manager, "register_sink_mode_checker"):
             self.bt_manager.register_sink_mode_checker(lambda: self.is_sink_enabled)
 
-        # Setup BT manager callbacks using callback chaining pattern
-        #
-        # IMPORTANT: This pattern intercepts BluetoothManager callbacks to add sink-specific
-        # behavior (audio routing) while preserving the original callbacks. This allows:
-        # 1. BluetoothSink to configure audio routing when devices connect/disconnect
-        # 2. Other components (like BluetoothPanel) to still receive connection events
-        #
-        # NOTE: This pattern requires that BluetoothSink is initialized BEFORE any other
-        # components that set callbacks on BluetoothManager. If callbacks are set after
-        # BluetoothSink initialization, those components won't receive events.
-        #
-        # Future improvement: Consider refactoring to an event emitter pattern for better
-        # decoupling and support for multiple listeners.
-        self._original_device_connected = self.bt_manager.on_device_connected
-        self._original_device_disconnected = self.bt_manager.on_device_disconnected
-        self.bt_manager.on_device_connected = self._on_device_connected
-        self.bt_manager.on_device_disconnected = self._on_device_disconnected
+        # Subscribe to BT manager events
+        if self._event_bus:
+            self._event_bus.subscribe(EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected)
+            self._event_bus.subscribe(EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected)
 
     def _check_gst_bluez_plugin(self) -> None:
         """
@@ -193,8 +178,8 @@ class BluetoothSink:
 
             if success:
                 self.is_sink_enabled = True
-                if self.on_sink_enabled:
-                    self.on_sink_enabled()
+                if self._event_bus:
+                    self._event_bus.publish(EventBus.BT_SINK_ENABLED, {})
 
             return success
 
@@ -269,9 +254,9 @@ class BluetoothSink:
                 logger.info("Disconnecting %s - sink mode is now disabled", device.name)
                 self.bt_manager.disconnect_device(device.path)
 
-            # Notify callbacks
-            if self.on_sink_disabled:
-                self.on_sink_disabled()
+            # Publish event
+            if self._event_bus:
+                self._event_bus.publish(EventBus.BT_SINK_DISABLED, {})
 
             logger.info("Bluetooth sink mode disabled successfully")
             return True
@@ -473,37 +458,28 @@ class BluetoothSink:
             logger.error("Error enabling basic sink: %s", e, exc_info=True)
             return False
 
-    def _on_device_connected(self, device: BluetoothDevice):
-        """Handle Bluetooth device connection."""
+    def _on_bt_device_connected(self, data: Optional[dict]) -> None:
+        """Handle Bluetooth device connection event from EventBus."""
+        if not data or "device" not in data:
+            return
+
+        device = data["device"]
         self.connected_device = device
-
-        # Call original callback if set
-        if self._original_device_connected:
-            self._original_device_connected(device)
-
-        # Call our callback
-        if self.on_device_connected:
-            self.on_device_connected(device)
 
         # If sink mode is enabled, ensure audio is routed properly
         if self.is_sink_enabled:
             self._configure_audio_routing(device)
+            if self._event_bus:
+                self._event_bus.publish(EventBus.BT_SINK_DEVICE_CONNECTED, {"device": device})
 
-    def _on_device_disconnected(self, device: BluetoothDevice):
-        """Handle Bluetooth device disconnection."""
+    def _on_bt_device_disconnected(self, data: Optional[dict]) -> None:
+        """Handle Bluetooth device disconnection event from EventBus."""
+        if not data or "device" not in data:
+            return
+
+        device = data["device"]
         if self.connected_device and self.connected_device.path == device.path:
             self.connected_device = None
-
-        # Call original callback if set
-        if self._original_device_disconnected:
-            self._original_device_disconnected(device)
-
-        # Call our callback
-        if self.on_device_disconnected:
-            self.on_device_disconnected(device)
-
-        if self.on_audio_stream_stopped:
-            self.on_audio_stream_stopped()
 
     def _configure_audio_routing(self, device: BluetoothDevice):
         """Configure audio routing for the connected device."""
@@ -537,8 +513,7 @@ class BluetoothSink:
                     # Find the Bluetooth source and loopback to ALSA sink
                     self._setup_pulseaudio_routing(device)
 
-            if self.on_audio_stream_started:
-                self.on_audio_stream_started()
+            # Audio stream started - could publish event here if needed
 
         except Exception as e:
             logger.error("Error configuring audio routing: %s", e, exc_info=True)

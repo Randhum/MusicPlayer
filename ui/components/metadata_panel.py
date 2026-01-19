@@ -17,6 +17,7 @@ from gi.repository import GObject, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
+from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 
@@ -26,12 +27,15 @@ logger = get_logger(__name__)
 class MetadataPanel(Gtk.Box):
     """Component for displaying track metadata and album art."""
 
-    def __init__(self) -> None:
+    def __init__(self, event_bus: Optional[EventBus] = None) -> None:
         """
         Initialize metadata panel.
 
         Creates UI elements for displaying track information and album art
         with lazy loading support.
+
+        Args:
+            event_bus: Optional EventBus instance for subscribing to track changes
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.set_size_request(250, -1)
@@ -39,6 +43,10 @@ class MetadataPanel(Gtk.Box):
         self.set_margin_end(10)
         self.set_margin_top(10)
         self.set_margin_bottom(10)
+
+        # Subscribe to track changes
+        if event_bus:
+            event_bus.subscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
 
         # Album art (lazy loaded)
         self.art_image = Gtk.Picture.new_for_filename(None)
@@ -89,6 +97,13 @@ class MetadataPanel(Gtk.Box):
         info_box.append(details_box)
 
         self.append(info_box)
+
+    def _on_track_changed(self, data: Optional[dict]) -> None:
+        """Handle track changed event."""
+        if data and "track" in data:
+            self.set_track(data["track"])
+        else:
+            self.set_track(None)
 
     def set_track(self, track: Optional[TrackMetadata]):
         """Update display with track metadata."""

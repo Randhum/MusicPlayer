@@ -19,6 +19,7 @@ from gi.repository import GLib, GObject, Gtk
 # ============================================================================
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
 from core.bluetooth_sink import BluetoothSink
+from core.events import EventBus
 
 
 class BluetoothPanel(Gtk.Box):
@@ -28,11 +29,23 @@ class BluetoothPanel(Gtk.Box):
         "device-selected": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, bt_manager: BluetoothManager):
+    def __init__(self, bt_manager: BluetoothManager, bt_sink: Optional[BluetoothSink] = None, event_bus: Optional[EventBus] = None):
+        """
+        Initialize Bluetooth panel.
+
+        Args:
+            bt_manager: BluetoothManager instance
+            bt_sink: Optional BluetoothSink instance (if None, creates one internally)
+            event_bus: Optional EventBus instance for subscribing to events
+        """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.bt_manager = bt_manager
-        # Create BluetoothSink internally - panel owns it
-        self.bt_sink = BluetoothSink(self.bt_manager)
+        self._event_bus = event_bus
+        # Create BluetoothSink if not provided (for backward compatibility)
+        if bt_sink:
+            self.bt_sink = bt_sink
+        else:
+            self.bt_sink = BluetoothSink(self.bt_manager, event_bus)
         self.sink_toggle: Optional[Gtk.ToggleButton] = None
         self.sink_status: Optional[Gtk.Label] = None
 
@@ -77,15 +90,14 @@ class BluetoothPanel(Gtk.Box):
 
         self.append(sink_box)
 
-        # Setup sink callbacks
-        self.bt_sink.on_sink_enabled = self._on_sink_enabled
-        self.bt_sink.on_sink_disabled = self._on_sink_disabled
-        self.bt_sink.on_device_connected = self._on_sink_device_connected
-
-        # Setup callbacks
-        self.bt_manager.on_device_connected = self._on_device_connected
-        self.bt_manager.on_device_disconnected = self._on_device_disconnected
-        self.bt_manager.on_device_added = self._on_device_added
+        # Subscribe to BT events
+        if self._event_bus:
+            self._event_bus.subscribe(EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected)
+            self._event_bus.subscribe(EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected)
+            self._event_bus.subscribe(EventBus.BT_DEVICE_ADDED, self._on_bt_device_added)
+            self._event_bus.subscribe(EventBus.BT_SINK_ENABLED, self._on_bt_sink_enabled)
+            self._event_bus.subscribe(EventBus.BT_SINK_DISABLED, self._on_bt_sink_disabled)
+            self._event_bus.subscribe(EventBus.BT_SINK_DEVICE_CONNECTED, self._on_bt_sink_device_connected)
 
         # Start with Bluetooth UI in an inactive state; it becomes active with speaker mode
         self._set_inactive_state()
@@ -138,19 +150,22 @@ class BluetoothPanel(Gtk.Box):
             # Still emit signal for other listeners if needed
             self.emit("device-selected", device_path)
 
-    def _on_device_connected(self, device: BluetoothDevice):
-        """Handle device connection."""
-        self._update_status()
-        self._refresh_devices()
+    def _on_bt_device_connected(self, data: Optional[dict]) -> None:
+        """Handle device connection event."""
+        if data and "device" in data:
+            self._update_status()
+            self._refresh_devices()
 
-    def _on_device_disconnected(self, device: BluetoothDevice):
-        """Handle device disconnection."""
-        self._update_status()
-        self._refresh_devices()
+    def _on_bt_device_disconnected(self, data: Optional[dict]) -> None:
+        """Handle device disconnection event."""
+        if data:
+            self._update_status()
+            self._refresh_devices()
 
-    def _on_device_added(self, device: BluetoothDevice):
-        """Handle new device added."""
-        self._refresh_devices()
+    def _on_bt_device_added(self, data: Optional[dict]) -> None:
+        """Handle new device added event."""
+        if data:
+            self._refresh_devices()
 
     def _on_sink_toggled(self, button):
         """Handle sink mode toggle."""
@@ -171,8 +186,8 @@ class BluetoothPanel(Gtk.Box):
             if self.sink_status:
                 self.sink_status.set_text("Speaker mode disabled")
 
-    def _on_sink_enabled(self):
-        """Handle sink enabled."""
+    def _on_bt_sink_enabled(self, data: Optional[dict]) -> None:
+        """Handle sink enabled event."""
         if self.sink_toggle:
             self.sink_toggle.set_active(True)
         if self.sink_status:
@@ -180,8 +195,8 @@ class BluetoothPanel(Gtk.Box):
         # When speaker mode is enabled, update BT state and show known devices
         self._refresh_devices()
 
-    def _on_sink_disabled(self):
-        """Handle sink disabled."""
+    def _on_bt_sink_disabled(self, data: Optional[dict]) -> None:
+        """Handle sink disabled event."""
         if self.sink_toggle:
             self.sink_toggle.set_active(False)
         if self.sink_status:
@@ -189,11 +204,13 @@ class BluetoothPanel(Gtk.Box):
         # When speaker mode is disabled, clear UI back to inactive state
         self._set_inactive_state()
 
-    def _on_sink_device_connected(self, device: BluetoothDevice):
-        """Handle device connected in sink mode."""
-        if self.sink_status:
-            self.sink_status.set_text(f"Receiving audio from: {device.name}")
-        self._update_status()
+    def _on_bt_sink_device_connected(self, data: Optional[dict]) -> None:
+        """Handle device connected in sink mode event."""
+        if data and "device" in data:
+            device = data["device"]
+            if self.sink_status:
+                self.sink_status.set_text(f"Receiving audio from: {device.name}")
+            self._update_status()
 
     def _set_inactive_state(self):
         """Put the Bluetooth UI into an inactive state until speaker mode is enabled."""

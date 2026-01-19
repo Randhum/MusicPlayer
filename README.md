@@ -354,7 +354,7 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
   - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood
   - The **volume slider** controls MOC's volume
   - The **current track / time** display follows whatever MOC is playing
-  - **Autoplay (autonext)** is automatically enabled when the app starts
+  - **Track navigation** is handled by the app (MOC autonext is disabled to prevent conflicts)
   - **Shuffle** toggle is fully synchronized with MOC
 
 #### File Type Handling
@@ -527,11 +527,11 @@ If playback stops when a song finishes instead of automatically playing the next
 **What was fixed:**
 - Improved end-of-track detection in MOC synchronization
 - Automatic next track advancement when a track finishes
-- Autonext is now always enabled when starting playback
-- Shuffle mode now works correctly with automatic track advancement
+- MOC autonext is disabled - the app handles track navigation to prevent conflicts
 - Better handling of track completion for both sequential and shuffled playback
+- User action guard prevents MOC status polling from interfering with user-initiated track changes
 
-The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. When shuffle is enabled, the app works with MOC's shuffle feature to play tracks in random order.
+The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. The app is the single source of truth for track navigation, preventing conflicts between MOC's internal state and the app's playlist management.
 
 ### "Panel layout is messed up!"
 
@@ -1102,7 +1102,6 @@ MusicPlayer/
 ├── 🎨 ui/                        # The "face" - what users see
 │   ├── main_window.py            # Main application window
 │   ├── dock_manager.py           # Detachable panels
-│   ├── moc_sync.py               # MOC synchronization helper
 │   └── components/               # Reusable UI pieces
 │       ├── bluetooth_panel.py    # Bluetooth controls
 │       ├── library_browser.py    # File browser
@@ -1124,20 +1123,65 @@ MusicPlayer/
     └── musicplayer.init
 ```
 
-### The MVC Pattern (Sort Of)
+### The Event-Driven Pattern
 
-We follow a pattern where:
-- **Model** = `core/` (data and logic)
-- **View** = `ui/` (what users see)
-- **Controller** = callbacks connecting them
+We follow an event-driven architecture where:
+- **State** = `AppState` (single source of truth)
+- **Events** = `EventBus` (decoupled communication)
+- **Controller** = `PlaybackController` (routes commands to backends)
+- **View** = `ui/` components (pure views that subscribe to events)
+- **Backends** = `AudioPlayer`, `MocController`, `BluetoothSink` (playback engines)
 
-This separation makes code easier to understand and modify!
+This architecture eliminates circular dependencies and makes the codebase much more maintainable!
 
 ### Architecture
 
+#### Event-Driven Architecture
+
+The application uses an **event-driven architecture** with clear separation of concerns:
+
+**Core Components:**
+
+1. **EventBus** (`core/events.py`) - Centralized publish-subscribe system
+   - Components publish events instead of calling callbacks directly
+   - Eliminates circular dependencies
+   - Enables decoupled communication
+
+2. **AppState** (`core/app_state.py`) - Single source of truth
+   - All application state (playlist, playback state, volume, etc.)
+   - State changes automatically publish events
+   - Prevents duplicate state tracking
+
+3. **PlaybackController** (`core/playback_controller.py`) - Mediator pattern
+   - Routes playback commands to appropriate backend (MOC, internal player, BT sink)
+   - Manages MOC status polling
+   - Ensures only one backend is active at a time
+   - Handles track changes and playlist synchronization
+
+**Data Flow:**
+
+```
+User Action → UI Component → EventBus (ACTION_*) → PlaybackController
+                                                          ↓
+                                                    Backend (MOC/Internal/BT)
+                                                          ↓
+                                                    AppState (state update)
+                                                          ↓
+                                                    EventBus (STATE_*)
+                                                          ↓
+                                                    UI Components (update display)
+```
+
+**Benefits:**
+- **No circular dependencies** - Components only depend on EventBus and AppState
+- **Unidirectional data flow** - Actions go up, state flows down
+- **Easy to test** - Components can be tested in isolation
+- **Easy to extend** - New features just subscribe to events
+- **Single source of truth** - State is never duplicated
+
 #### Code Harmonization
 
-The codebase is undergoing systematic harmonization to ensure consistency and maintainability:
+The codebase follows systematic harmonization to ensure consistency and maintainability:
 
 **Harmonization Plan:**
 - See [HARMONIZATION_IMPLEMENTATION_PLAN.md](HARMONIZATION_IMPLEMENTATION_PLAN.md) for detailed implementation plan
@@ -1145,6 +1189,9 @@ The codebase is undergoing systematic harmonization to ensure consistency and ma
 - See [ARCHITECTURE_SIMPLIFICATION_ANALYSIS.md](ARCHITECTURE_SIMPLIFICATION_ANALYSIS.md) for architecture simplification opportunities
 
 **Current Status:**
+- ✅ Event-driven architecture implemented
+- ✅ Single source of truth (AppState)
+- ✅ Circular dependencies eliminated
 - ✅ Configuration files created (pyproject.toml, .pylintrc, .editorconfig)
 - ✅ Import organization standardized in priority files
 - 🔄 Code formatting (requires Black installation)
@@ -1169,7 +1216,9 @@ The MOC (Music On Console) integration follows a simple, direct approach:
 - `toggle_pause()` - Toggle play/pause using `--toggle-pause`
 - `get_status()` - Get current playback state via `--info` with caching
 - `set_playlist()` - Write playlist to M3U and optionally start playback
-- `toggle_shuffle()` / `toggle_autonext()` - Toggle controls using `--toggle=CONTROL`
+- `toggle_shuffle()` / `disable_autonext()` / `enable_autonext()` - Control MOC features
+
+**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state.
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server
@@ -1195,14 +1244,14 @@ The UI components use explicit state machines for user interaction:
 
 **State Machines:**
 - **`SeekState`** (player_controls.py): `IDLE`, `DRAGGING`, `SEEKING` - Manages progress bar interactions
-- **`PlaybackState`** (audio_player.py): `STOPPED`, `LOADING`, `PAUSED`, `PLAYING`, `SEEKING` - Tracks GStreamer playback state
-- **`OperationState`** (moc_sync.py): `IDLE`, `RESUMING`, `SEEKING`, `SYNCING` - Prevents race conditions in MOC operations
-- **`SyncState`** (moc_sync.py): `ENABLED`, `DISABLED`, `INITIALIZING` - Tracks sync mode between app and MOC
+- **`PlaybackState`** (app_state.py, audio_player.py): `STOPPED`, `LOADING`, `PAUSED`, `PLAYING`, `SEEKING` - Tracks playback state
+- **`OperationState`** (playback_controller.py): `IDLE`, `SEEKING`, `SYNCING` - Prevents race conditions in MOC operations
 
 **Benefits:**
 - **No race conditions**: State machines prevent conflicts between UI updates and playback operations
 - **Self-documenting**: Enums make code intent clear
 - **Easier debugging**: Explicit state transitions are easier to trace
+- **Centralized state**: AppState provides single source of truth, eliminating duplicate state tracking
 
 ### Development
 

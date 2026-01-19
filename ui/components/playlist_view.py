@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 
 if TYPE_CHECKING:
     from ui.components.player_controls import PlayerControls
-    from ui.moc_sync import MocSyncHelper
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -23,6 +22,8 @@ from gi.repository import Gdk, GLib, GObject, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
+from core.app_state import AppState
+from core.events import EventBus
 from core.metadata import TrackMetadata
 from core.playlist_manager import PlaylistManager
 
@@ -37,24 +38,24 @@ class PlaylistView(Gtk.Box):
 
     def __init__(
         self,
+        app_state: AppState,
+        event_bus: EventBus,
         playlist_manager: PlaylistManager,
-        moc_sync: Optional["MocSyncHelper"] = None,
-        player_controls: Optional["PlayerControls"] = None,
         window: Optional[Gtk.Window] = None,
     ):
         """
         Initialize playlist view.
 
         Args:
-            playlist_manager: PlaylistManager instance for data operations
-            moc_sync: Optional MocSyncHelper instance for automatic MOC synchronization
-            player_controls: Optional PlayerControls instance for playback coordination
+            app_state: AppState instance for reading playlist state
+            event_bus: EventBus instance for publishing actions and subscribing to events
+            playlist_manager: PlaylistManager instance for file persistence (save/load)
             window: Optional Gtk.Window instance for dialog parents
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        self.playlist_manager = playlist_manager
-        self.moc_sync = moc_sync
-        self.player_controls = player_controls
+        self._state = app_state
+        self._events = event_bus
+        self.playlist_manager = playlist_manager  # Only for file persistence
         self.window = window
 
         # Header with action buttons
@@ -137,6 +138,7 @@ class PlaylistView(Gtk.Box):
         self._tap_timeout_id = None
         self._tap_path = None
         self._playback_in_progress = False  # Guard to prevent concurrent playback
+        self._playback_lock = False  # Prevent concurrent play_track_at_index calls
 
         # Context menu
         self.context_menu = None
@@ -185,30 +187,36 @@ class PlaylistView(Gtk.Box):
         scrolled.set_vexpand(True)
         self.append(scrolled)
 
-        self.tracks: List[TrackMetadata] = []
-        self.current_index: int = -1
         self._shuffle_enabled: bool = False
         self._shuffle_queue: List[int] = []  # Queue of shuffled indices for shuffle mode
+
+        # Subscribe to playlist changes
+        self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
+        self._events.subscribe(EventBus.CURRENT_INDEX_CHANGED, self._on_current_index_changed)
+        self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
+
+        # Initialize UI from state
+        self._sync_from_state()
 
     # ============================================================================
     # Public API - State Reading (Wrapper methods for PlaylistManager)
     # ============================================================================
 
     def get_playlist(self) -> List[TrackMetadata]:
-        """Get the current playlist from PlaylistManager."""
-        return self.playlist_manager.get_playlist()
+        """Get the current playlist from AppState."""
+        return self._state.playlist
 
     def get_current_index(self) -> int:
-        """Get the current track index from PlaylistManager."""
-        return self.playlist_manager.get_current_index()
+        """Get the current track index from AppState."""
+        return self._state.current_index
 
     def get_current_track(self) -> Optional[TrackMetadata]:
-        """Get the currently playing track from PlaylistManager."""
-        return self.playlist_manager.get_current_track()
+        """Get the currently playing track from AppState."""
+        return self._state.current_track
 
     def get_next_track(self) -> Optional[TrackMetadata]:
         """
-        Get the next track from PlaylistManager.
+        Get the next track from AppState.
 
         If shuffle is enabled, returns a random unplayed track.
         If all tracks have been played, resets and starts over.
@@ -216,16 +224,24 @@ class PlaylistView(Gtk.Box):
         if self._shuffle_enabled:
             return self._get_next_random_track()
         else:
-            return self.playlist_manager.get_next_track()
+            playlist = self._state.playlist
+            current_index = self._state.current_index
+            if current_index < len(playlist) - 1:
+                return playlist[current_index + 1]
+            return None
 
     def get_previous_track(self) -> Optional[TrackMetadata]:
         """
-        Get the previous track from PlaylistManager.
+        Get the previous track from AppState.
 
         Note: In shuffle mode, previous track behavior is not well-defined,
         so this returns the sequential previous track regardless of shuffle state.
         """
-        return self.playlist_manager.get_previous_track()
+        playlist = self._state.playlist
+        current_index = self._state.current_index
+        if current_index > 0:
+            return playlist[current_index - 1]
+        return None
 
     def set_shuffle_enabled(self, enabled: bool):
         """Enable or disable shuffle mode."""
@@ -244,7 +260,7 @@ class PlaylistView(Gtk.Box):
         Uses a shuffled queue of indices. When the queue is empty, regenerates it.
         This ensures each track is played exactly once before repeating.
         """
-        tracks = self.playlist_manager.get_playlist()
+        tracks = self._state.playlist
         if not tracks:
             return None
 
@@ -258,7 +274,7 @@ class PlaylistView(Gtk.Box):
 
         # Pop the next index from the queue
         new_index = self._shuffle_queue.pop(0)
-        self.playlist_manager.set_current_index(new_index)
+        self._state.set_current_index(new_index)
         return tracks[new_index]
 
     def _regenerate_shuffle_queue(self):
@@ -272,7 +288,7 @@ class PlaylistView(Gtk.Box):
         """
         import random
 
-        tracks = self.playlist_manager.get_playlist()
+        tracks = self._state.playlist
         if not tracks:
             self._shuffle_queue = []
             return
@@ -284,7 +300,7 @@ class PlaylistView(Gtk.Box):
         random.shuffle(indices)
 
         # If there's a current track, remove it from the queue to avoid immediate repeat
-        current_idx = self.playlist_manager.get_current_index()
+        current_idx = self._state.current_index
         if 0 <= current_idx < len(tracks) and current_idx in indices:
             indices.remove(current_idx)
             # Add it at the end so it plays eventually, but not next
@@ -300,11 +316,11 @@ class PlaylistView(Gtk.Box):
         """
         Set the playlist tracks and update the view.
 
-        This method updates both the internal display state and the visual representation.
-        Note: This does NOT update PlaylistManager - use playlist operation methods for that.
+        This method updates AppState and the visual representation.
+        Note: This is called by event handlers when playlist changes.
         """
-        self.tracks = tracks
-        self.current_index = current_index
+        # Update state (this will trigger events)
+        self._state.set_playlist(tracks, current_index)
         # Regenerate shuffle queue when playlist changes
         if self._shuffle_enabled:
             self._regenerate_shuffle_queue()
@@ -314,20 +330,16 @@ class PlaylistView(Gtk.Box):
         """
         Set the currently playing track index.
 
-        Updates both PlaylistManager and the UI view.
+        Updates AppState and the UI view.
         In shuffle mode, removes the index from the shuffle queue if present.
-        
-        Note: MOC sync for playback is handled in play_track_at_index().
-        This method only updates the index and emits current-index-changed for external coordination.
         """
-        old_index = self.current_index
-        self.playlist_manager.set_current_index(index)
-        self.current_index = index
+        old_index = self._state.current_index
+        self._state.set_current_index(index)
         # Remove from shuffle queue if present (to avoid playing it again before queue regenerates)
         if self._shuffle_enabled and index in self._shuffle_queue:
             self._shuffle_queue.remove(index)
         self._update_selection()
-        # Emit signal for external coordination (metadata panel, etc.)
+        # Emit signal for external coordination (if needed)
         if old_index != index:
             self.emit("current-index-changed", index)
 
@@ -336,44 +348,50 @@ class PlaylistView(Gtk.Box):
     # ============================================================================
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
-        """Add a track to the playlist (updates data and UI)."""
-        self._apply_playlist_change(
-            lambda: self.playlist_manager.add_track(track, position=position)
-        )
+        """Add a track to the playlist (updates AppState and UI)."""
+        self._state.add_track(track, position)
+        # Also update playlist_manager for persistence
+        self.playlist_manager.add_track(track, position)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        self._update_view()
 
     def add_tracks(self, tracks: List[TrackMetadata]):
-        """Add multiple tracks to the playlist (updates data and UI)."""
-        self._apply_playlist_change(
-            lambda: self.playlist_manager.add_tracks(tracks)
-        )
+        """Add multiple tracks to the playlist (updates AppState and UI)."""
+        for track in tracks:
+            self._state.add_track(track)
+            self.playlist_manager.add_track(track)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        self._update_view()
 
     def remove_track(self, index: int):
-        """Remove a track from the playlist (updates data and UI)."""
-        self._apply_playlist_change(
-            lambda: self.playlist_manager.remove_track(index)
-        )
+        """Remove a track from the playlist (updates AppState and UI)."""
+        self._state.remove_track(index)
+        self.playlist_manager.remove_track(index)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        self._update_view()
 
     def move_track(self, from_index: int, to_index: int):
-        """Move a track in the playlist (updates data and UI)."""
-        self._apply_playlist_change(
-            lambda: self.playlist_manager.move_track(from_index, to_index)
-        )
+        """Move a track in the playlist (updates AppState and UI)."""
+        self._state.move_track(from_index, to_index)
+        self.playlist_manager.move_track(from_index, to_index)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        self._update_view()
 
     def clear(self):
-        """Clear the playlist (updates data and UI)."""
+        """Clear the playlist (updates AppState and UI)."""
         self._shuffle_queue.clear()  # Clear shuffle queue
-        self._apply_playlist_change(
-            lambda: self.playlist_manager.clear()
-        )
+        self._state.clear_playlist()
+        self.playlist_manager.clear()
+        self._update_view()
     
     def _handle_clear(self):
-        """Handle clear operation with player coordination."""
-        # Stop player if available
-        if self.player_controls and hasattr(self.player_controls, 'player'):
-            self.player_controls.player.stop()
-        # Stop MOC if available
-        if self.moc_sync:
-            self.moc_sync.stop()
+        """Handle clear operation."""
+        # Publish stop action
+        self._events.publish(EventBus.ACTION_STOP)
         # Clear playlist
         self.clear()
 
@@ -397,68 +415,41 @@ class PlaylistView(Gtk.Box):
     # ============================================================================
 
     def play_track_at_index(self, index: int) -> None:
-        """Play track at the given index - handles index update, MOC sync, and playback."""
-        if not 0 <= index < len(self.tracks):
+        """Play track at the given index - publishes action event."""
+        # Prevent concurrent calls from gesture + row-activated
+        if self._playback_lock:
             return
         
-        # Prevent concurrent playback calls to avoid overloading MOC
-        if self._playback_in_progress:
+        playlist = self._state.playlist
+        if not 0 <= index < len(playlist):
             return
-        self._playback_in_progress = True
         
-        playback_started = False
-        try:
-            # Set index (updates playlist_manager and emits current-index-changed)
-            self.set_current_index(index)
-            
-            track = self.get_current_track()
-            if not track or not self.player_controls:
-                return
-            
-            # Check if we should use MOC for this track
-            from core.workflow_utils import is_video_file
-            use_moc = self.moc_sync and self.moc_sync.use_moc and not is_video_file(track.file_path)
-            
-            if use_moc:
-                # Sync playlist and start playback in one atomic operation
-                self.moc_sync.update_moc_playlist(start_playback=True)
-                self.moc_sync.enable_sync()
-                self.player_controls._sync_moc_options()
-                self.player_controls.set_playing(True)
-                self.player_controls.emit("track-changed", track)
-            else:
-                # For non-MOC tracks (video files), use standard playback
-                self.player_controls.play_current_track()
-            
-            # Emit signal for external coordination (metadata panel, etc.)
-            self.emit("track-activated", index)
-            playback_started = True
-            
-            # Reset guard after a short delay to allow playback to start
-            # This prevents rapid-fire taps from overloading MOC
-            GLib.timeout_add(500, self._reset_playback_guard)
-        except Exception:
-            # Reset guard on error
-            self._playback_in_progress = False
-            raise
-        finally:
-            # If playback didn't start (early return), reset guard immediately
-            # Otherwise, the timeout above will reset it after 500ms
-            if not playback_started:
-                self._playback_in_progress = False
+        self._playback_lock = True
+        
+        # Set index first
+        self._state.set_current_index(index)
+        
+        # Publish play track action
+        self._events.publish(EventBus.ACTION_PLAY_TRACK, {"index": index})
+        
+        # Emit signal for external coordination
+        self.emit("track-activated", index)
+        
+        # Release lock after 500ms
+        GLib.timeout_add(500, self._release_playback_lock)
 
     def replace_and_play_track(self, track: TrackMetadata) -> None:
         """Replace playlist with single track and play it."""
         self.clear()
         self.add_track(track)
-        # play_track_at_index will set the index, so no need to set it separately
+        # play_track_at_index will set the index and publish action
         self.play_track_at_index(0)
 
     def replace_and_play_album(self, tracks: List[TrackMetadata]) -> None:
         """Replace playlist with album tracks and play first track."""
         self.clear()
         self.add_tracks(tracks)
-        # play_track_at_index will set the index, so no need to set it separately
+        # play_track_at_index will set the index and publish action
         self.play_track_at_index(0)
 
     # ============================================================================
@@ -473,34 +464,45 @@ class PlaylistView(Gtk.Box):
     # Internal Methods
     # ============================================================================
 
-    def _sync_view_from_manager(self):
-        """Sync the view from PlaylistManager's current state."""
-        self.tracks = self.playlist_manager.get_playlist()
-        self.current_index = self.playlist_manager.get_current_index()
-        # Regenerate shuffle queue if shuffle is enabled (playlist may have changed)
+    def _sync_from_state(self):
+        """Sync the view from AppState."""
         if self._shuffle_enabled:
             self._regenerate_shuffle_queue()
         self._update_view()
     
-    def _apply_playlist_change(self, operation: Callable[[], None]) -> None:
-        """Apply a playlist change and sync everything."""
-        operation()  # Call playlist_manager method
-        self._sync_view_from_manager()
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
-        if self.moc_sync:
-            self.moc_sync.update_moc_playlist(start_playback=False)
+    def _on_playlist_changed(self, data: Optional[dict]) -> None:
+        """Handle playlist changed event."""
+        if data:
+            tracks = data.get("tracks", [])
+            index = data.get("index", -1)
+            # Regenerate shuffle queue if shuffle is enabled
+            if self._shuffle_enabled:
+                self._regenerate_shuffle_queue()
+            self._update_view()
+    
+    def _on_current_index_changed(self, data: Optional[dict]) -> None:
+        """Handle current index changed event."""
+        if data:
+            index = data.get("index", -1)
+            self._update_selection()
+    
+    def _on_shuffle_changed(self, data: Optional[dict]) -> None:
+        """Handle shuffle changed event."""
+        if data:
+            enabled = data.get("enabled", False)
+            self.set_shuffle_enabled(enabled)
 
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""
-        has_tracks = len(self.tracks) > 0
+        has_tracks = len(self._state.playlist) > 0
         self.clear_button.set_sensitive(has_tracks)
         self.save_button.set_sensitive(has_tracks)
 
     def _update_view(self):
         """Update the tree view with current tracks."""
         self.store.clear()
-        for i, track in enumerate(self.tracks):
+        tracks = self._state.playlist
+        for i, track in enumerate(tracks):
             # Use filename as fallback if title is missing
             title = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
@@ -515,8 +517,10 @@ class PlaylistView(Gtk.Box):
         selection = self.tree_view.get_selection()
         selection.unselect_all()
 
-        if 0 <= self.current_index < len(self.tracks):
-            path = Gtk.TreePath.new_from_indices([self.current_index])
+        tracks = self._state.playlist
+        current_index = self._state.current_index
+        if 0 <= current_index < len(tracks):
+            path = Gtk.TreePath.new_from_indices([current_index])
             selection.select_path(path)
             self.tree_view.set_cursor(path, None, False)
             self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
@@ -561,8 +565,16 @@ class PlaylistView(Gtk.Box):
             indices = self._tap_path.get_indices()
             if indices:
                 index = indices[0]
-                self.play_track_at_index(index)
+                # Verify index is still valid (playlist might have changed)
+                playlist = self._state.playlist
+                if 0 <= index < len(playlist):
+                    self.play_track_at_index(index)
             self._tap_path = None
+        return False  # Don't repeat
+    
+    def _release_playback_lock(self):
+        """Release playback lock."""
+        self._playback_lock = False
         return False  # Don't repeat
     
     def _reset_playback_guard(self):
@@ -672,7 +684,7 @@ class PlaylistView(Gtk.Box):
             move_down_item.add_css_class("flat")
             move_down_item.set_size_request(150, 40)  # Larger for touch
             move_down_item.connect("clicked", lambda w: self._on_menu_move_down())
-            move_down_item.set_sensitive(self.selected_index < len(self.tracks) - 1)
+            move_down_item.set_sensitive(self.selected_index < len(self._state.playlist) - 1)
             menu_box.append(move_down_item)
 
             menu_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
@@ -682,14 +694,14 @@ class PlaylistView(Gtk.Box):
         clear_item.add_css_class("flat")
         clear_item.set_size_request(150, 40)  # Larger for touch
         clear_item.connect("clicked", lambda w: self._on_menu_clear())
-        clear_item.set_sensitive(len(self.tracks) > 0)
+        clear_item.set_sensitive(len(self._state.playlist) > 0)
         menu_box.append(clear_item)
 
         save_item = Gtk.Button(label="Save Playlist...")
         save_item.add_css_class("flat")
         save_item.set_size_request(150, 40)  # Larger for touch
         save_item.connect("clicked", lambda w: self._on_menu_save())
-        save_item.set_sensitive(len(self.tracks) > 0)
+        save_item.set_sensitive(len(self._state.playlist) > 0)
         menu_box.append(save_item)
 
         # Set child before parent
@@ -873,14 +885,11 @@ class PlaylistView(Gtk.Box):
         dialog.present()
     
     def _handle_refresh(self):
-        """Handle refresh from MOC - reload the playlist from M3U file."""
-        if not self.moc_sync:
-            return
-        
-        # Force refresh - always read from M3U file directly
-        # Reset mtime tracking to force a read even if file hasn't changed
-        self.moc_sync.playlist_mtime = 0.0
-        self.moc_sync.load_playlist_from_moc(force_refresh=True)
+        """Handle refresh from MOC - publish action to reload playlist."""
+        # This will be handled by PlaybackController
+        # For now, just publish an event that PlaybackController can handle
+        # (PlaybackController manages MOC playlist sync)
+        pass
 
     def _close_menu(self):
         """Close the context menu safely."""

@@ -93,11 +93,7 @@ class AudioPlayer:
         self._position_timeout_id: Optional[int] = None
         self._duration_timeout_id: Optional[int] = None
 
-        # Callbacks
-        self.on_state_changed: Optional[Callable[[bool], None]] = None
-        self.on_position_changed: Optional[Callable[[float, float], None]] = None
-        self.on_track_finished: Optional[Callable[[], None]] = None
-        self.on_track_loaded: Optional[Callable[[], None]] = None
+        # Callbacks removed - state updates handled via polling/events in PlaybackController
 
         # Audio effects
         self.audio_effects = AudioEffects()
@@ -186,12 +182,8 @@ class AudioPlayer:
             # Send final position update (position = duration) to show "00:00" left
             if self.duration > 0:
                 self.position = self.duration
-                if self.on_position_changed:
-                    self.on_position_changed(self.position, self.duration)
-            if self.on_state_changed:
-                self.on_state_changed(False)
-            if self.on_track_finished:
-                self.on_track_finished()
+                # Position changed - PlaybackController will poll for updates
+            # Track finished - PlaybackController will poll for updates
 
         elif msg_type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.playbin:
@@ -242,8 +234,7 @@ class AudioPlayer:
                             pass  # Source already removed or invalid
                         self._duration_timeout_id = None
 
-                if self.on_state_changed:
-                    self.on_state_changed(self._playback_state == PlaybackState.PLAYING)
+            # State changed - PlaybackController will poll for updates
 
         elif msg_type == Gst.MessageType.DURATION_CHANGED:
             self._update_duration()
@@ -301,8 +292,7 @@ class AudioPlayer:
             success, position = self.playbin.query_position(Gst.Format.TIME)
             if success:
                 self.position = position / Gst.SECOND
-                if self.on_position_changed:
-                    self.on_position_changed(self.position, self.duration)
+                # Position changed - PlaybackController will poll for updates
             return True
         # Not playing - return False to stop timeout, and clear the ID
         # This prevents warnings when we try to remove it manually later
@@ -359,8 +349,7 @@ class AudioPlayer:
         # Track loaded successfully, now paused
         self._playback_state = PlaybackState.PAUSED
 
-        if self.on_track_loaded:
-            self.on_track_loaded()
+        # Track loaded - PlaybackController will poll for updates
 
         return True
 

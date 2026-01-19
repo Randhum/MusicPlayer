@@ -22,6 +22,7 @@ from gi.repository import GLib, Gtk
 from core.bluetooth_advanced import BluetoothAdvanced
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 from core.dbus_utils import DBusConnectionMonitor, dbus_retry
+from core.events import EventBus
 from core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -68,12 +69,13 @@ class BluetoothManager:
     DEVICE_INTERFACE = "org.bluez.Device1"
     PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 
-    def __init__(self, parent_window: Optional[Gtk.Window] = None) -> None:
+    def __init__(self, parent_window: Optional[Gtk.Window] = None, event_bus: Optional[EventBus] = None) -> None:
         """
         Initialize Bluetooth Manager.
 
         Args:
             parent_window: GTK window for pairing dialogs (optional)
+            event_bus: EventBus instance for publishing events (optional)
         """
         # DBusGMainLoop should be set once globally, but calling multiple times is safe
         try:
@@ -88,11 +90,8 @@ class BluetoothManager:
         self.devices: Dict[str, BluetoothDevice] = {}
         self.connected_device: Optional[BluetoothDevice] = None
 
-        # Callbacks
-        self.on_device_connected: Optional[Callable[[BluetoothDevice], None]] = None
-        self.on_device_disconnected: Optional[Callable[[BluetoothDevice], None]] = None
-        self.on_device_added: Optional[Callable[[BluetoothDevice], None]] = None
-        self.on_device_removed: Optional[Callable[[BluetoothDevice], None]] = None
+        # Event bus for publishing events
+        self._event_bus = event_bus
 
         # Setup agent for pairing confirmations
         self.agent: Optional[BluetoothAgent] = None
@@ -350,13 +349,13 @@ class BluetoothManager:
                             return  # Don't process connection callbacks
 
                         self.connected_device = device
-                        if self.on_device_connected:
-                            self.on_device_connected(device)
+                        if self._event_bus:
+                            self._event_bus.publish(EventBus.BT_DEVICE_CONNECTED, {"device": device})
                     elif not new_connected and old_connected:
                         if self.connected_device == device:
                             self.connected_device = None
-                        if self.on_device_disconnected:
-                            self.on_device_disconnected(device)
+                        if self._event_bus:
+                            self._event_bus.publish(EventBus.BT_DEVICE_DISCONNECTED, {"device": device})
 
                 # Update Trusted state
                 if "Trusted" in changed:
@@ -369,8 +368,8 @@ class BluetoothManager:
             self._refresh_devices()
             device_path = str(path)
             device = self.devices.get(device_path)
-            if device and self.on_device_added:
-                self.on_device_added(device)
+            if device and self._event_bus:
+                self._event_bus.publish(EventBus.BT_DEVICE_ADDED, {"device": device})
 
     def _on_interfaces_removed(self, path, interfaces):
         """Handle interfaces (devices) being removed."""
@@ -381,8 +380,8 @@ class BluetoothManager:
                 del self.devices[device_path]
                 if self.connected_device == device:
                     self.connected_device = None
-                if self.on_device_removed:
-                    self.on_device_removed(device)
+                if self._event_bus:
+                    self._event_bus.publish(EventBus.BT_DEVICE_REMOVED, {"device": device})
 
     def _convert_dbus_value(self, value):
         """Convert a dbus value to a native Python type."""

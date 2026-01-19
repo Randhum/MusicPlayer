@@ -7,9 +7,11 @@ All component initialization (Bluetooth, audio players, etc.) is handled
 by the MainWindow class.
 
 Architecture:
-- MainWindow creates and manages core components (BluetoothManager, AudioPlayer, etc.)
-- BluetoothPanel owns and manages BluetoothSink internally
-- Player controls route to active playback source (MOC/internal player/Bluetooth)
+- Event-driven architecture with EventBus for decoupled communication
+- AppState provides single source of truth for application state
+- PlaybackController routes playback commands to appropriate backends
+- UI components are pure views that subscribe to events and publish actions
+- No circular dependencies - components only depend on EventBus and AppState
 """
 
 import sys
@@ -82,7 +84,8 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
                 from core.metadata import TrackMetadata
 
                 track = TrackMetadata(file_path)
-                self.window.playlist_view.add_track(track)
+                # Add track via AppState (which publishes events)
+                self.window.app_state.add_track(track)
 
         self.window.present()
 
