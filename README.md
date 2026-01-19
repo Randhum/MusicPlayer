@@ -177,9 +177,11 @@ pip install -r requirements.txt
 
 **Python Dependencies:**
 - `PyGObject>=3.42.0` - GTK4 and GStreamer bindings
-- `mutagen>=1.47.0` - Audio metadata extraction
+- `mutagen>=1.47.0` - Audio metadata extraction (MP3, FLAC, OGG)
 - `dbus-python>=1.2.0` - D-Bus integration
 - `watchdog>=3.0.0` - File system monitoring (optional, not yet fully implemented)
+
+**Note:** Video files (MP4, MKV, WebM, etc.) use GStreamer for metadata extraction, which handles video containers more reliably than mutagen.
 
 **Development Dependencies (optional):**
 ```bash

@@ -1,4 +1,4 @@
-"""Metadata extraction for audio files using mutagen."""
+"""Metadata extraction for audio files using mutagen and GStreamer."""
 
 # ============================================================================
 # Standard Library Imports (alphabetical)
@@ -18,6 +18,12 @@ from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.oggvorbis import OggVorbis
 
+# GStreamer for video/MP4 metadata extraction
+import gi
+gi.require_version("Gst", "1.0")
+gi.require_version("GstPbutils", "1.0")
+from gi.repository import Gst, GstPbutils
+
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
@@ -25,6 +31,9 @@ from core.config import get_config
 from core.logging import get_logger
 
 logger = get_logger(__name__)
+
+# Video file extensions that should use GStreamer for metadata
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".wmv", ".flv"}
 
 
 class TrackMetadata:
@@ -57,10 +66,23 @@ class TrackMetadata:
         Supports multiple audio formats (MP3, FLAC, MP4, OGG) and extracts
         common metadata fields including title, artist, album, track number,
         duration, and album art.
+        
+        For video files (MP4, MKV, etc.), uses GStreamer discoverer which
+        handles video containers more reliably than mutagen.
         """
+        # Check if this is a video file - use GStreamer for these
+        file_ext = Path(self.file_path).suffix.lower()
+        if file_ext in VIDEO_EXTENSIONS:
+            if self._extract_metadata_gstreamer():
+                return  # GStreamer succeeded
+            # Fall through to try mutagen as backup
+        
         try:
             audio_file = File(self.file_path)
             if audio_file is None:
+                # mutagen couldn't identify the file, try GStreamer
+                if self._extract_metadata_gstreamer():
+                    return
                 return
 
             # Determine file type for format-specific handling
@@ -170,12 +192,109 @@ class TrackMetadata:
             self.album_art_path = self._extract_album_art(audio_file)
 
         except Exception as e:
-            logger.error("Error extracting metadata from %s: %s", self.file_path, e, exc_info=True)
+            logger.debug("Mutagen failed for %s: %s, trying GStreamer", self.file_path, e)
+            # Try GStreamer as fallback
+            if not self._extract_metadata_gstreamer():
+                logger.warning("Could not extract metadata from %s", self.file_path)
         finally:
-            # Always ensure we at least have a sensible title, even if Mutagen
+            # Always ensure we at least have a sensible title, even if extraction
             # failed to parse tags for this file.
             if not self.title:
                 self.title = Path(self.file_path).stem
+
+    def _extract_metadata_gstreamer(self) -> bool:
+        """
+        Extract metadata using GStreamer discoverer.
+        
+        This is more reliable for video containers (MP4, MKV, etc.) that
+        mutagen sometimes fails to parse correctly.
+        
+        Returns:
+            True if metadata was successfully extracted, False otherwise
+        """
+        try:
+            # Create a discoverer with 5 second timeout
+            discoverer = GstPbutils.Discoverer.new(5 * Gst.SECOND)
+            
+            # Convert file path to URI
+            file_path = Path(self.file_path).resolve()
+            uri = file_path.as_uri()
+            
+            # Discover the file
+            info = discoverer.discover_uri(uri)
+            
+            if info is None:
+                return False
+            
+            # Extract duration (in nanoseconds, convert to seconds)
+            duration_ns = info.get_duration()
+            if duration_ns > 0:
+                self.duration = duration_ns / Gst.SECOND
+            
+            # Get tags
+            tags = info.get_tags()
+            if tags is None:
+                # No tags but we got duration - partial success
+                return self.duration is not None
+            
+            # Extract common metadata from GStreamer tags
+            # Title
+            success, title = tags.get_string("title")
+            if success and title:
+                self.title = title
+            
+            # Artist
+            success, artist = tags.get_string("artist")
+            if success and artist:
+                self.artist = artist
+            
+            # Album
+            success, album = tags.get_string("album")
+            if success and album:
+                self.album = album
+            
+            # Album artist
+            success, album_artist = tags.get_string("album-artist")
+            if success and album_artist:
+                self.album_artist = album_artist
+            
+            # Genre
+            success, genre = tags.get_string("genre")
+            if success and genre:
+                self.genre = genre
+            
+            # Track number
+            success, track_num = tags.get_uint("track-number")
+            if success and track_num > 0:
+                self.track_number = track_num
+            
+            # Year/Date - try multiple tag names
+            for date_tag in ["date-time", "date"]:
+                success, date_val = tags.get_date_time(date_tag)
+                if success and date_val:
+                    self.year = str(date_val.get_year())
+                    break
+            
+            # Try to extract album art (image tag)
+            sample = tags.get_sample("image")
+            if sample:
+                buffer = sample[1].get_buffer()
+                if buffer:
+                    success, map_info = buffer.map(Gst.MapFlags.READ)
+                    if success:
+                        try:
+                            art_path = self._save_album_art(map_info.data)
+                            if art_path:
+                                self.album_art_path = art_path
+                        finally:
+                            buffer.unmap(map_info)
+            
+            logger.debug("GStreamer extracted metadata for %s", self.file_path)
+            return True
+            
+        except Exception as e:
+            logger.debug("GStreamer metadata extraction failed for %s: %s", self.file_path, e)
+            return False
 
     def _get_tag_generic(self, audio_file: File, tag_keys: list[str]) -> Optional[str]:
         """
