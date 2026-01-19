@@ -179,7 +179,7 @@ pip install -r requirements.txt
 - `PyGObject>=3.42.0` - GTK4 and GStreamer bindings
 - `mutagen>=1.47.0` - Audio metadata extraction
 - `dbus-python>=1.2.0` - D-Bus integration
-- `watchdog>=3.0.0` - File system monitoring (optional but recommended)
+- `watchdog>=3.0.0` - File system monitoring (optional, not yet fully implemented)
 
 **Development Dependencies (optional):**
 ```bash

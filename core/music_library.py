@@ -141,9 +141,10 @@ class MusicLibrary:
         # Load existing index
         self._load_index()
 
-        # Start file system monitoring if available
-        if WATCHDOG_AVAILABLE:
-            self._start_watching()
+        # File system monitoring disabled - method not implemented
+        # TODO: Implement _start_watching() and _handle_file_change() if needed
+        # if WATCHDOG_AVAILABLE:
+        #     self._start_watching()
 
     def scan_library(self, callback: Optional[Callable[[], None]] = None) -> None:
         """
