@@ -559,6 +559,47 @@ Another instance is already running. Activating existing window.
 rm ~/.config/musicplayer/layout.json
 ```
 
+### "Bluetooth battery/quality monitoring crashes!"
+
+**What was fixed:**
+- D-Bus signal receivers in `BluetoothAdvanced` were missing the `path_keyword` parameter
+- This caused a `TypeError` when battery or quality change signals were received
+- The signal handlers now correctly receive the device path for proper callback routing
+
+### "Bluetooth sink mode fails to disable!"
+
+**What was fixed:**
+- `BluetoothSink` was missing the `on_audio_stream_stopped` callback attribute initialization
+- This caused an `AttributeError` when calling `disable_sink_mode()`
+- The callback is now properly initialized to `None` in `__init__`
+
+### "Clicking a playlist row plays the wrong track!"
+
+If tapping or clicking a row in the playlist plays the next track (or 2nd next) instead of the selected one:
+
+**What was fixed:**
+- In GTK4 with a TreeView inside a ScrolledWindow, `get_path_at_pos()` with gesture coordinates may not correctly account for scroll offset
+- The tap/click handler was using stored coordinates which could be incorrect when the view was scrolled
+- Now the handler uses the TreeView's actual selection (which GTK handles correctly) instead of coordinate-based path lookup
+- This ensures the clicked row is always the one that plays, regardless of scroll position
+
+### "Music keeps playing when Bluetooth speaker mode is enabled!"
+
+**What was fixed:**
+- When Bluetooth sink mode was enabled or a device connected, the previous playback backend (MOC or internal player) wasn't properly stopped
+- The backend stop logic was checking the old active backend state before it was updated
+- Now the active backend is set to "bt_sink" BEFORE stopping other backends, ensuring proper cleanup
+
+### "Bluetooth resources not cleaned up on application exit!"
+
+**What was fixed:**
+- `BluetoothSink` was missing a `cleanup()` method to properly shut down when the application closes
+- The main window wasn't calling cleanup on the BT sink
+- Now `BluetoothSink.cleanup()` properly:
+  - Disables sink mode if enabled
+  - Unsubscribes from EventBus events
+  - Logs cleanup completion
+
 ### "Missing icons (placeholders shown)!"
 
 ```bash

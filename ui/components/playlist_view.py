@@ -561,15 +561,23 @@ class PlaylistView(Gtk.Box):
     def _on_tap_timeout(self):
         """Handle tap timeout - trigger playback if it was a single tap."""
         self._tap_timeout_id = None
-        if self._tap_path:
-            indices = self._tap_path.get_indices()
+        self._tap_path = None
+        
+        # Use the current selection instead of stored tap coordinates
+        # GTK handles selection correctly (accounting for scroll offset),
+        # while get_path_at_pos with gesture coordinates may have offset issues
+        selection = self.tree_view.get_selection()
+        model, tree_iter = selection.get_selected()
+        if tree_iter:
+            path = model.get_path(tree_iter)
+            indices = path.get_indices()
             if indices:
                 index = indices[0]
                 # Verify index is still valid (playlist might have changed)
                 playlist = self._state.playlist
                 if 0 <= index < len(playlist):
                     self.play_track_at_index(index)
-            self._tap_path = None
+        
         return False  # Don't repeat
     
     def _release_playback_lock(self):
