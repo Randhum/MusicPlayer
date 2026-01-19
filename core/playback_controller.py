@@ -3,10 +3,11 @@
 # ============================================================================
 # Standard Library Imports (alphabetical)
 # ============================================================================
+import random
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -89,6 +90,9 @@ class PlaybackController:
         self._recent_moc_write: Optional[float] = None
         self._user_action_time: float = 0.0  # Timestamp of last user-initiated action
 
+        # Shuffle queue management (for both MOC and internal player)
+        self._shuffle_queue: List[int] = []  # Queue of shuffled indices for shuffle mode
+
         # Initialize playlist mtime if file exists
         if self._use_moc:
             config = get_config()
@@ -113,6 +117,13 @@ class PlaybackController:
 
         # Subscribe to playlist changes to sync with MOC
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
+        
+        # Subscribe to shuffle changes to regenerate shuffle queue
+        self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
+        
+        # Initialize shuffle queue if shuffle is enabled
+        if self._state.shuffle_enabled:
+            self._regenerate_shuffle_queue()
 
         # Subscribe to BT events
         if bt_sink:
@@ -258,15 +269,17 @@ class PlaybackController:
                 self._bt_sink.control_playback("next")
             return
 
-        # Get next track - use playlist_view's shuffle logic if shuffle is enabled
-        # For now, just use sequential navigation
         playlist = self._state.playlist
-        current_index = self._state.current_index
-        
-        # Note: Shuffle logic is handled by PlaylistView's get_next_track() method
-        # which maintains a shuffle queue. For now, we do sequential navigation here.
-        # If shuffle is enabled, the UI should call get_next_track() and then play that track.
-        next_index = current_index + 1 if current_index < len(playlist) - 1 else -1
+        if not playlist:
+            return
+
+        # Use shuffle queue if shuffle is enabled
+        if self._state.shuffle_enabled:
+            next_index = self._get_next_shuffled_index()
+        else:
+            # Sequential navigation
+            current_index = self._state.current_index
+            next_index = current_index + 1 if current_index < len(playlist) - 1 else -1
 
         if next_index >= 0:
             self._state.set_current_index(next_index)
@@ -460,9 +473,60 @@ class PlaybackController:
             pass
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
-        """Handle playlist change - sync to MOC if using MOC."""
+        """Handle playlist change - sync to MOC if using MOC and regenerate shuffle queue."""
         if self._use_moc and self._state.active_backend == "moc":
             self._sync_moc_playlist(start_playback=False)
+        
+        # Regenerate shuffle queue when playlist changes
+        if self._state.shuffle_enabled:
+            self._regenerate_shuffle_queue()
+    
+    def _on_shuffle_changed(self, data: Optional[dict]) -> None:
+        """Handle shuffle state change - regenerate shuffle queue."""
+        if data and data.get("enabled", False):
+            self._regenerate_shuffle_queue()
+        else:
+            # Clear shuffle queue when shuffle is disabled
+            self._shuffle_queue = []
+    
+    def _get_next_shuffled_index(self) -> int:
+        """Get next index from shuffle queue."""
+        playlist = self._state.playlist
+        if not playlist:
+            return -1
+        
+        # If queue is empty, regenerate it
+        if not self._shuffle_queue:
+            self._regenerate_shuffle_queue()
+        
+        # If still empty (shouldn't happen, but handle edge case)
+        if not self._shuffle_queue:
+            return -1
+        
+        # Pop the next index from the queue
+        return self._shuffle_queue.pop(0)
+    
+    def _regenerate_shuffle_queue(self) -> None:
+        """Regenerate the shuffle queue with all playlist indices in random order."""
+        playlist = self._state.playlist
+        if not playlist:
+            self._shuffle_queue = []
+            return
+        
+        # Create a list of all indices
+        indices = list(range(len(playlist)))
+        
+        # Shuffle the list
+        random.shuffle(indices)
+        
+        # If there's a current track, remove it from the queue to avoid immediate repeat
+        current_idx = self._state.current_index
+        if 0 <= current_idx < len(playlist) and current_idx in indices:
+            indices.remove(current_idx)
+            # Add it at the end so it plays eventually, but not next
+            indices.append(current_idx)
+        
+        self._shuffle_queue = indices
 
     def _poll_internal_player_status(self) -> bool:
         """Poll internal player status and update state."""
@@ -560,8 +624,18 @@ class PlaybackController:
             self._user_action_time = time.time()
             
             playlist = self._state.playlist
-            current_index = self._state.current_index
-            if current_index < len(playlist) - 1:
+            # Check if there are more tracks available (considering shuffle mode)
+            has_next = False
+            if self._state.shuffle_enabled:
+                # In shuffle mode, check if queue has tracks or can be regenerated
+                if self._shuffle_queue or len(playlist) > 1:
+                    has_next = True
+            else:
+                # Sequential mode - check if not at end
+                current_index = self._state.current_index
+                has_next = current_index < len(playlist) - 1
+            
+            if has_next:
                 # There's a next track - advance
                 self._handle_track_finished()
             else:
@@ -589,6 +663,9 @@ class PlaybackController:
                 self._state.set_current_index(idx)
                 new_track = TrackMetadata(file_path)
                 self._state.set_current_track(new_track)
+                # Remove from shuffle queue if present (to avoid playing it again before queue regenerates)
+                if self._state.shuffle_enabled and idx in self._shuffle_queue:
+                    self._shuffle_queue.remove(idx)
                 return
 
         # Track not found - MOC might have a different playlist
@@ -620,21 +697,47 @@ class PlaybackController:
             # Loop current track - restart it
             self._on_action_play(None)
         elif loop_mode == 2:  # LOOP_PLAYLIST
-            # Loop playlist - advance to next or wrap to first
-            if current_index < len(playlist) - 1:
-                self._on_action_next(None)
-            else:
-                # End of playlist - wrap to beginning
-                if playlist:
-                    self._state.set_current_index(0)
+            # Loop playlist - advance to next or wrap to beginning
+            if self._state.shuffle_enabled:
+                # In shuffle mode, use shuffle queue (will regenerate when empty)
+                next_index = self._get_next_shuffled_index()
+                if next_index >= 0:
+                    self._state.set_current_index(next_index)
                     self._on_action_play(None)
+                else:
+                    # Queue exhausted - regenerate and play first from new queue
+                    self._regenerate_shuffle_queue()
+                    if self._shuffle_queue:
+                        next_index = self._shuffle_queue.pop(0)
+                        self._state.set_current_index(next_index)
+                        self._on_action_play(None)
+            else:
+                # Sequential navigation
+                if current_index < len(playlist) - 1:
+                    self._on_action_next(None)
+                else:
+                    # End of playlist - wrap to beginning
+                    if playlist:
+                        self._state.set_current_index(0)
+                        self._on_action_play(None)
         else:  # LOOP_FORWARD (0)
             # Forward mode - advance to next track or stop at end
-            if current_index < len(playlist) - 1:
-                self._on_action_next(None)
+            if self._state.shuffle_enabled:
+                # Use shuffle queue if shuffle is enabled
+                next_index = self._get_next_shuffled_index()
+                if next_index >= 0:
+                    self._state.set_current_index(next_index)
+                    self._on_action_play(None)
+                else:
+                    # Shuffle queue exhausted - stop
+                    self._on_action_stop(None)
             else:
-                # End of playlist reached - stop
-                self._on_action_stop(None)
+                # Sequential navigation
+                if current_index < len(playlist) - 1:
+                    self._on_action_next(None)
+                else:
+                    # End of playlist reached - stop
+                    self._on_action_stop(None)
 
     def _check_moc_playlist_changes(self) -> None:
         """Check for MOC playlist file changes."""
