@@ -152,6 +152,7 @@ class BluetoothAdvanced:
                 dbus_interface=PROPERTIES_INTERFACE,
                 signal_name="PropertiesChanged",
                 path=device_path,
+                path_keyword="path",
             )
             self._signal_receivers.append(receiver)
             logger.debug("Bluetooth advanced: Started battery monitoring for %s", device_path)
@@ -234,6 +235,7 @@ class BluetoothAdvanced:
                 dbus_interface=PROPERTIES_INTERFACE,
                 signal_name="PropertiesChanged",
                 path=device_path,
+                path_keyword="path",
             )
             self._signal_receivers.append(receiver)
             logger.debug("Bluetooth advanced: Started quality monitoring for %s", device_path)

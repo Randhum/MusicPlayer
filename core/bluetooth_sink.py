@@ -59,6 +59,9 @@ class BluetoothSink:
         self.gst_bluez_available = False
         self._check_gst_bluez_plugin()
 
+        # Callback for when audio stream stops (can be set externally)
+        self.on_audio_stream_stopped: Optional[Callable[[], None]] = None
+
         # Register sink mode checker callback with BT manager (avoids circular dependency)
         if hasattr(self.bt_manager, "register_sink_mode_checker"):
             self.bt_manager.register_sink_mode_checker(lambda: self.is_sink_enabled)
@@ -956,3 +959,29 @@ class BluetoothSink:
         self.device_name = name
         if self.is_sink_enabled:
             self._set_adapter_name(name)
+
+    def cleanup(self) -> None:
+        """
+        Clean up Bluetooth sink resources.
+
+        This should be called when the application shuts down to:
+        - Disable sink mode if enabled
+        - Unsubscribe from events
+        """
+        try:
+            # Disable sink mode if enabled
+            if self.is_sink_enabled:
+                self.disable_sink_mode()
+
+            # Unsubscribe from events
+            if self._event_bus:
+                self._event_bus.unsubscribe(
+                    EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected
+                )
+                self._event_bus.unsubscribe(
+                    EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected
+                )
+
+            logger.info("Bluetooth sink cleaned up")
+        except Exception as e:
+            logger.error("Error during Bluetooth sink cleanup: %s", e, exc_info=True)

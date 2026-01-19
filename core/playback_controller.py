@@ -771,9 +771,10 @@ class PlaybackController:
 
     def _on_bt_sink_enabled(self, data: Optional[dict]) -> None:
         """Handle BT sink enabled."""
+        # Set active backend FIRST so _stop_inactive_backends knows what to stop
+        self._state.set_active_backend("bt_sink")
         # Stop other backends
         self._stop_inactive_backends()
-        self._state.set_active_backend("bt_sink")
 
     def _on_bt_sink_disabled(self, data: Optional[dict]) -> None:
         """Handle BT sink disabled."""
@@ -785,8 +786,10 @@ class PlaybackController:
         """Handle BT sink device connected."""
         # BT sink takes priority when device is connected
         if self._bt_sink and self._bt_sink.is_sink_enabled:
-            self._stop_inactive_backends()
+            # Set active backend FIRST so _stop_inactive_backends knows what to stop
             self._state.set_active_backend("bt_sink")
+            # Stop other backends
+            self._stop_inactive_backends()
 
     def _reset_seek_state(self) -> bool:
         """Reset seek state to IDLE after seek operation completes."""

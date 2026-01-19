@@ -402,6 +402,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "playback_controller"):
             self.playback_controller.cleanup()
         # Cleanup Bluetooth resources
+        if hasattr(self, "bt_sink"):
+            self.bt_sink.cleanup()
         if hasattr(self, "bt_manager"):
             self.bt_manager.cleanup()
 
