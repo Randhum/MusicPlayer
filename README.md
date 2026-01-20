@@ -616,6 +616,17 @@ If the application crashes with a GTK fatal error when dragging playlist items:
 - All widget property accesses are now protected with try/except blocks to handle invalid widget states gracefully
 - The drag target index calculation now properly accounts for the move_track() logic which adjusts insert index when moving down
 
+### "Add Folder" button not working in library view
+
+**Issue:** The "Add Folder to Playlist" option in the library browser context menu wasn't working, especially when MOC wasn't currently the active playback backend.
+
+**Root cause:** The code was checking if MOC was currently active (`active_backend == "moc"`) instead of checking if MOC was available. This prevented adding folders when MOC wasn't playing.
+
+**What was fixed:**
+- Changed folder addition logic to check MOC availability (using `shutil.which("mocp")`) instead of checking if MOC is currently active
+- Improved context menu cleanup to prevent GTK assertion errors
+- Fixed race conditions in menu cleanup timeout handling
+
 ### "Move Down in playlist context menu crashes!"
 
 **What was fixed:**

@@ -168,6 +168,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self._create_playlist_view()
         self._create_metadata_panel()
         self._create_bluetooth_panel()
+        self._create_player_controls()
+        
+        # Set cross-references after all components are created
+        self.library_browser.playlist_view = self.playlist_view
+        self.library_browser.player_controls = self.player_controls
 
         # Create dockable panels
         library_panel = self.dock_manager.create_panel(
@@ -246,7 +251,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Bottom - Player controls (not dockable)
         main_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-        self._create_player_controls()
         main_box.append(self.player_controls)
 
     def _apply_css(self):

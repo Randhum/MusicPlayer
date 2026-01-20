@@ -24,7 +24,10 @@ from gi.repository import Gdk, GLib, GObject, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
+from core.logging import get_logger
 from core.metadata import TrackMetadata
+
+logger = get_logger(__name__)
 
 
 class LibraryBrowser(Gtk.Box):
@@ -59,9 +62,9 @@ class LibraryBrowser(Gtk.Box):
         self.append(header)
 
         # Scrolled window for tree view
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_vexpand(True)  # Make scrolled window expand vertically
+        self.scrolled = Gtk.ScrolledWindow()
+        self.scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.scrolled.set_vexpand(True)  # Make scrolled window expand vertically
 
         # Tree store: (name, type, data)
         # type: 'folder', 'track'
@@ -117,8 +120,8 @@ class LibraryBrowser(Gtk.Box):
         column.set_resizable(True)
         self.tree_view.append_column(column)
 
-        scrolled.set_child(self.tree_view)
-        self.append(scrolled)
+        self.scrolled.set_child(self.tree_view)
+        self.append(self.scrolled)
 
     def populate(self, library: "MusicLibrary") -> None:
         """Populate the tree with folder structure."""
@@ -327,16 +330,26 @@ class LibraryBrowser(Gtk.Box):
         # Properly close and remove old menu if exists
         if self.context_menu:
             try:
+                # Disconnect signal first to prevent recursive cleanup
+                try:
+                    self.context_menu.disconnect_by_func(self._on_popover_closed)
+                except (TypeError, AttributeError):
+                    # Signal not connected or widget destroyed
+                    pass
+                # Close the popover
                 self.context_menu.popdown()
             except (AttributeError, RuntimeError):
                 # Widget may have been destroyed
                 pass
+            # Unparent and destroy the old popover completely
             try:
-                if self.context_menu.get_parent():
+                parent = self.context_menu.get_parent()
+                if parent is not None:
                     self.context_menu.unparent()
             except (AttributeError, RuntimeError):
-                # Widget may have been destroyed
+                # Widget may have been destroyed or already unparented
                 pass
+            # Clear reference - this ensures we create a fresh popover
             self.context_menu = None
 
         # Set flag to prevent multiple menus
@@ -414,13 +427,22 @@ class LibraryBrowser(Gtk.Box):
                     )
                     menu_box.append(add_item)
 
-        # Set child before parent
+        # Set child first (must be done before setting parent)
         self.context_menu.set_child(menu_box)
 
-        # Set parent after child is set
-        self.context_menu.set_parent(self.tree_view)
+        # Set parent - must be done after child is set
+        # In GTK4, Popover should be parented to the scrolled window containing the tree view
+        # This avoids CSS node conflicts when the tree view is inside a scrolled window
+        try:
+            self.context_menu.set_parent(self.scrolled)
+        except (AttributeError, RuntimeError) as e:
+            # If setting parent fails, we can't show the menu
+            logger.warning("Failed to set popover parent: %s", e)
+            self._menu_showing = False
+            self.context_menu = None
+            return
 
-        # Connect to closed signal for cleanup
+        # Connect to closed signal for cleanup (after parent is set)
         self.context_menu.connect("closed", self._on_popover_closed)
 
         # Position and show menu
