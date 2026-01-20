@@ -29,7 +29,12 @@ class BluetoothPanel(Gtk.Box):
         "device-selected": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
-    def __init__(self, bt_manager: BluetoothManager, bt_sink: Optional[BluetoothSink] = None, event_bus: Optional[EventBus] = None):
+    def __init__(
+        self,
+        bt_manager: BluetoothManager,
+        bt_sink: Optional[BluetoothSink] = None,
+        event_bus: Optional[EventBus] = None,
+    ):
         """
         Initialize Bluetooth panel.
 
@@ -92,12 +97,24 @@ class BluetoothPanel(Gtk.Box):
 
         # Subscribe to BT events
         if self._event_bus:
-            self._event_bus.subscribe(EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected)
-            self._event_bus.subscribe(EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected)
-            self._event_bus.subscribe(EventBus.BT_DEVICE_ADDED, self._on_bt_device_added)
-            self._event_bus.subscribe(EventBus.BT_SINK_ENABLED, self._on_bt_sink_enabled)
-            self._event_bus.subscribe(EventBus.BT_SINK_DISABLED, self._on_bt_sink_disabled)
-            self._event_bus.subscribe(EventBus.BT_SINK_DEVICE_CONNECTED, self._on_bt_sink_device_connected)
+            self._event_bus.subscribe(
+                EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected
+            )
+            self._event_bus.subscribe(
+                EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected
+            )
+            self._event_bus.subscribe(
+                EventBus.BT_DEVICE_ADDED, self._on_bt_device_added
+            )
+            self._event_bus.subscribe(
+                EventBus.BT_SINK_ENABLED, self._on_bt_sink_enabled
+            )
+            self._event_bus.subscribe(
+                EventBus.BT_SINK_DISABLED, self._on_bt_sink_disabled
+            )
+            self._event_bus.subscribe(
+                EventBus.BT_SINK_DEVICE_CONNECTED, self._on_bt_sink_device_connected
+            )
 
         # Start with Bluetooth UI in an inactive state; it becomes active with speaker mode
         self._set_inactive_state()

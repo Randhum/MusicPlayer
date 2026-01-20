@@ -126,7 +126,9 @@ class PlayerControls(Gtk.Box):
         self.time_label.set_size_request(50, -1)
         pb.append(self.time_label)
 
-        self.progress_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 100.0, 1.0)
+        self.progress_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 0.0, 100.0, 1.0
+        )
         self.progress_scale.set_draw_value(False)
         self.progress_scale.set_hexpand(True)
         self.progress_scale.set_size_request(-1, 36)
@@ -138,7 +140,9 @@ class PlayerControls(Gtk.Box):
         # By only handling clicks (not drags) and returning False, we let the scale handle drags normally
         click_gesture = Gtk.GestureClick.new()
         click_gesture.set_button(1)  # Left mouse button only
-        click_gesture.set_exclusive(False)  # Don't grab exclusive access - let scale handle drags
+        click_gesture.set_exclusive(
+            False
+        )  # Don't grab exclusive access - let scale handle drags
         click_gesture.connect("pressed", self._on_scale_button_pressed)
         click_gesture.connect("released", self._on_scale_button_released)
         self.progress_scale.add_controller(click_gesture)
@@ -163,7 +167,11 @@ class PlayerControls(Gtk.Box):
         bs = 56
 
         for name, icon, action in [
-            ("prev", "media-skip-backward-symbolic", lambda: self._events.publish(EventBus.ACTION_PREV)),
+            (
+                "prev",
+                "media-skip-backward-symbolic",
+                lambda: self._events.publish(EventBus.ACTION_PREV),
+            ),
             (
                 "play",
                 "media-playback-start-symbolic",
@@ -179,7 +187,11 @@ class PlayerControls(Gtk.Box):
                 "media-playback-stop-symbolic",
                 lambda: self._events.publish(EventBus.ACTION_STOP),
             ),
-            ("next", "media-skip-forward-symbolic", lambda: self._events.publish(EventBus.ACTION_NEXT)),
+            (
+                "next",
+                "media-skip-forward-symbolic",
+                lambda: self._events.publish(EventBus.ACTION_NEXT),
+            ),
         ]:
             b = Gtk.Button.new_from_icon_name(icon)
             b.set_size_request(bs, bs)
@@ -199,10 +211,10 @@ class PlayerControls(Gtk.Box):
         cb.append(self.shuffle_button)
 
         self.loop_button = Gtk.ToggleButton()
-        '''
+        """
         define self.loop_method to default value IF no config loaded 
         -> Need to implement config manager
-        '''
+        """
         self._update_loop_icon()
         self.loop_button.set_size_request(bs, bs)
         self.loop_button.connect("clicked", self._on_loop_clicked)
@@ -211,7 +223,9 @@ class PlayerControls(Gtk.Box):
         vb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         vb.set_halign(Gtk.Align.END)
         vb.append(Gtk.Image.new_from_icon_name("audio-volume-high-symbolic"))
-        self.volume_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 0.01)
+        self.volume_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 0.0, 1.0, 0.01
+        )
         self.volume_scale.set_value(1.0)
         self.volume_scale.set_draw_value(False)
         self.volume_scale.set_size_request(140, 36)
@@ -251,7 +265,7 @@ class PlayerControls(Gtk.Box):
         # Check at the very beginning - if we're dragging, don't do anything
         if self._seek_state != SeekState.IDLE:
             return
-        
+
         # Also skip if we're in the middle of updating (prevents recursive calls)
         if self._updating_progress:
             return
@@ -262,7 +276,7 @@ class PlayerControls(Gtk.Box):
         # Even if we passed the first check, if drag started in the meantime, abort now
         if self._seek_state != SeekState.IDLE:
             return
-        
+
         # Use _updating_progress flag to prevent value-changed signal from interfering
         # This flag tells value-changed handler that this is from playback, not user drag
         self._updating_progress = True
@@ -298,7 +312,7 @@ class PlayerControls(Gtk.Box):
         self._press_x = x
         self._press_time = GLib.get_monotonic_time()
         self._press_handled = False  # Track if we've already handled this press
-    
+
     def _on_scale_button_released(self, controller, n_press, x, y):
         """Handle button release on scale - seek if it was a click (not a drag)."""
         # Only seek if:
@@ -319,46 +333,52 @@ class PlayerControls(Gtk.Box):
                     else:
                         # If no duration, can't seek - just update UI to show click position
                         pos = 0.0
-                    
+
                     # Update scale and labels
                     self._updating_progress = True
                     self.progress_scale.set_value(pct)
                     if duration > 0:
                         self.update_time_labels(pos, duration)
                     self._updating_progress = False
-                    
+
                     # Seek immediately (click, not drag) - only if duration > 0
                     if duration > 0:
                         self._seek_state = SeekState.SEEKING
                         self.emit("seek-changed", pos)
                         self._seek_state = SeekState.IDLE
         self._press_handled = False  # Reset for next press
-    
+
     def _on_scale_value_changed(self, scale):
         """
         Handle scale value changes - detect drags and update labels.
-        
+
         Gtk.Scale handles drags internally. We detect drags by tracking rapid value-changed signals.
         If value-changed fires multiple times rapidly, it's a drag. If it fires slowly, it's playback.
         """
         current_time = GLib.get_monotonic_time()
-        time_since_last = current_time - self._last_value_changed_time if self._last_value_changed_time > 0 else 0
+        time_since_last = (
+            current_time - self._last_value_changed_time
+            if self._last_value_changed_time > 0
+            else 0
+        )
         self._last_value_changed_time = current_time
-        
+
         # If value-changed fires rapidly (< 100ms between calls), it's likely a drag
         # If it fires slowly (> 100ms), it's likely a playback update
         is_rapid_change = time_since_last < 100000  # 100ms in microseconds
-        
+
         # Ignore updates from update_progress() (normal playback updates)
         # These are marked with _updating_progress flag and occur when NOT dragging
         if self._updating_progress and self._seek_state != SeekState.DRAGGING:
             return
-        
+
         # If this is a rapid change and we're not already dragging, start drag
         if is_rapid_change and self._seek_state == SeekState.IDLE:
             self._seek_state = SeekState.DRAGGING
             self._value_changed_count = 0
-            self._press_handled = True  # Mark that this press is being handled as a drag
+            self._press_handled = (
+                True  # Mark that this press is being handled as a drag
+            )
             # Cancel any existing timeout
             if self._drag_timeout_id is not None:
                 GLib.source_remove(self._drag_timeout_id)
@@ -366,7 +386,7 @@ class PlayerControls(Gtk.Box):
             # IMPORTANT: Set _updating_progress to False to ensure value-changed works during drag
             # This ensures that value-changed from user drag is not blocked
             self._updating_progress = False
-        
+
         # During drag: Always update labels from scale value
         if self._seek_state == SeekState.DRAGGING:
             self._value_changed_count += 1
@@ -377,12 +397,11 @@ class PlayerControls(Gtk.Box):
                 pos = (scale_value / 100.0) * duration
                 # Always update labels from scale value during drag
                 self.update_time_labels(pos, duration)
-            
+
             # Reset timeout - if value-changed doesn't fire for 200ms, drag has ended
             if self._drag_timeout_id is not None:
                 GLib.source_remove(self._drag_timeout_id)
             self._drag_timeout_id = GLib.timeout_add(200, self._on_drag_timeout)
-
 
     def _on_drag_timeout(self) -> bool:
         """
@@ -392,29 +411,28 @@ class PlayerControls(Gtk.Box):
         if self._seek_state == SeekState.DRAGGING:
             self._ensure_duration()
             duration = self._state.duration
-            
+
             if duration > 0:
                 # Get current scale value and seek to that position
                 scale_value = self.progress_scale.get_value()
                 pos = (scale_value / 100.0) * duration
-                
+
                 # Update labels
                 self.update_time_labels(pos, duration)
-                
+
                 # Seek to that position
                 self._seek_state = SeekState.SEEKING
                 self._updating_progress = True
                 self.emit("seek-changed", pos)
                 self._seek_state = SeekState.IDLE
                 self._updating_progress = False
-                
+
                 # Reset drag tracking
                 self._value_changed_count = 0
                 self._last_value_changed_time = 0
-        
+
         self._drag_timeout_id = None
         return False  # Don't repeat
-
 
     def _on_volume_scale_changed(self, scale: Gtk.Scale) -> None:
         """Handle volume scale value-changed signal - extract value and call slider handler."""
@@ -563,7 +581,11 @@ class PlayerControls(Gtk.Box):
             on_next=lambda: self._events.publish(EventBus.ACTION_NEXT),
             on_previous=lambda: self._events.publish(EventBus.ACTION_PREV),
             on_seek=on_seek,
-            on_set_volume=lambda v: self._events.publish(EventBus.ACTION_SET_VOLUME, {"volume": v}) if 0.0 <= v <= 1.0 else None,
+            on_set_volume=lambda v: (
+                self._events.publish(EventBus.ACTION_SET_VOLUME, {"volume": v})
+                if 0.0 <= v <= 1.0
+                else None
+            ),
         )
         if self.window:
             self.mpris2.set_window_callbacks(

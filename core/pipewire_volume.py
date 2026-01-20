@@ -137,7 +137,10 @@ class PipeWireVolume:
 
         def check_volume():
             current_volume = self.get_volume()
-            if self._last_volume is not None and abs(current_volume - self._last_volume) > 0.01:
+            if (
+                self._last_volume is not None
+                and abs(current_volume - self._last_volume) > 0.01
+            ):
                 # Volume changed externally
                 if self.on_volume_changed:
                     self.on_volume_changed(current_volume)
@@ -157,7 +160,9 @@ class PipeWireVolume:
         if self._use_native and self._sink_proxy:
             try:
                 # Use native D-Bus interface
-                props = dbus.Interface(self._sink_proxy, "org.freedesktop.DBus.Properties")
+                props = dbus.Interface(
+                    self._sink_proxy, "org.freedesktop.DBus.Properties"
+                )
                 volume = props.Get("org.PulseAudio.Core1.Device", "Volume")
                 # Volume is typically a list of channel volumes, take first
                 if volume and len(volume) > 0:
@@ -165,7 +170,9 @@ class PipeWireVolume:
                     vol_value = float(volume[0]) / 65536.0
                     return max(0.0, min(1.0, vol_value))
             except Exception as e:
-                logger.debug("PipeWire: Error getting volume via native interface: %s", e)
+                logger.debug(
+                    "PipeWire: Error getting volume via native interface: %s", e
+                )
 
         # Fallback to subprocess
         if self._pactl_path:
@@ -193,7 +200,9 @@ class PipeWireVolume:
                 self._last_volume = volume
                 return
             except Exception as e:
-                logger.debug("PipeWire: Error setting volume via native interface: %s", e)
+                logger.debug(
+                    "PipeWire: Error setting volume via native interface: %s", e
+                )
 
         # Fallback to subprocess
         if self._pactl_path:
@@ -231,7 +240,12 @@ class PipeWireVolume:
         vol_percent = int(volume * 100)
         try:
             subprocess.run(
-                [self._pactl_path, "set-sink-volume", "@DEFAULT_SINK@", f"{vol_percent}%"],
+                [
+                    self._pactl_path,
+                    "set-sink-volume",
+                    "@DEFAULT_SINK@",
+                    f"{vol_percent}%",
+                ],
                 capture_output=True,
                 timeout=2,
                 check=False,
@@ -262,9 +276,15 @@ class PipeWireVolume:
                         if len(parts) >= 2:
                             sink_id = parts[0]
                             sink_name = parts[1]
-                            description = " ".join(parts[2:]) if len(parts) > 2 else sink_name
+                            description = (
+                                " ".join(parts[2:]) if len(parts) > 2 else sink_name
+                            )
                             sinks.append(
-                                {"id": sink_id, "name": sink_name, "description": description}
+                                {
+                                    "id": sink_id,
+                                    "name": sink_name,
+                                    "description": description,
+                                }
                             )
             except (OSError, subprocess.SubprocessError, FileNotFoundError) as e:
                 logger.debug("PipeWire: Error listing sinks: %s", e)

@@ -50,7 +50,9 @@ class LinuxLogger:
             return
 
         self.logger = logging.getLogger("musicplayer")
-        self.logger.setLevel(logging.DEBUG if os.getenv("MUSICPLAYER_DEBUG") else logging.INFO)
+        self.logger.setLevel(
+            logging.DEBUG if os.getenv("MUSICPLAYER_DEBUG") else logging.INFO
+        )
 
         # Prevent duplicate handlers
         if self.logger.handlers:
@@ -58,7 +60,8 @@ class LinuxLogger:
 
         # Formatter with structured information
         formatter = logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         # Console handler (stderr)

@@ -188,7 +188,9 @@ class MusicLibrary:
             if music_dir.exists() and music_dir.is_dir():
                 if music_root is None:
                     music_root = music_dir
-                tracks.extend(self._scan_directory(music_dir, folder_structure, music_dir))
+                tracks.extend(
+                    self._scan_directory(music_dir, folder_structure, music_dir)
+                )
 
         with self._lock:
             self.tracks = tracks
@@ -198,7 +200,10 @@ class MusicLibrary:
             self._save_index()
 
     def _scan_directory(
-        self, directory: Path, folder_structure: Dict[str, List[TrackMetadata]], music_root: Path
+        self,
+        directory: Path,
+        folder_structure: Dict[str, List[TrackMetadata]],
+        music_root: Path,
     ) -> List[TrackMetadata]:
         """Recursively scan a directory for audio files."""
         tracks = []
@@ -233,7 +238,9 @@ class MusicLibrary:
                                     tracks.append(cached_metadata)
                                     folder_structure[rel_path].append(cached_metadata)
                         except Exception as e:
-                            logger.error("Error processing %s: %s", file_path, e, exc_info=True)
+                            logger.error(
+                                "Error processing %s: %s", file_path, e, exc_info=True
+                            )
         except Exception as e:
             logger.error("Error scanning directory %s: %s", directory, e, exc_info=True)
 
@@ -266,7 +273,10 @@ class MusicLibrary:
         try:
             path = Path(file_path)
             mtime = path.stat().st_mtime
-            self._file_cache[file_path] = {"mtime": mtime, "metadata": metadata.to_dict()}
+            self._file_cache[file_path] = {
+                "mtime": mtime,
+                "metadata": metadata.to_dict(),
+            }
         except OSError:
             pass
 
@@ -279,7 +289,10 @@ class MusicLibrary:
                     return TrackMetadata.from_dict(cached_data)
             except Exception as e:
                 logger.error(
-                    "Error loading cached metadata for %s: %s", file_path, e, exc_info=True
+                    "Error loading cached metadata for %s: %s",
+                    file_path,
+                    e,
+                    exc_info=True,
                 )
         return None
 

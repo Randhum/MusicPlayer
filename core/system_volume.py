@@ -54,7 +54,10 @@ class SystemVolume:
                     # Test if we're using PipeWire by checking pactl info
                     try:
                         result = subprocess.run(
-                            [self._pactl_path, "info"], capture_output=True, text=True, timeout=1
+                            [self._pactl_path, "info"],
+                            capture_output=True,
+                            text=True,
+                            timeout=1,
                         )
                         if result.returncode == 0 and "PipeWire" in result.stdout:
                             self._use_pipewire = True
@@ -133,7 +136,12 @@ class SystemVolume:
         vol_percent = int(volume * 100)
         try:
             subprocess.run(
-                [self._pactl_path, "set-sink-volume", "@DEFAULT_SINK@", f"{vol_percent}%"],
+                [
+                    self._pactl_path,
+                    "set-sink-volume",
+                    "@DEFAULT_SINK@",
+                    f"{vol_percent}%",
+                ],
                 capture_output=True,
                 timeout=2,
                 check=False,
@@ -145,7 +153,10 @@ class SystemVolume:
         """Get volume from ALSA."""
         try:
             result = subprocess.run(
-                [self._amixer_path, "get", "Master"], capture_output=True, text=True, timeout=2
+                [self._amixer_path, "get", "Master"],
+                capture_output=True,
+                text=True,
+                timeout=2,
             )
             if result.returncode == 0:
                 # Parse output like "[50%]"
@@ -194,7 +205,10 @@ class SystemVolume:
         # Poll every 500ms for volume changes
         def check_volume():
             current_volume = self.get_volume()
-            if self._last_volume is not None and abs(current_volume - self._last_volume) > 0.01:
+            if (
+                self._last_volume is not None
+                and abs(current_volume - self._last_volume) > 0.01
+            ):
                 # Volume changed externally
                 if self.on_volume_changed:
                     self.on_volume_changed(current_volume)

@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 class EventBus:
     """
     Centralized publish-subscribe event system.
-    
+
     Replaces direct callbacks and circular dependencies with a clean
     event-driven architecture. Components publish events and subscribe
     to events they care about, without knowing about each other.
@@ -77,7 +77,9 @@ class EventBus:
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
     ACTION_REFRESH_MOC = "action.refresh_moc"  # Reload playlist from MOC
-    ACTION_APPEND_FOLDER = "action.append_folder"  # Append folder to playlist (MOC mode)
+    ACTION_APPEND_FOLDER = (
+        "action.append_folder"  # Append folder to playlist (MOC mode)
+    )
 
     def __init__(self):
         """Initialize the event bus."""

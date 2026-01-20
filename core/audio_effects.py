@@ -65,7 +65,9 @@ class AudioEffects:
                 logger.warning("Audio effects: equalizer-10bands element not available")
                 logger.info("Install: emerge -av media-plugins/gst-plugins-good")
         except Exception as e:
-            logger.error("Audio effects: Error creating equalizer: %s", e, exc_info=True)
+            logger.error(
+                "Audio effects: Error creating equalizer: %s", e, exc_info=True
+            )
         return None
 
     def set_equalizer_band(self, band: int, gain: float) -> None:
@@ -94,7 +96,9 @@ class AudioEffects:
             self.equalizer.set_property(prop_name, gain)
             logger.debug("Audio effects: Set band %d to %.2f dB", band, gain)
         except Exception as e:
-            logger.error("Audio effects: Error setting band %d: %s", band, e, exc_info=True)
+            logger.error(
+                "Audio effects: Error setting band %d: %s", band, e, exc_info=True
+            )
 
     def get_equalizer_band(self, band: int) -> float:
         """
@@ -134,7 +138,9 @@ class AudioEffects:
                 logger.warning("Audio effects: rgvolume element not available")
                 logger.info("Install: emerge -av media-plugins/gst-plugins-good")
         except Exception as e:
-            logger.error("Audio effects: Error creating ReplayGain: %s", e, exc_info=True)
+            logger.error(
+                "Audio effects: Error creating ReplayGain: %s", e, exc_info=True
+            )
         return None
 
     def set_replaygain_enabled(self, enabled: bool) -> None:
@@ -151,9 +157,13 @@ class AudioEffects:
                 # Typical modes: "track", "album", "auto"
                 self.replaygain.set_property("album-mode", False)
                 self.replaygain.set_property("target-volume", 0.0)  # 0 dB target
-                logger.debug("Audio effects: ReplayGain %s", "enabled" if enabled else "disabled")
+                logger.debug(
+                    "Audio effects: ReplayGain %s", "enabled" if enabled else "disabled"
+                )
             except Exception as e:
-                logger.error("Audio effects: Error configuring ReplayGain: %s", e, exc_info=True)
+                logger.error(
+                    "Audio effects: Error configuring ReplayGain: %s", e, exc_info=True
+                )
 
     def create_crossfade(self, duration: float = 3.0) -> Optional[Gst.Element]:
         """
@@ -171,12 +181,17 @@ class AudioEffects:
             crossfade = Gst.ElementFactory.make("audiomixer", "crossfade")
             if crossfade:
                 self._crossfade_duration = duration
-                logger.info("Audio effects: Crossfade element created (duration: %.1fs)", duration)
+                logger.info(
+                    "Audio effects: Crossfade element created (duration: %.1fs)",
+                    duration,
+                )
                 return crossfade
             else:
                 logger.warning("Audio effects: audiomixer element not available")
         except Exception as e:
-            logger.error("Audio effects: Error creating crossfade: %s", e, exc_info=True)
+            logger.error(
+                "Audio effects: Error creating crossfade: %s", e, exc_info=True
+            )
         return None
 
     def set_crossfade_enabled(self, enabled: bool) -> None:
@@ -187,7 +202,9 @@ class AudioEffects:
             enabled: Whether to enable crossfade
         """
         self._crossfade_enabled = enabled
-        logger.debug("Audio effects: Crossfade %s", "enabled" if enabled else "disabled")
+        logger.debug(
+            "Audio effects: Crossfade %s", "enabled" if enabled else "disabled"
+        )
 
     def set_crossfade_duration(self, duration: float) -> None:
         """
@@ -197,7 +214,9 @@ class AudioEffects:
             duration: Duration in seconds (0.0 to 10.0, will be clamped)
         """
         self._crossfade_duration = max(0.0, min(10.0, duration))
-        logger.debug("Audio effects: Crossfade duration set to %.1fs", self._crossfade_duration)
+        logger.debug(
+            "Audio effects: Crossfade duration set to %.1fs", self._crossfade_duration
+        )
 
     def get_preset(self, name: str) -> Optional[Dict[str, Any]]:
         """
@@ -248,7 +267,10 @@ class AudioEffects:
         Returns:
             Dictionary with equalizer configuration
         """
-        return {"bands": self._equalizer_bands.copy(), "enabled": self.equalizer is not None}
+        return {
+            "bands": self._equalizer_bands.copy(),
+            "enabled": self.equalizer is not None,
+        }
 
     def cleanup(self) -> None:
         """

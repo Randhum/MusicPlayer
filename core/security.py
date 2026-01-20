@@ -56,7 +56,9 @@ class SecurityValidator:
     }
 
     @staticmethod
-    def validate_path(file_path: str, base_path: Optional[Path] = None) -> Optional[Path]:
+    def validate_path(
+        file_path: str, base_path: Optional[Path] = None
+    ) -> Optional[Path]:
         """
         Validate and sanitize a file path.
 
@@ -78,7 +80,9 @@ class SecurityValidator:
             # Check for dangerous patterns in original path
             for pattern in SecurityValidator.DANGEROUS_PATTERNS:
                 if re.search(pattern, file_path):
-                    logger.warning("Security: Dangerous pattern detected in path: %s", file_path)
+                    logger.warning(
+                        "Security: Dangerous pattern detected in path: %s", file_path
+                    )
                     return None
 
             # Validate against base path if provided
@@ -88,7 +92,9 @@ class SecurityValidator:
                     # Check if path is within base directory
                     path.relative_to(base)
                 except ValueError:
-                    logger.warning("Security: Path outside base directory: %s", file_path)
+                    logger.warning(
+                        "Security: Path outside base directory: %s", file_path
+                    )
                     return None
 
             # Check if file exists and is a regular file
@@ -221,7 +227,9 @@ class SecurityValidator:
             return False
 
         # D-Bus interface names must match pattern: org.example.Interface
-        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)*$", interface):
+        if not re.match(
+            r"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)*$", interface
+        ):
             logger.warning("Security: Invalid D-Bus interface: %s", interface)
             return False
 

@@ -58,7 +58,9 @@ GST_FLAG_AUDIO = 0x02
 GST_FLAG_SOFT_VOLUME = 0x10
 
 # Update intervals (milliseconds)
-DURATION_UPDATE_INTERVAL = 1000  # Poll less frequently - rely on DURATION_CHANGED message
+DURATION_UPDATE_INTERVAL = (
+    1000  # Poll less frequently - rely on DURATION_CHANGED message
+)
 POSITION_UPDATE_INTERVAL = 500
 
 
@@ -128,7 +130,9 @@ class AudioPlayer:
             replaygain.link(audio_sink)
 
             # Add ghost pads
-            audio_pipeline.add_pad(Gst.GhostPad.new("sink", equalizer.get_static_pad("sink")))
+            audio_pipeline.add_pad(
+                Gst.GhostPad.new("sink", equalizer.get_static_pad("sink"))
+            )
 
             self.playbin.set_property("audio-sink", audio_pipeline)
             logger.debug("Audio player: Audio effects pipeline created")
@@ -252,9 +256,13 @@ class AudioPlayer:
         combined = (error + debug).lower()
 
         if "flac" in combined:
-            logger.warning("Missing FLAC support: emerge -av media-plugins/gst-plugins-flac")
+            logger.warning(
+                "Missing FLAC support: emerge -av media-plugins/gst-plugins-flac"
+            )
         elif "h264" in combined or "avc" in combined:
-            logger.warning("Missing H.264 support: emerge -av media-plugins/gst-plugins-openh264")
+            logger.warning(
+                "Missing H.264 support: emerge -av media-plugins/gst-plugins-openh264"
+            )
         elif "missing" in combined or "decoder" in combined:
             logger.warning(
                 "Missing codec: emerge -av media-libs/gst-plugins-good media-libs/gst-plugins-bad"
@@ -277,7 +285,10 @@ class AudioPlayer:
                     self._duration_timeout_id = None
                 return False  # Stop the timeout
         # If playing, stop polling and rely on DURATION_CHANGED message
-        if self._playback_state == PlaybackState.PLAYING and self._duration_timeout_id is not None:
+        if (
+            self._playback_state == PlaybackState.PLAYING
+            and self._duration_timeout_id is not None
+        ):
             try:
                 GLib.source_remove(self._duration_timeout_id)
             except (ValueError, TypeError):
@@ -324,7 +335,9 @@ class AudioPlayer:
                 )
             else:
                 # Audio + Soft Volume (no video)
-                self.playbin.set_property("flags", GST_FLAG_AUDIO | GST_FLAG_SOFT_VOLUME)
+                self.playbin.set_property(
+                    "flags", GST_FLAG_AUDIO | GST_FLAG_SOFT_VOLUME
+                )
         except (AttributeError, TypeError):
             # Ignore errors setting flags (playbin might not support this property)
             pass
@@ -388,7 +401,10 @@ class AudioPlayer:
     def pause(self) -> None:
         """Pause playback."""
         # Allow pause from PLAYING or SEEKING states
-        if self.playbin and self._playback_state in (PlaybackState.PLAYING, PlaybackState.SEEKING):
+        if self.playbin and self._playback_state in (
+            PlaybackState.PLAYING,
+            PlaybackState.SEEKING,
+        ):
             self.playbin.set_state(Gst.State.PAUSED)
             # State will be updated by STATE_CHANGED message
 

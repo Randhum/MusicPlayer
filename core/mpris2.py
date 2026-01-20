@@ -134,8 +134,12 @@ class MPRIS2Service(dbus.service.Object):
                     "CanRaise": dbus.Boolean(self._can_raise),
                     "HasTrackList": dbus.Boolean(self._has_track_list),
                     "Identity": dbus.String(self._identity),
-                    "SupportedUriSchemes": dbus.Array(self._supported_uri_schemes, signature="s"),
-                    "SupportedMimeTypes": dbus.Array(self._supported_mime_types, signature="s"),
+                    "SupportedUriSchemes": dbus.Array(
+                        self._supported_uri_schemes, signature="s"
+                    ),
+                    "SupportedMimeTypes": dbus.Array(
+                        self._supported_mime_types, signature="s"
+                    ),
                 }
             # Handle player interface properties
             elif interface_name == MPRIS2_PLAYER_INTERFACE:
@@ -191,8 +195,12 @@ class MPRIS2Service(dbus.service.Object):
                     "CanRaise": dbus.Boolean(self._can_raise),
                     "HasTrackList": dbus.Boolean(self._has_track_list),
                     "Identity": dbus.String(self._identity),
-                    "SupportedUriSchemes": dbus.Array(self._supported_uri_schemes, signature="s"),
-                    "SupportedMimeTypes": dbus.Array(self._supported_mime_types, signature="s"),
+                    "SupportedUriSchemes": dbus.Array(
+                        self._supported_uri_schemes, signature="s"
+                    ),
+                    "SupportedMimeTypes": dbus.Array(
+                        self._supported_mime_types, signature="s"
+                    ),
                 }
             elif interface_name == MPRIS2_PLAYER_INTERFACE:
                 return {
@@ -240,7 +248,9 @@ class MPRIS2Service(dbus.service.Object):
                 if abs(self._volume - volume) > 0.01:
                     self._volume = volume
                     self.PropertiesChanged(
-                        MPRIS2_PLAYER_INTERFACE, {"Volume": dbus.Double(self._volume)}, []
+                        MPRIS2_PLAYER_INTERFACE,
+                        {"Volume": dbus.Double(self._volume)},
+                        [],
                     )
                     if self.on_set_volume:
                         self.on_set_volume(self._volume)
@@ -252,13 +262,17 @@ class MPRIS2Service(dbus.service.Object):
         except dbus.exceptions.DBusException:
             raise
         except Exception as e:
-            logger.error("MPRIS2: Error setting property %s: %s", property_name, e, exc_info=True)
+            logger.error(
+                "MPRIS2: Error setting property %s: %s", property_name, e, exc_info=True
+            )
             raise dbus.exceptions.DBusException(
                 f"{self.__class__.__name__}.Error", f"Error setting property: {e}"
             )
 
     @dbus.service.signal(dbus.PROPERTIES_IFACE, signature="sa{sv}as")
-    def PropertiesChanged(self, interface: str, changed: Dict[str, Any], invalidated: List[str]):
+    def PropertiesChanged(
+        self, interface: str, changed: Dict[str, Any], invalidated: List[str]
+    ):
         """Signal emitted when properties change."""
         pass
 
@@ -280,7 +294,9 @@ class MPRIS2Service(dbus.service.Object):
             if self.on_previous:
                 self.on_previous()
         except Exception as e:
-            logger.error("MPRIS2: Error handling Previous request: %s", e, exc_info=True)
+            logger.error(
+                "MPRIS2: Error handling Previous request: %s", e, exc_info=True
+            )
 
     @dbus.service.method(MPRIS2_PLAYER_INTERFACE, in_signature="", out_signature="")
     def Pause(self):
@@ -304,7 +320,9 @@ class MPRIS2Service(dbus.service.Object):
                 if self.on_play:
                     self.on_play()
         except Exception as e:
-            logger.error("MPRIS2: Error handling PlayPause request: %s", e, exc_info=True)
+            logger.error(
+                "MPRIS2: Error handling PlayPause request: %s", e, exc_info=True
+            )
 
     @dbus.service.method(MPRIS2_PLAYER_INTERFACE, in_signature="", out_signature="")
     def Stop(self):
@@ -342,13 +360,17 @@ class MPRIS2Service(dbus.service.Object):
         """Set position in microseconds for a specific track."""
         try:
             logger.debug(
-                "MPRIS2: SetPosition requested: track_id=%s, position=%d", track_id, position
+                "MPRIS2: SetPosition requested: track_id=%s, position=%d",
+                track_id,
+                position,
             )
             if self.on_set_position:
                 seconds = position / 1_000_000.0
                 self.on_set_position(track_id, seconds)
         except Exception as e:
-            logger.error("MPRIS2: Error handling SetPosition request: %s", e, exc_info=True)
+            logger.error(
+                "MPRIS2: Error handling SetPosition request: %s", e, exc_info=True
+            )
 
     @dbus.service.method(MPRIS2_PLAYER_INTERFACE, in_signature="s", out_signature="")
     def OpenUri(self, uri: str):
@@ -368,7 +390,8 @@ class MPRIS2Service(dbus.service.Object):
                 else:
                     logger.warning("MPRIS2: Invalid or unsafe URI: %s", uri)
                     raise dbus.exceptions.DBusException(
-                        "org.mpris.MediaPlayer2.Error.InvalidUri", f"Invalid or unsafe URI: {uri}"
+                        "org.mpris.MediaPlayer2.Error.InvalidUri",
+                        f"Invalid or unsafe URI: {uri}",
                     )
             else:
                 logger.warning("MPRIS2: Unsupported URI scheme: %s", uri)
@@ -453,7 +476,9 @@ class MPRIS2Service(dbus.service.Object):
                 self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, changed_props, [])
             except Exception as e:
                 logger.error(
-                    "MPRIS2: Error emitting PropertiesChanged for Metadata: %s", e, exc_info=True
+                    "MPRIS2: Error emitting PropertiesChanged for Metadata: %s",
+                    e,
+                    exc_info=True,
                 )
                 # Fallback: try with minimal conversion (let D-Bus handle more automatically)
                 try:
@@ -481,7 +506,9 @@ class MPRIS2Service(dbus.service.Object):
                     self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, changed_props, [])
                 except Exception as e2:
                     logger.error(
-                        "MPRIS2: Fallback PropertiesChanged also failed: %s", e2, exc_info=True
+                        "MPRIS2: Fallback PropertiesChanged also failed: %s",
+                        e2,
+                        exc_info=True,
                     )
 
     @property
@@ -520,7 +547,9 @@ class MPRIS2Service(dbus.service.Object):
         """Set CanGoNext and emit PropertiesChanged signal."""
         if self._can_go_next != value:
             self._can_go_next = value
-            self.PropertiesChanged(MPRIS2_PLAYER_INTERFACE, {"CanGoNext": dbus.Boolean(value)}, [])
+            self.PropertiesChanged(
+                MPRIS2_PLAYER_INTERFACE, {"CanGoNext": dbus.Boolean(value)}, []
+            )
 
     @property
     def can_go_previous(self) -> bool:
@@ -671,7 +700,8 @@ class MPRIS2Manager:
                 # Use non-blocking request with timeout
                 self._name_id = self.bus.request_name(
                     MPRIS2_BUS_NAME,
-                    dbus.bus.NAME_FLAG_REPLACE_EXISTING | dbus.bus.NAME_FLAG_DO_NOT_QUEUE,
+                    dbus.bus.NAME_FLAG_REPLACE_EXISTING
+                    | dbus.bus.NAME_FLAG_DO_NOT_QUEUE,
                 )
                 if self._name_id == dbus.bus.REQUEST_NAME_REPLY_PRIMARY_OWNER:
                     logger.info("MPRIS2: Acquired bus name %s", MPRIS2_BUS_NAME)
@@ -679,11 +709,15 @@ class MPRIS2Manager:
                     self._initialized = True
                     return True
                 else:
-                    logger.warning("MPRIS2: Could not acquire bus name (may already be in use)")
+                    logger.warning(
+                        "MPRIS2: Could not acquire bus name (may already be in use)"
+                    )
                     self._initialized = False
                     return False
             except dbus.exceptions.DBusException as e:
-                error_name = e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                error_name = (
+                    e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                )
                 logger.error("MPRIS2: D-Bus error registering service: %s", error_name)
                 self._initialized = False
                 return False
@@ -696,7 +730,9 @@ class MPRIS2Manager:
         try:
             dbus_safe_call(_do_register, default_return=False, log_errors=True)
         except Exception as e:
-            logger.error("MPRIS2: Exception during service registration: %s", e, exc_info=True)
+            logger.error(
+                "MPRIS2: Exception during service registration: %s", e, exc_info=True
+            )
             self._initialized = False
 
     def _setup_interfaces(self):
@@ -718,14 +754,20 @@ class MPRIS2Manager:
                 self.service.on_next = self._playback_callbacks.get("on_next")
                 self.service.on_previous = self._playback_callbacks.get("on_previous")
                 self.service.on_seek = self._playback_callbacks.get("on_seek")
-                self.service.on_set_position = self._playback_callbacks.get("on_set_position")
-                self.service.on_set_volume = self._playback_callbacks.get("on_set_volume")
+                self.service.on_set_position = self._playback_callbacks.get(
+                    "on_set_position"
+                )
+                self.service.on_set_volume = self._playback_callbacks.get(
+                    "on_set_volume"
+                )
 
             if self._window_callbacks:
                 self.service.on_quit = self._window_callbacks.get("on_quit")
                 self.service.on_raise = self._window_callbacks.get("on_raise")
 
-            logger.info("MPRIS2: Service registered successfully on %s", MPRIS2_OBJECT_PATH)
+            logger.info(
+                "MPRIS2: Service registered successfully on %s", MPRIS2_OBJECT_PATH
+            )
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
             logger.error("MPRIS2: D-Bus error setting up interfaces: %s", error_name)
@@ -823,7 +865,9 @@ class MPRIS2Manager:
                 logger.info("MPRIS2: Cleaned up")
                 return True
             except dbus.exceptions.DBusException as e:
-                error_name = e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                error_name = (
+                    e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                )
                 logger.debug("MPRIS2: D-Bus error during cleanup: %s", error_name)
                 return False
             except Exception as e:

@@ -175,7 +175,9 @@ class LibraryBrowser(Gtk.Box):
     def _populate_tree(self, parent_iter, folder_tree, folder_name, folder_path: Path):
         """Recursively populate tree view from folder structure."""
         # Add folder node with full path stored as data
-        folder_iter = self.store.append(parent_iter, [folder_name, "folder", str(folder_path)])
+        folder_iter = self.store.append(
+            parent_iter, [folder_name, "folder", str(folder_path)]
+        )
 
         # Add tracks in this folder
         if "tracks" in folder_tree:
@@ -205,10 +207,10 @@ class LibraryBrowser(Gtk.Box):
             self._click_timeout_id = None
 
         # Only handle single clicks (n_press == 1)
-        if n_press == 1 and getattr(self, '_click_in_progress', False):
+        if n_press == 1 and getattr(self, "_click_in_progress", False):
             # Delay to allow double-click to cancel it
             self._click_timeout_id = GLib.timeout_add(250, self._expand_collapse_folder)
-        
+
         self._click_in_progress = False
 
     def _expand_collapse_folder(self):
@@ -369,19 +371,25 @@ class LibraryBrowser(Gtk.Box):
         elif item_type == "folder":
             # Folder menu - use folder path for MOC native append
             folder_path = data if isinstance(data, str) else None
-            
+
             if folder_path:
                 # Use folder path directly (MOC will handle recursively)
                 play_item = Gtk.Button(label="Play Folder")
                 play_item.add_css_class("flat")
                 play_item.set_size_request(150, 40)  # Larger for touch
-                play_item.connect("clicked", lambda w, path=folder_path: self._on_menu_play_folder(path))
+                play_item.connect(
+                    "clicked",
+                    lambda w, path=folder_path: self._on_menu_play_folder(path),
+                )
                 menu_box.append(play_item)
 
                 add_item = Gtk.Button(label="Add Folder to Playlist")
                 add_item.add_css_class("flat")
                 add_item.set_size_request(150, 40)  # Larger for touch
-                add_item.connect("clicked", lambda w, path=folder_path: self._on_menu_add_folder(path))
+                add_item.connect(
+                    "clicked",
+                    lambda w, path=folder_path: self._on_menu_add_folder(path),
+                )
                 menu_box.append(add_item)
             else:
                 # Fallback: collect tracks if no path available
@@ -393,13 +401,17 @@ class LibraryBrowser(Gtk.Box):
                     play_item = Gtk.Button(label="Play Folder")
                     play_item.add_css_class("flat")
                     play_item.set_size_request(150, 40)  # Larger for touch
-                    play_item.connect("clicked", lambda w: self._on_menu_play_album(tracks))
+                    play_item.connect(
+                        "clicked", lambda w: self._on_menu_play_album(tracks)
+                    )
                     menu_box.append(play_item)
 
                     add_item = Gtk.Button(label="Add Folder to Playlist")
                     add_item.add_css_class("flat")
                     add_item.set_size_request(150, 40)  # Larger for touch
-                    add_item.connect("clicked", lambda w: self._on_menu_add_album(tracks))
+                    add_item.connect(
+                        "clicked", lambda w: self._on_menu_add_album(tracks)
+                    )
                     menu_box.append(add_item)
 
         # Set child before parent

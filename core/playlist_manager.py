@@ -44,7 +44,7 @@ class PlaylistManager:
 
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
-        
+
         # Auto-save flag to prevent recursive saves during load
         self._auto_save_enabled: bool = True
 
@@ -62,7 +62,9 @@ class PlaylistManager:
             self.current_playlist.insert(position, track)
         self._sync_to_file()
 
-    def add_tracks(self, tracks: List[TrackMetadata], position: Optional[int] = None) -> None:
+    def add_tracks(
+        self, tracks: List[TrackMetadata], position: Optional[int] = None
+    ) -> None:
         """
         Add multiple tracks to the current playlist.
 
@@ -275,12 +277,12 @@ class PlaylistManager:
     def get_current_index(self) -> int:
         """Get the current playing index."""
         return self.current_index
-    
+
     @property
     def current_playlist_file(self) -> Path:
         """Get the path to the current playlist auto-save file."""
         return self.playlists_dir / "current_playlist.json"
-    
+
     def _sync_to_file(self) -> None:
         """Auto-save current playlist to JSON file."""
         if not self._auto_save_enabled:
@@ -288,13 +290,13 @@ class PlaylistManager:
         try:
             playlist_data = {
                 "tracks": [track.to_dict() for track in self.current_playlist],
-                "current_index": self.current_index
+                "current_index": self.current_index,
             }
             with open(self.current_playlist_file, "w", encoding="utf-8") as f:
                 json.dump(playlist_data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.warning("Failed to auto-save current playlist: %s", e)
-    
+
     def load_current_playlist(self) -> bool:
         """Load the current playlist from auto-save file."""
         if not self.current_playlist_file.exists():
@@ -302,7 +304,7 @@ class PlaylistManager:
         try:
             with open(self.current_playlist_file, "r", encoding="utf-8") as f:
                 playlist_data = json.load(f)
-            
+
             self._auto_save_enabled = False  # Prevent save during load
             try:
                 self.current_playlist = [
@@ -315,11 +317,13 @@ class PlaylistManager:
                     self.current_index = -1
             finally:
                 self._auto_save_enabled = True
-            
+
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
             logger.error("Error loading current playlist: %s", e, exc_info=True)
             return False
         except Exception as e:
-            logger.error("Unexpected error loading current playlist: %s", e, exc_info=True)
+            logger.error(
+                "Unexpected error loading current playlist: %s", e, exc_info=True
+            )
             return False

@@ -86,7 +86,9 @@ def dbus_retry(max_retries: int = 3, backoff: float = 0.5):
                     return func(*args, **kwargs)
                 except dbus.exceptions.DBusException as e:
                     last_exception = e
-                    error_name = e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                    error_name = (
+                        e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                    )
 
                     # Don't retry on certain errors
                     if "org.bluez.Error.DoesNotExist" in error_name:
@@ -106,7 +108,9 @@ def dbus_retry(max_retries: int = 3, backoff: float = 0.5):
                         delay *= 2  # Exponential backoff
                     else:
                         logger.error(
-                            "D-Bus operation failed after %d attempts: %s", max_retries, error_name
+                            "D-Bus operation failed after %d attempts: %s",
+                            max_retries,
+                            error_name,
                         )
                 except Exception as e:
                     # Non-D-Bus exceptions - don't retry
@@ -145,7 +149,9 @@ def dbus_safe_call(func: Callable, default_return: Any = None, log_errors: bool 
         return default_return
 
 
-def validate_dbus_message(message: Any, required_interface: Optional[str] = None) -> bool:
+def validate_dbus_message(
+    message: Any, required_interface: Optional[str] = None
+) -> bool:
     """
     Validate a D-Bus message for security.
 

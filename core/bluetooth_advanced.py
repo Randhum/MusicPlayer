@@ -72,7 +72,8 @@ class BluetoothAdvanced:
 
             # Check for MediaTransport to get codec info
             manager = dbus.Interface(
-                self.bus.get_object(BLUEZ_SERVICE, "/"), "org.freedesktop.DBus.ObjectManager"
+                self.bus.get_object(BLUEZ_SERVICE, "/"),
+                "org.freedesktop.DBus.ObjectManager",
             )
             objects = manager.GetManagedObjects()
 
@@ -97,7 +98,10 @@ class BluetoothAdvanced:
                             codecs.append(codec_name)
         except Exception as e:
             logger.error(
-                "Bluetooth advanced: Error getting codecs for %s: %s", device_path, e, exc_info=True
+                "Bluetooth advanced: Error getting codecs for %s: %s",
+                device_path,
+                e,
+                exc_info=True,
             )
 
         return codecs if codecs else ["SBC"]  # SBC is always available
@@ -155,10 +159,14 @@ class BluetoothAdvanced:
                 path_keyword="path",
             )
             self._signal_receivers.append(receiver)
-            logger.debug("Bluetooth advanced: Started battery monitoring for %s", device_path)
+            logger.debug(
+                "Bluetooth advanced: Started battery monitoring for %s", device_path
+            )
         except Exception as e:
             logger.error(
-                "Bluetooth advanced: Error setting up battery monitoring: %s", e, exc_info=True
+                "Bluetooth advanced: Error setting up battery monitoring: %s",
+                e,
+                exc_info=True,
             )
 
     def _on_battery_changed(
@@ -218,7 +226,9 @@ class BluetoothAdvanced:
             return quality
         return None
 
-    def monitor_quality(self, device_path: str, callback: Callable[[Dict[str, Any]], None]):
+    def monitor_quality(
+        self, device_path: str, callback: Callable[[Dict[str, Any]], None]
+    ):
         """
         Monitor connection quality changes.
 
@@ -238,10 +248,14 @@ class BluetoothAdvanced:
                 path_keyword="path",
             )
             self._signal_receivers.append(receiver)
-            logger.debug("Bluetooth advanced: Started quality monitoring for %s", device_path)
+            logger.debug(
+                "Bluetooth advanced: Started quality monitoring for %s", device_path
+            )
         except Exception as e:
             logger.error(
-                "Bluetooth advanced: Error setting up quality monitoring: %s", e, exc_info=True
+                "Bluetooth advanced: Error setting up quality monitoring: %s",
+                e,
+                exc_info=True,
             )
 
     def _on_quality_changed(
@@ -292,7 +306,9 @@ class BluetoothAdvanced:
                 }
             )
         except Exception as e:
-            logger.error("Bluetooth advanced: Error getting device info: %s", e, exc_info=True)
+            logger.error(
+                "Bluetooth advanced: Error getting device info: %s", e, exc_info=True
+            )
 
         return info
 

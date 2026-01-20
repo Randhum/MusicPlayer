@@ -33,7 +33,9 @@ DEFAULT_DETACHED_HEIGHT = 500
 class DockablePanel(Gtk.Box):
     """A panel that can be docked or detached as a separate window."""
 
-    def __init__(self, title: str, content: Gtk.Widget, icon_name: str = "view-list-symbolic"):
+    def __init__(
+        self, title: str, content: Gtk.Widget, icon_name: str = "view-list-symbolic"
+    ):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         self.title = title
@@ -95,7 +97,9 @@ class DockablePanel(Gtk.Box):
 
         # Create detached window
         self.detached_window = Gtk.Window(title=self.title)
-        self.detached_window.set_default_size(DEFAULT_DETACHED_WIDTH, DEFAULT_DETACHED_HEIGHT)
+        self.detached_window.set_default_size(
+            DEFAULT_DETACHED_WIDTH, DEFAULT_DETACHED_HEIGHT
+        )
         self.detached_window.set_resizable(True)  # Allow resizing and maximizing
         self.detached_window.connect("close-request", self._on_window_close)
 
@@ -163,7 +167,11 @@ class DockManager:
         self.config_path = str(config.layout_file)
 
     def create_panel(
-        self, panel_id: str, title: str, content: Gtk.Widget, icon_name: str = "view-list-symbolic"
+        self,
+        panel_id: str,
+        title: str,
+        content: Gtk.Widget,
+        icon_name: str = "view-list-symbolic",
     ) -> DockablePanel:
         """Create a new dockable panel."""
         panel = DockablePanel(title, content, icon_name)
@@ -212,7 +220,9 @@ class DockManager:
             parent.set_child(panel)
 
     def create_paned_layout(
-        self, *panels: DockablePanel, orientation: Gtk.Orientation = Gtk.Orientation.HORIZONTAL
+        self,
+        *panels: DockablePanel,
+        orientation: Gtk.Orientation = Gtk.Orientation.HORIZONTAL
     ) -> Gtk.Paned:
         """Create a paned container with multiple panels."""
         if len(panels) < 2:
@@ -273,7 +283,9 @@ class DockManager:
                             panel._detach()
 
                             # Apply saved position
-                            pos = self.layout_config.get("positions", {}).get(panel_id, {})
+                            pos = self.layout_config.get("positions", {}).get(
+                                panel_id, {}
+                            )
                             if panel.detached_window and pos:
                                 panel.detached_window.set_default_size(
                                     pos.get("width", DEFAULT_DETACHED_WIDTH),

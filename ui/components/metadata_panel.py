@@ -152,7 +152,9 @@ class MetadataPanel(Gtk.Box):
             logger.error("Error loading album art: %s", e, exc_info=True)
             self.art_image.set_filename(None)
 
-    def _on_visibility_changed(self, widget: Gtk.Widget, param: GObject.ParamSpec) -> None:
+    def _on_visibility_changed(
+        self, widget: Gtk.Widget, param: GObject.ParamSpec
+    ) -> None:
         """
         Handle visibility changes for lazy loading.
 

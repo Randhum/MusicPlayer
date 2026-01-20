@@ -55,9 +55,7 @@ class BluetoothDevice:
         Returns:
             Human-readable device description
         """
-        return (
-            f"BluetoothDevice(name={self.name}, address={self.address}, connected={self.connected})"
-        )
+        return f"BluetoothDevice(name={self.name}, address={self.address}, connected={self.connected})"
 
 
 class BluetoothManager:
@@ -69,7 +67,11 @@ class BluetoothManager:
     DEVICE_INTERFACE = "org.bluez.Device1"
     PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 
-    def __init__(self, parent_window: Optional[Gtk.Window] = None, event_bus: Optional[EventBus] = None) -> None:
+    def __init__(
+        self,
+        parent_window: Optional[Gtk.Window] = None,
+        event_bus: Optional[EventBus] = None,
+    ) -> None:
         """
         Initialize Bluetooth Manager.
 
@@ -141,7 +143,8 @@ class BluetoothManager:
 
             # Get the default adapter
             manager = dbus.Interface(
-                self.bus.get_object(self.BLUEZ_SERVICE, "/"), "org.freedesktop.DBus.ObjectManager"
+                self.bus.get_object(self.BLUEZ_SERVICE, "/"),
+                "org.freedesktop.DBus.ObjectManager",
             )
 
             objects = manager.GetManagedObjects()
@@ -181,7 +184,9 @@ class BluetoothManager:
 
             # Create and register the agent (adapter_path may be None initially)
             # The agent will still register, but we'll update it if adapter is found later
-            adapter_path = self.adapter_path or "/org/bluez/hci0"  # Default adapter path
+            adapter_path = (
+                self.adapter_path or "/org/bluez/hci0"
+            )  # Default adapter path
             self.agent = BluetoothAgent(self.bus, adapter_path)
 
             # Set up agent callbacks to use UI - this must be done immediately
@@ -189,12 +194,16 @@ class BluetoothManager:
             self.agent.on_passkey_display = self.agent_ui.show_passkey_display
             self.agent.on_passkey_confirm = self.agent_ui.show_passkey_confirmation
             self.agent.on_passkey_request = self._handle_passkey_request
-            self.agent.on_authorization_request = self.agent_ui.show_authorization_request
+            self.agent.on_authorization_request = (
+                self.agent_ui.show_authorization_request
+            )
             self.agent.on_pin_request = self.agent_ui.show_pin_request
 
             logger.info("Bluetooth pairing agent set up successfully")
             if not self.adapter_path:
-                logger.warning("Adapter path not yet available, agent registered with default path")
+                logger.warning(
+                    "Adapter path not yet available, agent registered with default path"
+                )
         except dbus.exceptions.DBusException as e:
             error_name = e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
             if "NameHasNoOwner" in error_name or "ServiceUnknown" in error_name:
@@ -222,9 +231,13 @@ class BluetoothManager:
         # For passkey requests, we typically need to display what the other device shows
         # But if we need to enter one, show a dialog
         dialog = Gtk.Dialog(
-            title=f"Pairing with {device_name}", transient_for=self.parent_window, modal=True
+            title=f"Pairing with {device_name}",
+            transient_for=self.parent_window,
+            modal=True,
         )
-        dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_OK", Gtk.ResponseType.OK)
+        dialog.add_buttons(
+            "_Cancel", Gtk.ResponseType.CANCEL, "_OK", Gtk.ResponseType.OK
+        )
 
         content = dialog.get_content_area()
         label = Gtk.Label(label=f"Enter the 6-digit passkey shown on {device_name}:")
@@ -324,7 +337,9 @@ class BluetoothManager:
                             # Check if sink mode is enabled before auto-connecting
                             if self._is_sink_mode_enabled():
                                 # Use GLib.idle_add to avoid blocking the signal handler
-                                GLib.idle_add(self._auto_connect_after_pairing, device_path)
+                                GLib.idle_add(
+                                    self._auto_connect_after_pairing, device_path
+                                )
                             else:
                                 logger.debug(
                                     "Device %s paired but sink mode is disabled - not auto-connecting",
@@ -345,17 +360,23 @@ class BluetoothManager:
                                 device.name,
                             )
                             # Disconnect in the next event loop iteration to avoid blocking
-                            GLib.idle_add(self._disconnect_if_sink_disabled, device_path)
+                            GLib.idle_add(
+                                self._disconnect_if_sink_disabled, device_path
+                            )
                             return  # Don't process connection callbacks
 
                         self.connected_device = device
                         if self._event_bus:
-                            self._event_bus.publish(EventBus.BT_DEVICE_CONNECTED, {"device": device})
+                            self._event_bus.publish(
+                                EventBus.BT_DEVICE_CONNECTED, {"device": device}
+                            )
                     elif not new_connected and old_connected:
                         if self.connected_device == device:
                             self.connected_device = None
                         if self._event_bus:
-                            self._event_bus.publish(EventBus.BT_DEVICE_DISCONNECTED, {"device": device})
+                            self._event_bus.publish(
+                                EventBus.BT_DEVICE_DISCONNECTED, {"device": device}
+                            )
 
                 # Update Trusted state
                 if "Trusted" in changed:
@@ -381,7 +402,9 @@ class BluetoothManager:
                 if self.connected_device == device:
                     self.connected_device = None
                 if self._event_bus:
-                    self._event_bus.publish(EventBus.BT_DEVICE_REMOVED, {"device": device})
+                    self._event_bus.publish(
+                        EventBus.BT_DEVICE_REMOVED, {"device": device}
+                    )
 
     def _convert_dbus_value(self, value):
         """Convert a dbus value to a native Python type."""
@@ -390,7 +413,8 @@ class BluetoothManager:
         elif isinstance(value, dbus.String):
             return str(value)
         elif isinstance(
-            value, (dbus.UInt16, dbus.UInt32, dbus.UInt64, dbus.Int16, dbus.Int32, dbus.Int64)
+            value,
+            (dbus.UInt16, dbus.UInt32, dbus.UInt64, dbus.Int16, dbus.Int32, dbus.Int64),
         ):
             return int(value)
         elif isinstance(value, dbus.Double):
@@ -412,17 +436,24 @@ class BluetoothManager:
             try:
                 name_owner = self.bus.get_name_owner(self.BLUEZ_SERVICE)
                 if not name_owner:
-                    logger.debug("BlueZ service not available - skipping device refresh")
+                    logger.debug(
+                        "BlueZ service not available - skipping device refresh"
+                    )
                     return
             except dbus.exceptions.DBusException as e:
-                error_name = e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                error_name = (
+                    e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                )
                 if "NameHasNoOwner" in error_name or "ServiceUnknown" in error_name:
-                    logger.debug("BlueZ service not available - skipping device refresh")
+                    logger.debug(
+                        "BlueZ service not available - skipping device refresh"
+                    )
                     return
                 raise
 
             manager = dbus.Interface(
-                self.bus.get_object(self.BLUEZ_SERVICE, "/"), "org.freedesktop.DBus.ObjectManager"
+                self.bus.get_object(self.BLUEZ_SERVICE, "/"),
+                "org.freedesktop.DBus.ObjectManager",
             )
 
             objects = manager.GetManagedObjects()
@@ -531,7 +562,8 @@ class BluetoothManager:
         """
         try:
             device_proxy = dbus.Interface(
-                self.bus.get_object(self.BLUEZ_SERVICE, device_path), self.DEVICE_INTERFACE
+                self.bus.get_object(self.BLUEZ_SERVICE, device_path),
+                self.DEVICE_INTERFACE,
             )
             device_proxy.Pair()
             # Note: Trusting happens automatically in _on_properties_changed
@@ -570,7 +602,9 @@ class BluetoothManager:
         try:
             device = self.devices.get(device_path)
             device_name = device.name if device else "unknown"
-            logger.debug("Attempting to connect device: %s (%s)", device_name, device_path)
+            logger.debug(
+                "Attempting to connect device: %s (%s)", device_name, device_path
+            )
             logger.debug(
                 "  Paired: %s, Trusted: %s, Connected: %s",
                 device.paired if device else "unknown",
@@ -585,7 +619,8 @@ class BluetoothManager:
                 return False
 
             device_proxy = dbus.Interface(
-                self.bus.get_object(self.BLUEZ_SERVICE, device_path), self.DEVICE_INTERFACE
+                self.bus.get_object(self.BLUEZ_SERVICE, device_path),
+                self.DEVICE_INTERFACE,
             )
             device_proxy.Connect()
             logger.info("Connect() call succeeded for %s", device_name)
@@ -628,7 +663,8 @@ class BluetoothManager:
         """
         try:
             device_proxy = dbus.Interface(
-                self.bus.get_object(self.BLUEZ_SERVICE, device_path), self.DEVICE_INTERFACE
+                self.bus.get_object(self.BLUEZ_SERVICE, device_path),
+                self.DEVICE_INTERFACE,
             )
             device_proxy.Disconnect()
             return True
@@ -701,12 +737,16 @@ class BluetoothManager:
             device = self.devices.get(device_path)
             if device and device.paired and not device.connected:
                 logger.info(
-                    "Auto-connecting device %s (%s) after pairing...", device.name, device.address
+                    "Auto-connecting device %s (%s) after pairing...",
+                    device.name,
+                    device.address,
                 )
                 # Small delay to ensure trust is set and device is ready
                 GLib.timeout_add(500, lambda: self._do_auto_connect(device_path))
         except Exception as e:
-            logger.error("Error scheduling auto-connect after pairing: %s", e, exc_info=True)
+            logger.error(
+                "Error scheduling auto-connect after pairing: %s", e, exc_info=True
+            )
         return False  # Remove from idle queue
 
     def _do_auto_connect(self, device_path: str) -> bool:
@@ -725,7 +765,8 @@ class BluetoothManager:
                     logger.info("Successfully connected %s", device.name)
                 else:
                     logger.warning(
-                        "Failed to connect %s - it may connect automatically later", device.name
+                        "Failed to connect %s - it may connect automatically later",
+                        device.name,
                     )
             return False  # Remove from timeout
         except Exception as e:

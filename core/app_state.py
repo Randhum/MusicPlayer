@@ -34,7 +34,7 @@ class PlaybackState(Enum):
 class AppState:
     """
     Single source of truth for application state.
-    
+
     All state changes go through this class, which publishes events
     via EventBus to notify subscribers of changes.
     """
@@ -89,7 +89,9 @@ class AppState:
         return self._current_track
         return None
 
-    def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1) -> None:
+    def set_playlist(
+        self, tracks: List[TrackMetadata], current_index: int = -1
+    ) -> None:
         """
         Set the playlist and current index.
 
@@ -110,7 +112,8 @@ class AppState:
             self._current_track = None
 
         self._event_bus.publish(
-            EventBus.PLAYLIST_CHANGED, {"tracks": self._playlist, "index": current_index}
+            EventBus.PLAYLIST_CHANGED,
+            {"tracks": self._playlist, "index": current_index},
         )
 
     def set_current_index(self, index: int) -> None:
@@ -142,8 +145,12 @@ class AppState:
             # If track actually changed, also publish TRACK_CHANGED
             # Compare by file_path to detect actual track change
             if new_track != old_track:
-                if new_track and (not old_track or new_track.file_path != old_track.file_path):
-                    self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": new_track})
+                if new_track and (
+                    not old_track or new_track.file_path != old_track.file_path
+                ):
+                    self._event_bus.publish(
+                        EventBus.TRACK_CHANGED, {"track": new_track}
+                    )
                 elif not new_track and old_track:
                     # Track was cleared
                     self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": None})
@@ -168,10 +175,12 @@ class AppState:
                     self._current_track = self._playlist[self._current_index]
 
         self._event_bus.publish(
-            EventBus.PLAYLIST_TRACK_ADDED, {"track": track, "position": position or len(self._playlist) - 1}
+            EventBus.PLAYLIST_TRACK_ADDED,
+            {"track": track, "position": position or len(self._playlist) - 1},
         )
         self._event_bus.publish(
-            EventBus.PLAYLIST_CHANGED, {"tracks": self._playlist, "index": self._current_index}
+            EventBus.PLAYLIST_CHANGED,
+            {"tracks": self._playlist, "index": self._current_index},
         )
 
     def remove_track(self, index: int) -> None:
@@ -196,9 +205,12 @@ class AppState:
             self._current_index = -1
             self._current_track = None
 
-        self._event_bus.publish(EventBus.PLAYLIST_TRACK_REMOVED, {"index": index, "track": removed_track})
         self._event_bus.publish(
-            EventBus.PLAYLIST_CHANGED, {"tracks": self._playlist, "index": self._current_index}
+            EventBus.PLAYLIST_TRACK_REMOVED, {"index": index, "track": removed_track}
+        )
+        self._event_bus.publish(
+            EventBus.PLAYLIST_CHANGED,
+            {"tracks": self._playlist, "index": self._current_index},
         )
 
     def move_track(self, from_index: int, to_index: int) -> None:
@@ -209,7 +221,10 @@ class AppState:
             from_index: Source position
             to_index: Destination position
         """
-        if not (0 <= from_index < len(self._playlist) and 0 <= to_index < len(self._playlist)):
+        if not (
+            0 <= from_index < len(self._playlist)
+            and 0 <= to_index < len(self._playlist)
+        ):
             return
 
         track = self._playlist.pop(from_index)
@@ -233,10 +248,12 @@ class AppState:
                 self._current_track = self._playlist[self._current_index]
 
         self._event_bus.publish(
-            EventBus.PLAYLIST_TRACK_MOVED, {"from_index": from_index, "to_index": to_index}
+            EventBus.PLAYLIST_TRACK_MOVED,
+            {"from_index": from_index, "to_index": to_index},
         )
         self._event_bus.publish(
-            EventBus.PLAYLIST_CHANGED, {"tracks": self._playlist, "index": self._current_index}
+            EventBus.PLAYLIST_CHANGED,
+            {"tracks": self._playlist, "index": self._current_index},
         )
 
     def clear_playlist(self) -> None:
@@ -283,7 +300,9 @@ class AppState:
 
         # Publish appropriate event based on state change
         if state == PlaybackState.PLAYING and old_state != PlaybackState.PLAYING:
-            self._event_bus.publish(EventBus.PLAYBACK_STARTED, {"track": self._current_track})
+            self._event_bus.publish(
+                EventBus.PLAYBACK_STARTED, {"track": self._current_track}
+            )
         elif state == PlaybackState.PAUSED and old_state == PlaybackState.PLAYING:
             self._event_bus.publish(EventBus.PLAYBACK_PAUSED, {})
         elif state == PlaybackState.STOPPED and old_state != PlaybackState.STOPPED:
@@ -306,7 +325,10 @@ class AppState:
             position: Position in seconds
         """
         self._position = max(0.0, position)
-        self._event_bus.publish(EventBus.POSITION_CHANGED, {"position": self._position, "duration": self._duration})
+        self._event_bus.publish(
+            EventBus.POSITION_CHANGED,
+            {"position": self._position, "duration": self._duration},
+        )
 
     def set_duration(self, duration: float) -> None:
         """

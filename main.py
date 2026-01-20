@@ -91,7 +91,9 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
             logger.info("Presenting existing window (activated by another instance)")
         self.window.present()
 
-    def _on_open(self, app: Gtk.Application, files: Any, n_files: int, hint: str) -> None:
+    def _on_open(
+        self, app: Gtk.Application, files: Any, n_files: int, hint: str
+    ) -> None:
         """
         Handle file open (drag-and-drop or command line).
 

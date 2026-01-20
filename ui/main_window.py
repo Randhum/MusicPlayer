@@ -71,7 +71,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Initialize BT sink with event bus
         self.bt_sink = BluetoothSink(self.bt_manager, event_bus=self.event_bus)
         # System volume control
-        self.system_volume = SystemVolume(on_volume_changed=self._on_system_volume_changed)
+        self.system_volume = SystemVolume(
+            on_volume_changed=self._on_system_volume_changed
+        )
         # MOC integration (Music On Console)
         self.moc_controller = MocController()
         self.use_moc = self.moc_controller.is_available()
@@ -332,7 +334,9 @@ class MainWindow(Gtk.ApplicationWindow):
             window=self,
         )
         self.playlist_view.connect("track-activated", self._on_playlist_track_activated)
-        self.playlist_view.connect("current-index-changed", self._on_playlist_current_index_changed)
+        self.playlist_view.connect(
+            "current-index-changed", self._on_playlist_current_index_changed
+        )
         # Show refresh button only when MOC is available
         self.playlist_view.set_moc_mode(self.use_moc)
 
@@ -478,4 +482,3 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle shuffle toggle state changes (legacy signal)."""
         # Shuffle state is now managed by AppState and events
         pass
-

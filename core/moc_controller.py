@@ -57,7 +57,9 @@ class MocController:
         """Return True if `mocp` is available in PATH."""
         return self._mocp_path is not None
 
-    def _run(self, *args: str, capture_output: bool = False) -> subprocess.CompletedProcess:
+    def _run(
+        self, *args: str, capture_output: bool = False
+    ) -> subprocess.CompletedProcess:
         """
         Run `mocp` with the given arguments.
 
@@ -81,9 +83,14 @@ class MocController:
             # Handle server connection errors gracefully
             if result.returncode != 0 and result.stderr:
                 stderr_lower = result.stderr.lower()
-                if any(msg in stderr_lower for msg in [
-                    "server is not running", "can't receive value", "can't connect"
-                ]):
+                if any(
+                    msg in stderr_lower
+                    for msg in [
+                        "server is not running",
+                        "can't receive value",
+                        "can't connect",
+                    ]
+                ):
                     self._server_connected = False
                     self._status_cache = None
                     return subprocess.CompletedProcess(
@@ -99,7 +106,9 @@ class MocController:
                 args=cmd, returncode=124, stdout="", stderr="Command timed out"
             )
         except Exception as e:
-            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr=str(e)
+            )
 
     def ensure_server(self) -> bool:
         """
@@ -139,7 +148,9 @@ class MocController:
     # ------------------------------------------------------------------
     # Playlist
     # ------------------------------------------------------------------
-    def get_playlist(self, current_file: Optional[str] = None) -> Tuple[List[TrackMetadata], int]:
+    def get_playlist(
+        self, current_file: Optional[str] = None
+    ) -> Tuple[List[TrackMetadata], int]:
         """
         Read MOC's current playlist from M3U file and return (tracks, current_index).
 
@@ -161,7 +172,7 @@ class MocController:
             if Path(file_path).exists():
                 # Create TrackMetadata from file (will extract metadata from file)
                 metadata = TrackMetadata(file_path)
-                
+
                 # Override with EXTINF metadata if available (preserves title/artist from M3U)
                 if extinf_line:
                     extinf_meta = self._extinf_to_metadata(extinf_line)
@@ -171,7 +182,7 @@ class MocController:
                         metadata.artist = extinf_meta["artist"]
                     if extinf_meta.get("duration") is not None:
                         metadata.duration = extinf_meta["duration"]
-                
+
                 tracks.append(metadata)
 
         # Find current track index
@@ -299,12 +310,12 @@ class MocController:
     # ------------------------------------------------------------------
     def play(self):
         """Start / resume playback.
-        
+
         Uses --toggle-pause for simplicity - this handles both paused and stopped states.
         - If paused: resumes from current position
         - If stopped: starts playing from current playlist position
         - If playing: does nothing harmful (toggles to pause then back)
-        
+
         For starting from the first track, use play_first() instead.
         """
         if not self.is_available():
@@ -322,7 +333,7 @@ class MocController:
                 # Start playing from first item (or current position if set)
                 self._run("--play", capture_output=False)
             # If already playing, do nothing
-    
+
     def play_first(self):
         """Start playing from the first item on the playlist."""
         if not self.is_available():
@@ -377,11 +388,11 @@ class MocController:
     def sync_playlist(self) -> bool:
         """
         Trigger MOC to sync its playlist to disk.
-        
+
         This briefly connects to MOC with --sync and immediately sends 'q' to detach.
         The connection triggers MOC to write its in-memory playlist to the M3U file.
         Playback is not interrupted.
-        
+
         Returns:
             True if sync was successful, False otherwise.
         """
@@ -389,7 +400,7 @@ class MocController:
             return False
         if not self.ensure_server():
             return False
-        
+
         try:
             # Run mocp --sync and immediately send 'q' to detach
             # This triggers playlist sync without stopping playback
@@ -398,7 +409,7 @@ class MocController:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                text=True
+                text=True,
             )
             proc.communicate(input="q\n", timeout=3.0)
             return proc.returncode == 0
@@ -431,7 +442,9 @@ class MocController:
         # Read playlist and get track at index
         tracks, _ = self.get_playlist()
         if not (0 <= index < len(tracks)):
-            logger.warning("Index %d out of range (playlist has %d tracks)", index, len(tracks))
+            logger.warning(
+                "Index %d out of range (playlist has %d tracks)", index, len(tracks)
+            )
             return False
 
         track = tracks[index]
@@ -446,7 +459,9 @@ class MocController:
         else:
             # If not starting playback, we can't really "jump" without playing
             # Just return True as there's nothing to do
-            logger.debug("jump_to_index called with start_playback=False - no action taken")
+            logger.debug(
+                "jump_to_index called with start_playback=False - no action taken"
+            )
             return True
 
     def set_volume(self, volume: float):
@@ -594,7 +609,7 @@ class MocController:
 
     def _extinf_to_metadata(self, extinf_line: str) -> Dict[str, Any]:
         """Parse EXTINF line to extract metadata.
-        
+
         Format: #EXTINF:duration,title - artist
         Returns dict with duration, title, artist (or None if parsing fails)
         """
@@ -603,14 +618,16 @@ class MocController:
             if not extinf_line.startswith("#EXTINF:"):
                 return {}
             content = extinf_line[8:].strip()  # Remove "#EXTINF:"
-            
+
             # Find comma separator
             if "," not in content:
                 return {}
-            
+
             duration_str, rest = content.split(",", 1)
-            duration = int(duration_str) if duration_str and duration_str != "-1" else None
-            
+            duration = (
+                int(duration_str) if duration_str and duration_str != "-1" else None
+            )
+
             # Parse "title - artist" format
             title = rest
             artist = None
@@ -618,7 +635,7 @@ class MocController:
                 parts = rest.split(" - ", 1)
                 title = parts[0].strip()
                 artist = parts[1].strip() if len(parts) > 1 else None
-            
+
             result = {}
             if duration is not None:
                 result["duration"] = float(duration)
@@ -629,7 +646,7 @@ class MocController:
             return result
         except Exception:
             return {}
-    
+
     def clear_playlist(self):
         """Clear MOC's playlist using native command."""
         if not self.is_available():
@@ -641,10 +658,10 @@ class MocController:
         """
         Append a file or directory to MOC's playlist using native command.
         MOC will recursively add all tracks if a directory is given.
-        
+
         Args:
             path: Path to the file or directory to add.
-            
+
         Returns:
             True if successful.
         """
@@ -652,19 +669,22 @@ class MocController:
             return False
         if not path:
             return False
-        
+
         p = Path(path)
         if not p.exists():
             logger.warning("Cannot append - path does not exist: %s", path)
             return False
-        
+
         self.ensure_server()
         abs_path = str(p.resolve())
         result = self._run("--append", abs_path, capture_output=True)
         return result.returncode == 0
 
     def set_playlist(
-        self, tracks: List[TrackMetadata], current_index: int = -1, start_playback: bool = False
+        self,
+        tracks: List[TrackMetadata],
+        current_index: int = -1,
+        start_playback: bool = False,
     ):
         """
         Replace MOC's playlist with the given tracks using native MOC commands.
@@ -676,12 +696,12 @@ class MocController:
         """
         if not self.is_available():
             return
-        
+
         self.ensure_server()
-        
+
         # Clear current playlist
         self.clear_playlist()
-        
+
         # Build list of valid tracks
         valid_tracks = []
         original_to_valid_index = {}
@@ -703,7 +723,11 @@ class MocController:
 
         # Start playback if requested
         if start_playback:
-            valid_index = original_to_valid_index.get(current_index, -1) if 0 <= current_index < len(tracks) else -1
+            valid_index = (
+                original_to_valid_index.get(current_index, -1)
+                if 0 <= current_index < len(tracks)
+                else -1
+            )
             if 0 <= valid_index < len(valid_tracks):
                 track, abs_path = valid_tracks[valid_index]
                 if abs_path:

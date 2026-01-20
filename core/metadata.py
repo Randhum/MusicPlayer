@@ -20,6 +20,7 @@ from mutagen.oggvorbis import OggVorbis
 
 # GStreamer for video/MP4 metadata extraction
 import gi
+
 gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
 from gi.repository import Gst, GstPbutils
@@ -66,7 +67,7 @@ class TrackMetadata:
         Supports multiple audio formats (MP3, FLAC, MP4, OGG) and extracts
         common metadata fields including title, artist, album, track number,
         duration, and album art.
-        
+
         For video files (MP4, MKV, etc.), uses GStreamer discoverer which
         handles video containers more reliably than mutagen.
         """
@@ -76,7 +77,7 @@ class TrackMetadata:
             if self._extract_metadata_gstreamer():
                 return  # GStreamer succeeded
             # Fall through to try mutagen as backup
-        
+
         try:
             audio_file = File(self.file_path)
             if audio_file is None:
@@ -192,7 +193,9 @@ class TrackMetadata:
             self.album_art_path = self._extract_album_art(audio_file)
 
         except Exception as e:
-            logger.debug("Mutagen failed for %s: %s, trying GStreamer", self.file_path, e)
+            logger.debug(
+                "Mutagen failed for %s: %s, trying GStreamer", self.file_path, e
+            )
             # Try GStreamer as fallback
             if not self._extract_metadata_gstreamer():
                 logger.warning("Could not extract metadata from %s", self.file_path)
@@ -205,76 +208,76 @@ class TrackMetadata:
     def _extract_metadata_gstreamer(self) -> bool:
         """
         Extract metadata using GStreamer discoverer.
-        
+
         This is more reliable for video containers (MP4, MKV, etc.) that
         mutagen sometimes fails to parse correctly.
-        
+
         Returns:
             True if metadata was successfully extracted, False otherwise
         """
         try:
             # Create a discoverer with 5 second timeout
             discoverer = GstPbutils.Discoverer.new(5 * Gst.SECOND)
-            
+
             # Convert file path to URI
             file_path = Path(self.file_path).resolve()
             uri = file_path.as_uri()
-            
+
             # Discover the file
             info = discoverer.discover_uri(uri)
-            
+
             if info is None:
                 return False
-            
+
             # Extract duration (in nanoseconds, convert to seconds)
             duration_ns = info.get_duration()
             if duration_ns > 0:
                 self.duration = duration_ns / Gst.SECOND
-            
+
             # Get tags
             tags = info.get_tags()
             if tags is None:
                 # No tags but we got duration - partial success
                 return self.duration is not None
-            
+
             # Extract common metadata from GStreamer tags
             # Title
             success, title = tags.get_string("title")
             if success and title:
                 self.title = title
-            
+
             # Artist
             success, artist = tags.get_string("artist")
             if success and artist:
                 self.artist = artist
-            
+
             # Album
             success, album = tags.get_string("album")
             if success and album:
                 self.album = album
-            
+
             # Album artist
             success, album_artist = tags.get_string("album-artist")
             if success and album_artist:
                 self.album_artist = album_artist
-            
+
             # Genre
             success, genre = tags.get_string("genre")
             if success and genre:
                 self.genre = genre
-            
+
             # Track number
             success, track_num = tags.get_uint("track-number")
             if success and track_num > 0:
                 self.track_number = track_num
-            
+
             # Year/Date - try multiple tag names
             for date_tag in ["date-time", "date"]:
                 success, date_val = tags.get_date_time(date_tag)
                 if success and date_val:
                     self.year = str(date_val.get_year())
                     break
-            
+
             # Try to extract album art (image tag)
             sample = tags.get_sample("image")
             if sample:
@@ -288,12 +291,14 @@ class TrackMetadata:
                                 self.album_art_path = art_path
                         finally:
                             buffer.unmap(map_info)
-            
+
             logger.debug("GStreamer extracted metadata for %s", self.file_path)
             return True
-            
+
         except Exception as e:
-            logger.debug("GStreamer metadata extraction failed for %s: %s", self.file_path, e)
+            logger.debug(
+                "GStreamer metadata extraction failed for %s: %s", self.file_path, e
+            )
             return False
 
     def _get_tag_generic(self, audio_file: File, tag_keys: list[str]) -> Optional[str]:
@@ -450,19 +455,25 @@ class TrackMetadata:
                             # Skip picture type (4 bytes)
                             offset += 4
                             # Read MIME length (4 bytes, big-endian)
-                            mime_len = struct.unpack(">I", decoded[offset : offset + 4])[0]
+                            mime_len = struct.unpack(
+                                ">I", decoded[offset : offset + 4]
+                            )[0]
                             offset += 4
                             # Skip MIME string
                             offset += mime_len
                             # Read description length (4 bytes, big-endian)
-                            desc_len = struct.unpack(">I", decoded[offset : offset + 4])[0]
+                            desc_len = struct.unpack(
+                                ">I", decoded[offset : offset + 4]
+                            )[0]
                             offset += 4
                             # Skip description
                             offset += desc_len
                             # Skip width, height, depth, colors (16 bytes total)
                             offset += 16
                             # Read data length (4 bytes, big-endian)
-                            data_len = struct.unpack(">I", decoded[offset : offset + 4])[0]
+                            data_len = struct.unpack(
+                                ">I", decoded[offset : offset + 4]
+                            )[0]
                             offset += 4
 
                             # Extract image data

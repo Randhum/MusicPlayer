@@ -48,7 +48,9 @@ class Config:
         # XDG Base Directory paths
         self.config_home = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
         self.cache_home = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache"))
-        self.data_home = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+        self.data_home = Path(
+            os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")
+        )
 
         # Application-specific directories
         self.app_name = "musicplayer"
@@ -166,7 +168,9 @@ class Config:
             logger = get_logger(__name__)
             logger.error("Failed to save config: %s", e, exc_info=True)
 
-    def get(self, section: str, key: str, fallback: Optional[str] = None) -> Optional[str]:
+    def get(
+        self, section: str, key: str, fallback: Optional[str] = None
+    ) -> Optional[str]:
         """Get a configuration value."""
         return self.config.get(section, key, fallback=fallback)
 
@@ -196,7 +200,9 @@ class Config:
         """Get a float configuration value."""
         return self.config.getfloat(section, key, fallback=fallback)
 
-    def get_path(self, section: str, key: str, fallback: Optional[Path] = None) -> Optional[Path]:
+    def get_path(
+        self, section: str, key: str, fallback: Optional[Path] = None
+    ) -> Optional[Path]:
         """Get a path configuration value."""
         value = self.get(section, key)
         if value:
@@ -204,7 +210,11 @@ class Config:
         return fallback
 
     def get_list(
-        self, section: str, key: str, separator: str = ":", fallback: Optional[list[str]] = None
+        self,
+        section: str,
+        key: str,
+        separator: str = ":",
+        fallback: Optional[list[str]] = None,
     ) -> list[str]:
         """
         Get a list configuration value (colon or semicolon separated).
@@ -227,7 +237,9 @@ class Config:
     @property
     def library_index_file(self) -> Path:
         """Get library index file path."""
-        return self.get_path("library", "index_file", self.cache_dir / "library_index.json")
+        return self.get_path(
+            "library", "index_file", self.cache_dir / "library_index.json"
+        )
 
     @property
     def album_art_cache_dir(self) -> Path:
@@ -245,7 +257,9 @@ class Config:
     @property
     def moc_playlist_path(self) -> Path:
         """Get MOC playlist path."""
-        return self.get_path("moc", "playlist_path", Path.home() / ".moc" / "playlist.m3u")
+        return self.get_path(
+            "moc", "playlist_path", Path.home() / ".moc" / "playlist.m3u"
+        )
 
     @property
     def layout_file(self) -> Path:

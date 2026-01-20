@@ -53,7 +53,9 @@ class BluetoothSink:
     PROFILE_INTERFACE = "org.bluez.Profile1"
     PROFILE_MANAGER_INTERFACE = "org.bluez.ProfileManager1"
 
-    def __init__(self, bt_manager: BluetoothManager, event_bus: Optional[EventBus] = None):
+    def __init__(
+        self, bt_manager: BluetoothManager, event_bus: Optional[EventBus] = None
+    ):
         """
         Initialize Bluetooth sink.
 
@@ -107,8 +109,12 @@ class BluetoothSink:
 
         # Subscribe to BT manager events
         if self._event_bus:
-            self._event_bus.subscribe(EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected)
-            self._event_bus.subscribe(EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected)
+            self._event_bus.subscribe(
+                EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected
+            )
+            self._event_bus.subscribe(
+                EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected
+            )
 
     # ========================================================================
     # Security Configuration Methods
@@ -130,7 +136,7 @@ class BluetoothSink:
             if not self._validate_mac_address(normalized):
                 logger.warning("Invalid MAC address format: %s", address)
                 return False
-            
+
             self._trusted_devices.add(normalized)
             logger.info("Added trusted device: %s", normalized)
             return True
@@ -183,10 +189,10 @@ class BluetoothSink:
         """
         if timeout_seconds < 0:
             timeout_seconds = DEFAULT_DISCOVERABLE_TIMEOUT
-        
+
         self._discoverable_timeout = timeout_seconds
         logger.info("Discoverable timeout set to %d seconds", timeout_seconds)
-        
+
         # Update if already discoverable
         if self.is_discoverable:
             self._set_discoverable(True, timeout_seconds)
@@ -204,7 +210,7 @@ class BluetoothSink:
         # If whitelist is empty, all paired devices are authorized
         if not self._trusted_devices:
             return device.paired
-        
+
         # Check whitelist
         address = device.address.upper().strip()
         return address in self._trusted_devices and device.paired
@@ -213,7 +219,8 @@ class BluetoothSink:
     def _validate_mac_address(address: str) -> bool:
         """Validate MAC address format."""
         import re
-        pattern = r'^([0-9A-F]{2}:){5}[0-9A-F]{2}$'
+
+        pattern = r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$"
         return bool(re.match(pattern, address))
 
     def _check_gst_bluez_plugin(self) -> None:
@@ -273,7 +280,9 @@ class BluetoothSink:
             logger.info("GStreamer BlueZ plugin elements not found in registry.")
             logger.info("Note: media-libs/gst-plugins-bluez may use D-Bus integration")
             logger.info("and may not expose traditional GStreamer elements.")
-            logger.info("Bluetooth audio will work via PipeWire/PulseAudio if available.")
+            logger.info(
+                "Bluetooth audio will work via PipeWire/PulseAudio if available."
+            )
             self.gst_bluez_available = False
         except Exception as e:
             logger.error("Error checking GStreamer BlueZ plugin: %s", e, exc_info=True)
@@ -324,7 +333,9 @@ class BluetoothSink:
                 elif audio_system == "pulseaudio":
                     success = self._enable_pulseaudio_sink()
                 else:
-                    logger.warning("No compatible audio system found. Trying basic setup.")
+                    logger.warning(
+                        "No compatible audio system found. Trying basic setup."
+                    )
                     success = self._enable_basic_sink()
 
             if success:
@@ -367,7 +378,9 @@ class BluetoothSink:
                         connected_devices.append(device)
 
             for device in connected_devices:
-                logger.info("Disconnecting device: %s (%s)", device.name, device.address)
+                logger.info(
+                    "Disconnecting device: %s (%s)", device.name, device.address
+                )
 
                 # Notify that audio stream is stopping
                 if self.on_audio_stream_stopped:
@@ -460,12 +473,16 @@ class BluetoothSink:
         """Detect which audio system is running."""
         try:
             # Check for PipeWire first (modern)
-            result = subprocess.run(["pgrep", "-x", "pipewire"], capture_output=True, timeout=2)
+            result = subprocess.run(
+                ["pgrep", "-x", "pipewire"], capture_output=True, timeout=2
+            )
             if result.returncode == 0:
                 return "pipewire"
 
             # Check for PulseAudio
-            result = subprocess.run(["pgrep", "-x", "pulseaudio"], capture_output=True, timeout=2)
+            result = subprocess.run(
+                ["pgrep", "-x", "pulseaudio"], capture_output=True, timeout=2
+            )
             if result.returncode == 0:
                 return "pulseaudio"
 
@@ -491,7 +508,9 @@ class BluetoothSink:
         except Exception as e:
             logger.error("Error setting adapter name: %s", e, exc_info=True)
 
-    def _set_discoverable(self, discoverable: bool, timeout: int = DEFAULT_DISCOVERABLE_TIMEOUT):
+    def _set_discoverable(
+        self, discoverable: bool, timeout: int = DEFAULT_DISCOVERABLE_TIMEOUT
+    ):
         """
         Set the Bluetooth adapter's discoverability.
 
@@ -515,18 +534,32 @@ class BluetoothSink:
                 self.bt_manager.PROPERTIES_INTERFACE,
             )
 
-            props.Set(self.bt_manager.ADAPTER_INTERFACE, "Discoverable", dbus.Boolean(discoverable))
+            props.Set(
+                self.bt_manager.ADAPTER_INTERFACE,
+                "Discoverable",
+                dbus.Boolean(discoverable),
+            )
 
             if discoverable:
                 # Set timeout (0 = indefinite, but we recommend using a timeout for security)
-                props.Set(self.bt_manager.ADAPTER_INTERFACE, "DiscoverableTimeout", dbus.UInt32(timeout))
+                props.Set(
+                    self.bt_manager.ADAPTER_INTERFACE,
+                    "DiscoverableTimeout",
+                    dbus.UInt32(timeout),
+                )
                 if timeout == 0:
-                    logger.warning("Security: Discoverable with no timeout - consider setting a timeout")
+                    logger.warning(
+                        "Security: Discoverable with no timeout - consider setting a timeout"
+                    )
                 else:
                     logger.info("Discoverable for %d seconds", timeout)
 
             self.is_discoverable = discoverable
-            logger.debug("Discoverable: %s (timeout: %ds)", discoverable, timeout if discoverable else 0)
+            logger.debug(
+                "Discoverable: %s (timeout: %ds)",
+                discoverable,
+                timeout if discoverable else 0,
+            )
         except Exception as e:
             logger.error("Error setting discoverable: %s", e, exc_info=True)
 
@@ -543,10 +576,14 @@ class BluetoothSink:
                 self.bt_manager.PROPERTIES_INTERFACE,
             )
 
-            props.Set(self.bt_manager.ADAPTER_INTERFACE, "Pairable", dbus.Boolean(pairable))
+            props.Set(
+                self.bt_manager.ADAPTER_INTERFACE, "Pairable", dbus.Boolean(pairable)
+            )
 
             if pairable and timeout == 0:
-                props.Set(self.bt_manager.ADAPTER_INTERFACE, "PairableTimeout", dbus.UInt32(0))
+                props.Set(
+                    self.bt_manager.ADAPTER_INTERFACE, "PairableTimeout", dbus.UInt32(0)
+                )
 
             logger.debug("Pairable: %s", pairable)
         except Exception as e:
@@ -559,12 +596,16 @@ class BluetoothSink:
             # Just ensure the Bluetooth module is running
 
             # Check if wireplumber is running
-            result = subprocess.run(["pgrep", "-x", "wireplumber"], capture_output=True, timeout=2)
+            result = subprocess.run(
+                ["pgrep", "-x", "wireplumber"], capture_output=True, timeout=2
+            )
 
             if result.returncode != 0:
                 logger.info("wireplumber not running, trying to start...")
                 subprocess.Popen(
-                    ["wireplumber"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    ["wireplumber"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
 
             # PipeWire should now handle A2DP connections automatically
@@ -585,7 +626,9 @@ class BluetoothSink:
                 timeout=5,
             )
             subprocess.run(
-                ["pactl", "load-module", "module-bluetooth-policy"], capture_output=True, timeout=5
+                ["pactl", "load-module", "module-bluetooth-policy"],
+                capture_output=True,
+                timeout=5,
             )
 
             logger.info("PulseAudio sink mode enabled")
@@ -631,7 +674,7 @@ class BluetoothSink:
         """Start periodic connection health checks."""
         if self._health_check_timer_id:
             GLib.source_remove(self._health_check_timer_id)
-        
+
         self._health_check_timer_id = GLib.timeout_add(
             CONNECTION_HEALTH_CHECK_INTERVAL, self._check_connection_health
         )
@@ -660,10 +703,15 @@ class BluetoothSink:
                     # Check A2DP transport state
                     transport_ok = self._check_a2dp_transport(self.connected_device)
                     if not transport_ok:
-                        logger.warning("A2DP transport lost for %s", self.connected_device.name)
+                        logger.warning(
+                            "A2DP transport lost for %s", self.connected_device.name
+                        )
                         # Transport lost but device might still be connected
                         # Try to re-establish transport
-                        GLib.timeout_add(1000, lambda: self._retry_audio_routing(self.connected_device))
+                        GLib.timeout_add(
+                            1000,
+                            lambda: self._retry_audio_routing(self.connected_device),
+                        )
 
                     # Update transport state
                     self._update_transport_state()
@@ -693,7 +741,11 @@ class BluetoothSink:
                     if device_path == self.connected_device.path:
                         new_state = str(transport_props.get("State", ""))
                         if new_state != self._transport_state:
-                            logger.debug("A2DP transport state: %s -> %s", self._transport_state, new_state)
+                            logger.debug(
+                                "A2DP transport state: %s -> %s",
+                                self._transport_state,
+                                new_state,
+                            )
                             self._transport_state = new_state
                         return
 
@@ -705,7 +757,9 @@ class BluetoothSink:
     def _schedule_reconnection(self) -> None:
         """Schedule a reconnection attempt."""
         if self._reconnection_attempts >= MAX_RECONNECTION_ATTEMPTS:
-            logger.warning("Max reconnection attempts reached for %s", self._last_connected_address)
+            logger.warning(
+                "Max reconnection attempts reached for %s", self._last_connected_address
+            )
             self._reconnection_attempts = 0
             return
 
@@ -719,7 +773,9 @@ class BluetoothSink:
         self._reconnection_attempts += 1
         logger.info(
             "Scheduling reconnection attempt %d/%d in %dms",
-            self._reconnection_attempts, MAX_RECONNECTION_ATTEMPTS, RECONNECTION_DELAY
+            self._reconnection_attempts,
+            MAX_RECONNECTION_ATTEMPTS,
+            RECONNECTION_DELAY,
         )
 
         self._reconnection_timer_id = GLib.timeout_add(
@@ -746,7 +802,9 @@ class BluetoothSink:
                 break
 
         if not target_device:
-            logger.warning("Last connected device not found: %s", self._last_connected_address)
+            logger.warning(
+                "Last connected device not found: %s", self._last_connected_address
+            )
             return False
 
         if target_device.connected:
@@ -756,10 +814,16 @@ class BluetoothSink:
 
         # Check if device is authorized
         if not self.is_device_authorized(target_device):
-            logger.warning("Device not authorized for reconnection: %s", target_device.name)
+            logger.warning(
+                "Device not authorized for reconnection: %s", target_device.name
+            )
             return False
 
-        logger.info("Attempting reconnection to %s (%s)", target_device.name, target_device.address)
+        logger.info(
+            "Attempting reconnection to %s (%s)",
+            target_device.name,
+            target_device.address,
+        )
         success = self.bt_manager.connect_device(target_device.path)
 
         if success:
@@ -788,8 +852,11 @@ class BluetoothSink:
 
         # Security: Check if device is authorized
         if self._trusted_devices and not self.is_device_authorized(device):
-            logger.warning("Security: Unauthorized device attempted connection: %s (%s)",
-                          device.name, device.address)
+            logger.warning(
+                "Security: Unauthorized device attempted connection: %s (%s)",
+                device.name,
+                device.address,
+            )
             # Disconnect unauthorized device
             GLib.idle_add(lambda: self.bt_manager.disconnect_device(device.path))
             return
@@ -804,7 +871,9 @@ class BluetoothSink:
         if self.is_sink_enabled:
             self._configure_audio_routing(device)
             if self._event_bus:
-                self._event_bus.publish(EventBus.BT_SINK_DEVICE_CONNECTED, {"device": device})
+                self._event_bus.publish(
+                    EventBus.BT_SINK_DEVICE_CONNECTED, {"device": device}
+                )
 
     def _on_bt_device_disconnected(self, data: Optional[dict]) -> None:
         """Handle Bluetooth device disconnection event from EventBus."""
@@ -812,36 +881,45 @@ class BluetoothSink:
             return
 
         device = data["device"]
-        
+
         with self._state_lock:
-            was_our_device = self.connected_device and self.connected_device.path == device.path
-            
+            was_our_device = (
+                self.connected_device and self.connected_device.path == device.path
+            )
+
             if was_our_device:
                 self.connected_device = None
                 self._transport_state = None
-                
+
                 # Notify that audio stream stopped
                 if self.on_audio_stream_stopped:
                     try:
                         self.on_audio_stream_stopped()
                     except Exception as e:
                         logger.error("Error in audio stream stopped callback: %s", e)
-                
+
                 # If sink mode is still enabled, attempt reconnection
                 if self.is_sink_enabled and self._last_connected_address:
-                    logger.info("Device disconnected unexpectedly, scheduling reconnection: %s", device.name)
+                    logger.info(
+                        "Device disconnected unexpectedly, scheduling reconnection: %s",
+                        device.name,
+                    )
                     self._schedule_reconnection()
 
     def _configure_audio_routing(self, device: BluetoothDevice):
         """Configure audio routing for the connected device."""
         try:
-            logger.info("Configuring audio routing for %s (%s)", device.name, device.address)
+            logger.info(
+                "Configuring audio routing for %s (%s)", device.name, device.address
+            )
 
             # Check if A2DP transport is available
             transport_available = self._check_a2dp_transport(device)
             if not transport_available:
                 logger.warning("A2DP transport not yet available for %s", device.name)
-                logger.info("Audio routing will be configured when A2DP transport becomes active")
+                logger.info(
+                    "Audio routing will be configured when A2DP transport becomes active"
+                )
                 # Try again after a short delay
                 import gi
 
@@ -859,7 +937,9 @@ class BluetoothSink:
 
                 if audio_system == "pipewire":
                     # PipeWire handles routing automatically
-                    logger.info("Audio from %s will be routed via PipeWire", device.name)
+                    logger.info(
+                        "Audio from %s will be routed via PipeWire", device.name
+                    )
                 elif audio_system == "pulseaudio":
                     # Find the Bluetooth source and loopback to ALSA sink
                     self._setup_pulseaudio_routing(device)
@@ -889,7 +969,9 @@ class BluetoothSink:
                     device_path = str(transport_props.get("Device", ""))
                     if device_path == device.path:
                         state = str(transport_props.get("State", ""))
-                        logger.debug("A2DP transport found for %s: state=%s", device.name, state)
+                        logger.debug(
+                            "A2DP transport found for %s: state=%s", device.name, state
+                        )
                         return state in ["idle", "pending", "active"]
             return False
         except Exception as e:
@@ -918,29 +1000,43 @@ class BluetoothSink:
                     if device_path == device.path:
                         state = str(transport_props.get("State", ""))
                         logger.info(
-                            "Terminating A2DP transport for %s (state: %s)", device.name, state
+                            "Terminating A2DP transport for %s (state: %s)",
+                            device.name,
+                            state,
                         )
 
                         # Get the transport interface
                         transport_obj = self.bt_manager.bus.get_object(
                             self.bt_manager.BLUEZ_SERVICE, path
                         )
-                        transport = dbus.Interface(transport_obj, self.MEDIA_TRANSPORT_INTERFACE)
+                        transport = dbus.Interface(
+                            transport_obj, self.MEDIA_TRANSPORT_INTERFACE
+                        )
 
                         # Disconnect the transport
                         try:
                             transport.Disconnect()
-                            logger.info("A2DP transport disconnected for %s", device.name)
+                            logger.info(
+                                "A2DP transport disconnected for %s", device.name
+                            )
                         except dbus.exceptions.DBusException as e:
                             error_name = (
-                                e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                                e.get_dbus_name()
+                                if hasattr(e, "get_dbus_name")
+                                else str(e)
                             )
                             if "org.bluez.Error.NotConnected" not in error_name:
                                 logger.error(
-                                    "Error disconnecting A2DP transport: %s", e, exc_info=True
+                                    "Error disconnecting A2DP transport: %s",
+                                    e,
+                                    exc_info=True,
                                 )
                         except Exception as e:
-                            logger.error("Error disconnecting A2DP transport: %s", e, exc_info=True)
+                            logger.error(
+                                "Error disconnecting A2DP transport: %s",
+                                e,
+                                exc_info=True,
+                            )
 
         except Exception as e:
             logger.error("Error terminating A2DP transport: %s", e, exc_info=True)
@@ -973,14 +1069,19 @@ class BluetoothSink:
             # The audio will be available through the default audio sink
 
         except Exception as e:
-            logger.error("Error setting up GStreamer BlueZ routing: %s", e, exc_info=True)
+            logger.error(
+                "Error setting up GStreamer BlueZ routing: %s", e, exc_info=True
+            )
 
     def _setup_pulseaudio_routing(self, device: BluetoothDevice):
         """Set up PulseAudio loopback from Bluetooth to ALSA."""
         try:
             # Get Bluetooth source
             result = subprocess.run(
-                ["pactl", "list", "sources", "short"], capture_output=True, text=True, timeout=5
+                ["pactl", "list", "sources", "short"],
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
 
             if result.returncode == 0:
@@ -1014,7 +1115,9 @@ class BluetoothSink:
                                         timeout=5,
                                     )
 
-                                    logger.debug("Created loopback: %s -> %s", source, sink)
+                                    logger.debug(
+                                        "Created loopback: %s -> %s", source, sink
+                                    )
                                     return
         except Exception as e:
             logger.error("Error setting up PulseAudio routing: %s", e, exc_info=True)
@@ -1081,7 +1184,9 @@ class BluetoothSink:
                             control_obj = self.bt_manager.bus.get_object(
                                 self.bt_manager.BLUEZ_SERVICE, path
                             )
-                            control = dbus.Interface(control_obj, self.MEDIA_CONTROL_INTERFACE)
+                            control = dbus.Interface(
+                                control_obj, self.MEDIA_CONTROL_INTERFACE
+                            )
 
                             # Map action to AVRCP command method
                             method_map = {
@@ -1107,15 +1212,21 @@ class BluetoothSink:
 
                         except dbus.exceptions.DBusException as e:
                             error_name = (
-                                e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                                e.get_dbus_name()
+                                if hasattr(e, "get_dbus_name")
+                                else str(e)
                             )
                             # Don't log as error - device may not support AVRCP
                             logger.debug(
-                                "AVRCP command %s failed via MediaControl1: %s", action, error_name
+                                "AVRCP command %s failed via MediaControl1: %s",
+                                action,
+                                error_name,
                             )
                             # Continue to try MediaPlayer1 or local control
                         except Exception as e:
-                            logger.debug("Error sending AVRCP command via MediaControl1: %s", e)
+                            logger.debug(
+                                "Error sending AVRCP command via MediaControl1: %s", e
+                            )
                             # Continue to try MediaPlayer1 or local control
 
             # If MediaControl1 not found or failed, try MediaPlayer1 interface
@@ -1129,7 +1240,9 @@ class BluetoothSink:
                             player_obj = self.bt_manager.bus.get_object(
                                 self.bt_manager.BLUEZ_SERVICE, path
                             )
-                            player = dbus.Interface(player_obj, self.MEDIA_PLAYER_INTERFACE)
+                            player = dbus.Interface(
+                                player_obj, self.MEDIA_PLAYER_INTERFACE
+                            )
 
                             # Map action to MediaPlayer1 command method
                             method_map = {
@@ -1154,14 +1267,20 @@ class BluetoothSink:
 
                         except dbus.exceptions.DBusException as e:
                             error_name = (
-                                e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                                e.get_dbus_name()
+                                if hasattr(e, "get_dbus_name")
+                                else str(e)
                             )
                             logger.debug(
-                                "AVRCP command %s failed via MediaPlayer1: %s", action, error_name
+                                "AVRCP command %s failed via MediaPlayer1: %s",
+                                action,
+                                error_name,
                             )
                             continue
                         except Exception as e:
-                            logger.debug("Error sending AVRCP command via MediaPlayer1: %s", e)
+                            logger.debug(
+                                "Error sending AVRCP command via MediaPlayer1: %s", e
+                            )
                             continue
 
             logger.debug(
@@ -1251,12 +1370,15 @@ class BluetoothSink:
 
                         except dbus.exceptions.DBusException as e:
                             error_name = (
-                                e.get_dbus_name() if hasattr(e, "get_dbus_name") else str(e)
+                                e.get_dbus_name()
+                                if hasattr(e, "get_dbus_name")
+                                else str(e)
                             )
                             # Check for specific BlueZ errors
                             if "org.bluez.Error.NotConnected" in error_name:
                                 logger.debug(
-                                    "Transport not connected for %s", self.connected_device.name
+                                    "Transport not connected for %s",
+                                    self.connected_device.name,
                                 )
                             elif "org.bluez.Error.Failed" in error_name:
                                 logger.debug(
@@ -1265,10 +1387,14 @@ class BluetoothSink:
                                     error_name,
                                 )
                             else:
-                                logger.debug("Local playback control failed: %s", error_name)
+                                logger.debug(
+                                    "Local playback control failed: %s", error_name
+                                )
                             return False
                         except Exception as e:
-                            logger.error("Error controlling local playback: %s", e, exc_info=True)
+                            logger.error(
+                                "Error controlling local playback: %s", e, exc_info=True
+                            )
                             return False
 
             logger.debug(
@@ -1295,8 +1421,12 @@ class BluetoothSink:
         return {
             "enabled": self.is_sink_enabled,
             "discoverable": self.is_discoverable,
-            "connected_device": self.connected_device.name if self.connected_device else None,
-            "device_address": self.connected_device.address if self.connected_device else None,
+            "connected_device": (
+                self.connected_device.name if self.connected_device else None
+            ),
+            "device_address": (
+                self.connected_device.address if self.connected_device else None
+            ),
             "bluetooth_powered": self.bt_manager.is_powered(),
             "audio_system": audio_system,
             "gst_bluez_available": self.gst_bluez_available,
@@ -1328,10 +1458,10 @@ class BluetoothSink:
         try:
             # Stop health monitoring
             self._stop_health_monitoring()
-            
+
             # Cancel any pending reconnection
             self._cancel_reconnection()
-            
+
             # Disable sink mode if enabled
             if self.is_sink_enabled:
                 self.disable_sink_mode()
