@@ -596,11 +596,12 @@ rm ~/.config/musicplayer/layout.json
 If tapping or clicking a row in the playlist plays the next track (or 2nd next) instead of the selected one:
 
 **What was fixed:**
-- In GTK4 with a TreeView inside a ScrolledWindow, `get_path_at_pos()` with gesture coordinates may not correctly account for scroll offset
-- The tap/click handler was using stored coordinates which could be incorrect when the view was scrolled
-- Now all handlers (single-tap, context menu) use the TreeView's actual selection (which GTK handles correctly) instead of coordinate-based path lookup
-- This ensures the clicked row is always the one that plays, regardless of scroll position
-- The same fix was applied to the library browser for folder expand/collapse and context menus
+- In GTK4, `GestureDrag` and `GestureClick` have different coordinate behaviors with `TreeView.get_path_at_pos()`
+- `GestureClick` coordinates work correctly with `get_path_at_pos()`, while `GestureDrag` coordinates may be offset
+- Added a `GestureClick` handler for left-clicks that fires BEFORE `GestureDrag.drag-begin`
+- The click handler stores the correctly-identified row index, which `drag-begin` then uses
+- This ensures the clicked row is always the one that plays, regardless of scroll position or gesture timing
+- Context menu positioning also uses `GestureClick` coordinates for accuracy
 
 ### "Move Down in playlist context menu crashes!"
 

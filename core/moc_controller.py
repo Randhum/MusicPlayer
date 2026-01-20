@@ -592,16 +592,6 @@ class MocController:
 
         return tracks
 
-    def _track_to_extinf(self, track: TrackMetadata) -> str:
-        """Convert TrackMetadata to EXTINF line.
-        
-        Format: #EXTINF:duration,title - artist
-        """
-        duration = int(track.duration) if track.duration and track.duration > 0 else -1
-        title = track.title or Path(track.file_path).stem
-        artist = track.artist or "Unknown Artist"
-        return f"#EXTINF:{duration},{title} - {artist}"
-    
     def _extinf_to_metadata(self, extinf_line: str) -> Dict[str, Any]:
         """Parse EXTINF line to extract metadata.
         
@@ -640,147 +630,59 @@ class MocController:
         except Exception:
             return {}
     
-    def _write_m3u_playlist(self, tracks: List[Tuple[Optional[str], str]]) -> bool:
-        """
-        Write tracks to M3U playlist file following the standard format.
-        Uses atomic write (temp file + replace) to handle file locking gracefully.
+    def clear_playlist(self):
+        """Clear MOC's playlist using native command."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--clear")
 
+    def append_to_playlist(self, path: str) -> bool:
+        """
+        Append a file or directory to MOC's playlist using native command.
+        MOC will recursively add all tracks if a directory is given.
+        
         Args:
-            tracks: List of tuples (extinf_line, file_path)
-                - extinf_line: EXTINF metadata line (with #EXTINF: prefix), or None
-                - file_path: File path to write
-
+            path: Path to the file or directory to add.
+            
         Returns:
-            True if successful
+            True if successful.
         """
-        try:
-            self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
-            # Write atomically using temp file (handles file locking gracefully)
-            temp_file = self._playlist_path.with_suffix(".m3u.tmp")
-            with temp_file.open("w", encoding="utf-8") as f:
-                f.write("#EXTM3U\n")
-                for extinf_line, file_path in tracks:
-                    if extinf_line:
-                        f.write(extinf_line + "\n")
-                    f.write(file_path + "\n")
-            # Atomic replace (works even if file is open in another process)
-            temp_file.replace(self._playlist_path)
-            return True
-        except (OSError, PermissionError) as e:
-            logger.warning("Could not write M3U file atomically (may be locked): %s", e)
-            # Try direct write as fallback (might work if lock is brief)
-            try:
-                with self._playlist_path.open("w", encoding="utf-8") as f:
-                    f.write("#EXTM3U\n")
-                    for extinf_line, file_path in tracks:
-                        if extinf_line:
-                            f.write(extinf_line + "\n")
-                        f.write(file_path + "\n")
-                return True
-            except Exception as e2:
-                logger.error("Error writing M3U file: %s", e2, exc_info=True)
-                return False
-        except Exception as e:
-            logger.error("Error writing M3U file: %s", e, exc_info=True)
+        if not self.is_available():
             return False
-
-    def add_track_at_index_m3u(
-        self, track_index: int, file_path: str, extinf_line: Optional[str] = None
-    ) -> bool:
-        """
-        Add a track at a specific index in the M3U playlist file.
-
-        Args:
-            track_index: Index where to insert (0-based)
-            file_path: File path to add
-            extinf_line: Optional EXTINF metadata line (with #EXTINF: prefix)
-
-        Returns:
-            True if successful
-        """
-        parsed_tracks = self._parse_m3u_playlist()
-
-        # Convert to (extinf_line, file_path) format
-        track_list = [(extinf, path) for _, extinf, path in parsed_tracks]
-
-        # Validate and clamp track_index
-        if track_index < 0:
-            track_index = 0
-        if track_index > len(track_list):
-            track_index = len(track_list)
-
-        # Insert new track
-        track_list.insert(track_index, (extinf_line, file_path))
-
-        return self._write_m3u_playlist(track_list)
-
-    def remove_track_at_index_m3u(self, track_index: int) -> bool:
-        """
-        Remove a track at a specific index from the M3U playlist file.
-
-        Args:
-            track_index: Index of track to remove (0-based)
-
-        Returns:
-            True if successful
-        """
-        parsed_tracks = self._parse_m3u_playlist()
-
-        if not (0 <= track_index < len(parsed_tracks)):
+        if not path:
             return False
-
-        # Convert to (extinf_line, file_path) format and remove
-        track_list = [(extinf, path) for _, extinf, path in parsed_tracks]
-        track_list.pop(track_index)
-
-        return self._write_m3u_playlist(track_list)
-
-    def move_track_in_m3u(self, from_index: int, to_index: int) -> bool:
-        """
-        Move a track from one index to another in the M3U playlist file.
-
-        Args:
-            from_index: Current index of the track
-            to_index: Target index for the track
-
-        Returns:
-            True if successful
-        """
-        if from_index == to_index:
-            return True
-
-        parsed_tracks = self._parse_m3u_playlist()
-
-        if not (0 <= from_index < len(parsed_tracks) and 0 <= to_index < len(parsed_tracks)):
+        
+        p = Path(path)
+        if not p.exists():
+            logger.warning("Cannot append - path does not exist: %s", path)
             return False
-
-        # Convert to (extinf_line, file_path) format
-        track_list = [(extinf, path) for _, extinf, path in parsed_tracks]
-
-        # Move the track
-        track = track_list.pop(from_index)
-        track_list.insert(to_index, track)
-
-        return self._write_m3u_playlist(track_list)
-
-    def get_playlist_length_m3u(self) -> int:
-        """Get the number of tracks in the M3U playlist file."""
-        parsed_tracks = self._parse_m3u_playlist()
-        return len(parsed_tracks)
+        
+        self.ensure_server()
+        abs_path = str(p.resolve())
+        result = self._run("--append", abs_path, capture_output=True)
+        return result.returncode == 0
 
     def set_playlist(
         self, tracks: List[TrackMetadata], current_index: int = -1, start_playback: bool = False
     ):
         """
-        Replace MOC's playlist with the given tracks by writing directly to M3U file.
+        Replace MOC's playlist with the given tracks using native MOC commands.
 
         Args:
             tracks: List of tracks to become the new playlist.
             current_index: Index of the track that should start playing (if start_playback is True).
             start_playback: If True and current_index is valid, start playback of that track.
         """
-        # Build track list for M3U file
-        track_list = []
+        if not self.is_available():
+            return
+        
+        self.ensure_server()
+        
+        # Clear current playlist
+        self.clear_playlist()
+        
+        # Build list of valid tracks
         valid_tracks = []
         original_to_valid_index = {}
 
@@ -792,23 +694,20 @@ class MocController:
                 logger.warning("Track file does not exist: %s", track.file_path)
                 continue
             abs_path = str(file_path.resolve())
-            extinf_line = self._track_to_extinf(track)
-            track_list.append((extinf_line, abs_path))
             original_to_valid_index[orig_idx] = len(valid_tracks)
-            valid_tracks.append(track)
+            valid_tracks.append((track, abs_path))
 
-        # Write playlist to M3U file
-        if not self._write_m3u_playlist(track_list):
-            logger.error("Failed to write playlist to M3U file")
-            return
+        # Append all tracks using native MOC command
+        for track, abs_path in valid_tracks:
+            self._run("--append", abs_path)
 
         # Start playback if requested
-        if start_playback and self.is_available():
+        if start_playback:
             valid_index = original_to_valid_index.get(current_index, -1) if 0 <= current_index < len(tracks) else -1
             if 0 <= valid_index < len(valid_tracks):
-                track = valid_tracks[valid_index]
-                if track and track.file_path:
-                    self.play_file(track.file_path)
+                track, abs_path = valid_tracks[valid_index]
+                if abs_path:
+                    self.play_file(abs_path)
 
     def play_file(self, file_path: str):
         """Play a specific file via MOC, keeping the playlist intact."""

@@ -122,6 +122,12 @@ class PlaylistView(Gtk.Box):
         right_click_gesture.connect("pressed", self._on_right_click)
         self.tree_view.add_controller(right_click_gesture)
 
+        # Add left-click gesture for selection (works better than GestureDrag for coordinates)
+        left_click_gesture = Gtk.GestureClick()
+        left_click_gesture.set_button(1)  # Left mouse button
+        left_click_gesture.connect("pressed", self._on_left_click_pressed)
+        self.tree_view.add_controller(left_click_gesture)
+
         # Add drag gesture for long-press-to-reorder
         drag_gesture = Gtk.GestureDrag()
         drag_gesture.set_button(1)  # Left mouse button
@@ -129,6 +135,9 @@ class PlaylistView(Gtk.Box):
         drag_gesture.connect("drag-update", self._on_drag_update)
         drag_gesture.connect("drag-end", self._on_drag_end)
         self.tree_view.add_controller(drag_gesture)
+        
+        # Store selected row from left-click for use in drag-begin
+        self._click_selected_index = -1
 
         # Playback state
         self._playback_in_progress = False  # Guard to prevent concurrent playback
@@ -136,7 +145,7 @@ class PlaylistView(Gtk.Box):
 
         # Single-tap behavior configuration
         # True = single tap plays track, False = single tap only selects (double-tap to play)
-        self._single_tap_plays = True
+        self._single_tap_plays = False
 
         # Tap/double-tap detection state
         self._tap_pending = False  # True when waiting for potential double-tap
@@ -156,6 +165,12 @@ class PlaylistView(Gtk.Box):
         self.selected_index = -1
         self._menu_showing = False  # Flag to prevent multiple menus
         self.set_vexpand(True)  # Expand to fill available vertical space
+        
+        # Blinking highlight for current playing track when another row is selected
+        self._blink_timeout_id = None
+        self._blink_state = False  # Toggle state for blinking
+        self._row_css_classes = {}  # Track CSS classes per row path
+        self._setup_blinking_highlight()
 
         # Columns with touch-friendly padding
         col_index = Gtk.TreeViewColumn("#")
@@ -163,6 +178,7 @@ class PlaylistView(Gtk.Box):
         renderer_index.set_padding(8, 12)  # Add padding for touch-friendliness
         col_index.pack_start(renderer_index, True)
         col_index.add_attribute(renderer_index, "text", 0)
+        col_index.set_cell_data_func(renderer_index, self._cell_data_func)
         col_index.set_min_width(50)
         col_index.set_resizable(False)
         self.tree_view.append_column(col_index)
@@ -172,6 +188,7 @@ class PlaylistView(Gtk.Box):
         renderer_title.set_padding(8, 12)  # Add padding for touch-friendliness
         col_title.pack_start(renderer_title, True)
         col_title.add_attribute(renderer_title, "text", 1)
+        col_title.set_cell_data_func(renderer_title, self._cell_data_func)
         col_title.set_expand(True)
         col_title.set_resizable(True)
         self.tree_view.append_column(col_title)
@@ -181,6 +198,7 @@ class PlaylistView(Gtk.Box):
         renderer_artist.set_padding(8, 12)  # Add padding for touch-friendliness
         col_artist.pack_start(renderer_artist, True)
         col_artist.add_attribute(renderer_artist, "text", 2)
+        col_artist.set_cell_data_func(renderer_artist, self._cell_data_func)
         col_artist.set_expand(True)
         col_artist.set_resizable(True)
         self.tree_view.append_column(col_artist)
@@ -190,6 +208,7 @@ class PlaylistView(Gtk.Box):
         renderer_duration.set_padding(8, 12)  # Add padding for touch-friendliness
         col_duration.pack_start(renderer_duration, True)
         col_duration.add_attribute(renderer_duration, "text", 3)
+        col_duration.set_cell_data_func(renderer_duration, self._cell_data_func)
         col_duration.set_min_width(80)
         col_duration.set_resizable(False)
         self.tree_view.append_column(col_duration)
@@ -198,8 +217,7 @@ class PlaylistView(Gtk.Box):
         scrolled.set_vexpand(True)
         self.append(scrolled)
 
-        self._shuffle_enabled: bool = False
-        self._shuffle_queue: List[int] = []  # Queue of shuffled indices for shuffle mode
+        # Shuffle queue is managed by PlaybackController, not here
 
         # Subscribe to playlist changes
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
@@ -227,19 +245,15 @@ class PlaylistView(Gtk.Box):
 
     def get_next_track(self) -> Optional[TrackMetadata]:
         """
-        Get the next track from AppState.
-
-        If shuffle is enabled, returns a random unplayed track.
-        If all tracks have been played, resets and starts over.
+        Get the next track from AppState (sequential only).
+        
+        Note: Shuffle logic is handled by PlaybackController, not here.
         """
-        if self._shuffle_enabled:
-            return self._get_next_random_track()
-        else:
-            playlist = self._state.playlist
-            current_index = self._state.current_index
-            if current_index < len(playlist) - 1:
-                return playlist[current_index + 1]
-            return None
+        playlist = self._state.playlist
+        current_index = self._state.current_index
+        if current_index < len(playlist) - 1:
+            return playlist[current_index + 1]
+        return None
 
     def get_previous_track(self) -> Optional[TrackMetadata]:
         """
@@ -256,68 +270,12 @@ class PlaylistView(Gtk.Box):
 
     def set_shuffle_enabled(self, enabled: bool):
         """Enable or disable shuffle mode."""
-        self._shuffle_enabled = enabled
-        # Regenerate shuffle queue when toggling shuffle
-        self._regenerate_shuffle_queue()
+        self._state.set_shuffle_enabled(enabled)
+        # Shuffle queue is managed by PlaybackController
 
     def get_shuffle_enabled(self) -> bool:
         """Get current shuffle state."""
-        return self._shuffle_enabled
-
-    def _get_next_random_track(self) -> Optional[TrackMetadata]:
-        """
-        Get the next random track from the shuffle queue.
-
-        Uses a shuffled queue of indices. When the queue is empty, regenerates it.
-        This ensures each track is played exactly once before repeating.
-        """
-        tracks = self._state.playlist
-        if not tracks:
-            return None
-
-        # If queue is empty, regenerate it
-        if not self._shuffle_queue:
-            self._regenerate_shuffle_queue()
-
-        # If still empty (shouldn't happen, but handle edge case)
-        if not self._shuffle_queue:
-            return None
-
-        # Pop the next index from the queue
-        new_index = self._shuffle_queue.pop(0)
-        self._state.set_current_index(new_index)
-        return tracks[new_index]
-
-    def _regenerate_shuffle_queue(self):
-        """
-        Regenerate the shuffle queue with all playlist indices in random order.
-
-        This is called when:
-        - Shuffle is enabled
-        - Playlist is modified (add, remove, clear, load)
-        - Queue is exhausted
-        """
-        import random
-
-        tracks = self._state.playlist
-        if not tracks:
-            self._shuffle_queue = []
-            return
-
-        # Create a list of all indices
-        indices = list(range(len(tracks)))
-
-        # Shuffle the list
-        random.shuffle(indices)
-
-        # If there's a current track, remove it from the queue to avoid immediate repeat
-        current_idx = self._state.current_index
-        if 0 <= current_idx < len(tracks) and current_idx in indices:
-            indices.remove(current_idx)
-            # Add it at the end so it plays eventually, but not next
-            indices.append(current_idx)
-
-        self._shuffle_queue = indices
+        return self._state.shuffle_enabled
 
     # ============================================================================
     # Public API - State Updates
@@ -332,9 +290,7 @@ class PlaylistView(Gtk.Box):
         """
         # Update state (this will trigger events)
         self._state.set_playlist(tracks, current_index)
-        # Regenerate shuffle queue when playlist changes
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
+        # Shuffle queue regeneration is handled by PlaybackController
         self._update_view()
 
     def set_current_index(self, index: int):
@@ -346,9 +302,7 @@ class PlaylistView(Gtk.Box):
         """
         old_index = self._state.current_index
         self._state.set_current_index(index)
-        # Remove from shuffle queue if present (to avoid playing it again before queue regenerates)
-        if self._shuffle_enabled and index in self._shuffle_queue:
-            self._shuffle_queue.remove(index)
+        # Shuffle queue management is handled by PlaybackController
         self._update_selection()
         # Emit signal for external coordination (if needed)
         if old_index != index:
@@ -363,8 +317,7 @@ class PlaylistView(Gtk.Box):
         self._state.add_track(track, position)
         # Also update playlist_manager for persistence
         self.playlist_manager.add_track(track, position)
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
+        # Shuffle queue regeneration is handled by PlaybackController
         self._update_view()
 
     def add_tracks(self, tracks: List[TrackMetadata]):
@@ -372,31 +325,28 @@ class PlaylistView(Gtk.Box):
         for track in tracks:
             self._state.add_track(track)
             self.playlist_manager.add_track(track)
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
+        # Shuffle queue regeneration is handled by PlaybackController
         self._update_view()
 
     def remove_track(self, index: int):
         """Remove a track from the playlist (updates AppState and UI)."""
         self._state.remove_track(index)
         self.playlist_manager.remove_track(index)
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
+        # Shuffle queue regeneration is handled by PlaybackController
         self._update_view()
 
     def move_track(self, from_index: int, to_index: int):
         """Move a track in the playlist (updates AppState and UI)."""
         self._state.move_track(from_index, to_index)
         self.playlist_manager.move_track(from_index, to_index)
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
+        # Shuffle queue regeneration is handled by PlaybackController
         self._update_view()
 
     def clear(self):
         """Clear the playlist (updates AppState and UI)."""
-        self._shuffle_queue.clear()  # Clear shuffle queue
         self._state.clear_playlist()
         self.playlist_manager.clear()
+        # Shuffle queue clearing is handled by PlaybackController
         self._update_view()
     
     def _handle_clear(self):
@@ -414,7 +364,10 @@ class PlaylistView(Gtk.Box):
         """Load a saved playlist (updates data and UI)."""
         result = self.playlist_manager.load_playlist(name)
         if result:
-            self._apply_playlist_change(lambda: None)  # Already loaded, just sync
+            # Sync loaded playlist from PlaylistManager to AppState and UI
+            tracks = self.playlist_manager.get_playlist()
+            current_index = self.playlist_manager.get_current_index()
+            self.set_playlist(tracks, current_index)
         return result
 
     def list_playlists(self) -> List[str]:
@@ -463,6 +416,58 @@ class PlaylistView(Gtk.Box):
         # play_track_at_index will set the index and publish action
         self.play_track_at_index(0)
 
+    def add_folder(self, folder_path: str) -> None:
+        """
+        Add a folder to the playlist.
+        
+        If MOC is active, uses MOC's native folder append (recursively adds all tracks).
+        Otherwise, falls back to collecting tracks and adding individually.
+        
+        Args:
+            folder_path: Path to the folder to add.
+        """
+        if self._state.active_backend == "moc":
+            # Use MOC's native folder append via event
+            self._events.publish(EventBus.ACTION_APPEND_FOLDER, {"folder_path": folder_path})
+        else:
+            # Fallback: collect tracks and add individually
+            folder = Path(folder_path)
+            if not folder.exists() or not folder.is_dir():
+                return
+            tracks = []
+            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
+                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+            if tracks:
+                self.add_tracks(tracks)
+
+    def replace_and_play_folder(self, folder_path: str) -> None:
+        """
+        Replace playlist with folder contents and play first track.
+        
+        If MOC is active, uses MOC's native folder append (recursively adds all tracks).
+        Otherwise, falls back to collecting tracks and adding individually.
+        
+        Args:
+            folder_path: Path to the folder to play.
+        """
+        self.clear()
+        if self._state.active_backend == "moc":
+            # Use MOC's native folder append via event
+            self._events.publish(EventBus.ACTION_APPEND_FOLDER, {"folder_path": folder_path})
+            # Wait a moment for MOC to process, then play first track
+            GLib.timeout_add(300, lambda: self.play_track_at_index(0) or False)
+        else:
+            # Fallback: collect tracks and add individually
+            folder = Path(folder_path)
+            if not folder.exists() or not folder.is_dir():
+                return
+            tracks = []
+            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
+                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+            if tracks:
+                self.add_tracks(tracks)
+                self.play_track_at_index(0)
+
     # ============================================================================
     # UI Configuration
     # ============================================================================
@@ -471,41 +476,13 @@ class PlaylistView(Gtk.Box):
         """Show or hide the Refresh button based on whether MOC mode is active."""
         self.refresh_button.set_visible(enabled)
 
-    def set_single_tap_plays(self, enabled: bool):
-        """
-        Configure single-tap behavior.
-        
-        Args:
-            enabled: If True, single tap plays the track (after double-tap detection window).
-                     If False, single tap only selects (use double-tap to play).
-        """
-        self._single_tap_plays = enabled
-
-    def get_single_tap_plays(self) -> bool:
-        """Get current single-tap behavior setting."""
-        return self._single_tap_plays
-
-    def set_double_tap_window(self, ms: int):
-        """
-        Configure the double-tap detection window.
-        
-        Args:
-            ms: Time in milliseconds to wait for a second tap (default: 300).
-        """
-        self._double_tap_window = max(100, min(ms, 1000))  # Clamp to 100-1000ms
-
-    def get_double_tap_window(self) -> int:
-        """Get current double-tap detection window in milliseconds."""
-        return self._double_tap_window
-
     # ============================================================================
     # Internal Methods
     # ============================================================================
 
     def _sync_from_state(self):
         """Sync the view from AppState."""
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
+        # Shuffle queue is managed by PlaybackController
         self._update_view()
     
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
@@ -513,9 +490,7 @@ class PlaylistView(Gtk.Box):
         if data:
             tracks = data.get("tracks", [])
             index = data.get("index", -1)
-            # Regenerate shuffle queue if shuffle is enabled
-            if self._shuffle_enabled:
-                self._regenerate_shuffle_queue()
+            # Shuffle queue regeneration is handled by PlaybackController
             self._update_view()
     
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
@@ -551,17 +526,124 @@ class PlaylistView(Gtk.Box):
         self._update_button_states()
 
     def _update_selection(self):
-        """Update the selection to highlight current track."""
+        """Update the selection to highlight current track or show blinking highlight."""
         selection = self.tree_view.get_selection()
-        selection.unselect_all()
-
         tracks = self._state.playlist
         current_index = self._state.current_index
-        if 0 <= current_index < len(tracks):
+        
+        # Get currently selected row (if any)
+        model, tree_iter = selection.get_selected()
+        selected_path = None
+        selected_index = -1
+        if tree_iter:
+            selected_path = model.get_path(tree_iter)
+            indices = selected_path.get_indices()
+            if indices:
+                selected_index = indices[0]
+        
+        # If current playing track is selected, show normal selection
+        if selected_index == current_index and current_index >= 0:
+            # Current track is selected - normal selection, no blinking
+            self._stop_blinking_highlight()
+            # Ensure it's selected in the selection model
             path = Gtk.TreePath.new_from_indices([current_index])
             selection.select_path(path)
             self.tree_view.set_cursor(path, None, False)
+        elif current_index >= 0 and 0 <= current_index < len(tracks) and selected_index >= 0 and selected_index != current_index:
+            # Another row is selected - show blinking blue highlight on current track
+            current_path = Gtk.TreePath.new_from_indices([current_index])
+            self._start_blinking_highlight(current_path)
+            
+            # Keep the user's selection visible
+            if selected_path:
+                self.tree_view.set_cursor(selected_path, None, False)
+        elif current_index >= 0 and 0 <= current_index < len(tracks):
+            # No other row selected - select current track normally
+            self._stop_blinking_highlight()
+            path = Gtk.TreePath.new_from_indices([current_index])
+            selection.select_path(path)
+            self.tree_view.set_cursor(path, None, False)
+        else:
+            # No current track - stop blinking
+            self._stop_blinking_highlight()
+            
+        # Scroll to current track if it exists
+        if 0 <= current_index < len(tracks):
+            path = Gtk.TreePath.new_from_indices([current_index])
             self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
+
+    def _setup_blinking_highlight(self):
+        """Setup blinking highlight system."""
+        self._blink_path = None  # Track which path is blinking
+    
+    def _cell_data_func(self, column, cell, model, tree_iter, data):
+        """Cell data function to apply background color for current playing track."""
+        # Get row index from model
+        path = model.get_path(tree_iter)
+        indices = path.get_indices()
+        if not indices:
+            return
+        row_index = indices[0]
+        
+        # Get current playing index and selected index
+        current_index = self._state.current_index
+        selection = self.tree_view.get_selection()
+        model_sel, tree_iter_sel = selection.get_selected()
+        selected_index = -1
+        if tree_iter_sel:
+            path_sel = model_sel.get_path(tree_iter_sel)
+            indices_sel = path_sel.get_indices()
+            if indices_sel:
+                selected_index = indices_sel[0]
+        
+        # Apply background color if this is the current playing track and another row is selected
+        if row_index == current_index and current_index >= 0 and selected_index != current_index and selected_index >= 0:
+            # This is the current playing track and another row is selected - apply blinking blue
+            if self._blink_state:
+                # Brighter blue (blink on)
+                cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.6))
+            else:
+                # Dimmer blue (blink off)
+                cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.3))
+        else:
+            # Clear background
+            cell.set_property("cell-background-rgba", None)
+    
+    def _start_blinking_highlight(self, path: Gtk.TreePath):
+        """Start blinking highlight on the given path."""
+        # Stop any existing blinking
+        self._stop_blinking_highlight()
+        
+        self._blink_path = path
+        self._blink_state = True
+        
+        # Trigger redraw to apply initial state
+        self.tree_view.queue_draw()
+        
+        # Start timeout for blinking (500ms interval)
+        self._blink_timeout_id = GLib.timeout_add(500, self._blink_toggle)
+    
+    def _stop_blinking_highlight(self):
+        """Stop blinking highlight."""
+        if self._blink_timeout_id:
+            GLib.source_remove(self._blink_timeout_id)
+            self._blink_timeout_id = None
+        
+        if self._blink_path:
+            self._blink_path = None
+        
+        self._blink_state = False
+        # Trigger redraw to clear highlight
+        self.tree_view.queue_draw()
+    
+    def _blink_toggle(self):
+        """Toggle blink state - called by timeout."""
+        if self._blink_path:
+            self._blink_state = not self._blink_state
+            # Trigger redraw to update cell backgrounds
+            self.tree_view.queue_draw()
+            return True  # Continue timeout
+        return False  # Stop timeout
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration in seconds to MM:SS."""
@@ -619,6 +701,23 @@ class PlaylistView(Gtk.Box):
         if not self._menu_showing:
             self._show_context_menu_at_position(x, y)
 
+    def _on_left_click_pressed(self, gesture, n_press, x, y):
+        """Handle left-click press - select the row at the click position."""
+        # Use get_path_at_pos with the click coordinates
+        # GestureClick coordinates work correctly with TreeView
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        
+        if path_info:
+            path = path_info[0]
+            indices = path.get_indices()
+            if indices:
+                self._click_selected_index = indices[0]
+                # Set cursor to visually select the row
+                self.tree_view.set_cursor(path, None, False)
+                return
+        
+        self._click_selected_index = -1
+
     def _on_drag_begin(self, gesture, start_x, start_y):
         """Handle drag begin - record start time for long-press detection."""
         self._drag_start_time = GLib.get_monotonic_time()
@@ -626,18 +725,22 @@ class PlaylistView(Gtk.Box):
         self._drag_source_index = -1
         self._drag_target_index = -1
         
-        # Get the row at the press location and select it
-        # Using get_path_at_pos immediately (not in a timeout) with set_cursor is safe
+        # Use the index from _on_left_click_pressed which fires before drag-begin
+        # GestureClick coordinates work correctly with TreeView's get_path_at_pos
+        if self._click_selected_index >= 0:
+            self._drag_source_index = self._click_selected_index
+            self._drag_target_index = self._click_selected_index
+            return
+        
+        # Fallback: try get_path_at_pos with drag coordinates
         path_info = self.tree_view.get_path_at_pos(int(start_x), int(start_y))
         if path_info:
             path = path_info[0]
-            # Select the row to ensure GTK selection matches the pressed row
-            self.tree_view.set_cursor(path, None, False)
-            # Get index directly from path (more reliable than querying selection)
             indices = path.get_indices()
             if indices:
                 self._drag_source_index = indices[0]
                 self._drag_target_index = self._drag_source_index
+                self.tree_view.set_cursor(path, None, False)
 
     def _on_drag_update(self, gesture, offset_x, offset_y):
         """Handle drag update - enter drag mode if held long enough and moved."""
@@ -654,7 +757,11 @@ class PlaylistView(Gtk.Box):
         # Enter drag mode if: held for long-press threshold AND moved significantly
         if not self._drag_mode and time_held >= self._long_press_threshold and movement > 10:
             self._drag_mode = True
-            self.tree_view.add_css_class("dragging")
+            try:
+                self.tree_view.add_css_class("dragging")
+            except (AttributeError, RuntimeError):
+                # Widget might be destroyed or removed from parent
+                pass
 
         # If in drag mode, track where the row would be dropped
         if not self._drag_mode:
@@ -665,36 +772,21 @@ class PlaylistView(Gtk.Box):
         if not success:
             return
 
+        current_x = start_x + offset_x
         current_y = start_y + offset_y
 
-        # Find the row at the current position using tree view allocation
-        playlist = self._state.playlist
-        if not playlist:
-            return
-
-        # Calculate target row based on y position
-        allocation = self.tree_view.get_allocation()
-        if allocation.height <= 0:
-            return
-
-        row_count = len(playlist)
-        if row_count == 0:
-            return
-
-        # Account for header height (approximately 30px)
-        header_height = 30
-        content_height = allocation.height - header_height
-        row_height = content_height / max(row_count, 1)
-
-        # Calculate target index from y position
-        adjusted_y = current_y - header_height
-        target_index = int(adjusted_y / row_height) if row_height > 0 else 0
-        target_index = max(0, min(target_index, row_count - 1))
-
-        if target_index != self._drag_target_index:
-            self._drag_target_index = target_index
-            # Update visual feedback - highlight target row
-            self._highlight_drop_target(target_index)
+        # Try get_path_at_pos first (works for visible content)
+        path_info = self.tree_view.get_path_at_pos(int(current_x), int(current_y))
+        
+        if path_info:
+            path = path_info[0]
+            indices = path.get_indices()
+            if indices:
+                target_index = indices[0]
+                if target_index != self._drag_target_index:
+                    self._drag_target_index = target_index
+                    # Update visual feedback - highlight target row
+                    self._highlight_drop_target(target_index)
 
     def _on_drag_end(self, gesture, offset_x, offset_y):
         """Handle drag end - play track (tap), show menu (long-press), or reorder (drag)."""
@@ -708,7 +800,11 @@ class PlaylistView(Gtk.Box):
 
         # Remove visual feedback
         if was_drag_mode:
-            self.tree_view.remove_css_class("dragging")
+            try:
+                self.tree_view.remove_css_class("dragging")
+            except (AttributeError, RuntimeError):
+                # Widget might be destroyed or removed from parent
+                pass
             self._clear_drop_highlight()
 
         # Reset drag state first
@@ -716,6 +812,7 @@ class PlaylistView(Gtk.Box):
         self._drag_source_index = -1
         self._drag_target_index = -1
         self._drag_start_time = 0
+        self._click_selected_index = -1  # Reset click selection
 
         # Determine what action to take based on time held and movement
         tap_threshold = 200000  # 200ms in microseconds - quick tap
@@ -747,9 +844,16 @@ class PlaylistView(Gtk.Box):
                 self.move_track(source_idx, target_idx)
         elif time_held >= long_press_time and movement < movement_threshold:
             # Long press without significant movement - show context menu
-            success, start_x, start_y = gesture.get_start_point()
-            if success and not self._menu_showing:
-                self._show_context_menu_at_position(start_x, start_y)
+            # Use selection-based lookup (not coordinates) since GestureDrag coords don't work with get_path_at_pos
+            if source_idx >= 0 and not self._menu_showing:
+                self.selected_index = source_idx
+                # Get coordinates for menu positioning (use start point from gesture)
+                success, start_x, start_y = gesture.get_start_point()
+                if success:
+                    self._show_context_menu(start_x, start_y)
+                else:
+                    # Fallback: use center of selected row
+                    self._show_context_menu(0, 0)
 
     def _highlight_drop_target(self, target_index: int):
         """Highlight the row where the dragged item will be dropped."""
@@ -764,17 +868,20 @@ class PlaylistView(Gtk.Box):
         self._update_selection()
 
     def _show_context_menu_at_position(self, x, y):
-        """Show context menu at the given position."""
-        # Use selection instead of coordinate-based path lookup
-        # GTK handles selection correctly (accounting for scroll offset),
-        # while get_path_at_pos with gesture coordinates may have offset issues
-        selection = self.tree_view.get_selection()
-        model, tree_iter = selection.get_selected()
-        if tree_iter:
-            path = model.get_path(tree_iter)
+        """Show context menu at the given position.
+        
+        Note: This method works correctly with GestureClick coordinates.
+        For GestureDrag (long-press), use selection-based lookup instead.
+        """
+        # GestureClick coordinates work correctly with TreeView's get_path_at_pos
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        if path_info:
+            path = path_info[0]
             indices = path.get_indices()
             if indices:
                 self.selected_index = indices[0]
+                # Also select the row visually
+                self.tree_view.set_cursor(path, None, False)
             else:
                 self.selected_index = -1
         else:
