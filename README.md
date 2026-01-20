@@ -604,6 +604,18 @@ If tapping or clicking a row in the playlist plays the wrong track:
 - File I/O for playlist persistence is deferred to avoid blocking the UI thread
 - Drop target visualization shows a dark highlight on the target row during drag
 
+### "Can't receive value from the server!" fatal error during drag operations
+
+If the application crashes with a GTK fatal error when dragging playlist items:
+
+**What was fixed:**
+- Removed selection model updates during drag operations (selection updates now only happen after drag completes)
+- Added comprehensive error handling for all widget property accesses during drag (get_visible_range, get_cell_area, get_allocation, get_vadjustment)
+- Added bounds checking and validation for all index calculations
+- Enhanced error handling in drag begin, update, and end handlers to prevent fatal crashes
+- All widget property accesses are now protected with try/except blocks to handle invalid widget states gracefully
+- The drag target index calculation now properly accounts for the move_track() logic which adjusts insert index when moving down
+
 ### "Move Down in playlist context menu crashes!"
 
 **What was fixed:**

@@ -389,7 +389,16 @@ class PlaybackController:
             return
 
         # Sync MOC's in-memory playlist to disk first
-        self._moc_controller.sync_playlist()
+        if not self._moc_controller.sync_playlist():
+            logger.warning("Failed to sync MOC playlist to disk")
+            return
+
+        # Verify file exists before reading
+        config = get_config()
+        moc_playlist_path = config.moc_playlist_path
+        if not moc_playlist_path.exists():
+            logger.warning("MOC playlist file does not exist after sync")
+            return
 
         # Get current playing file from MOC status
         status = self._moc_controller.get_status(force_refresh=True)
@@ -400,20 +409,41 @@ class PlaybackController:
             current_file=current_file
         )
         if tracks:
-            logger.info("Refreshed playlist from MOC: %d tracks", len(tracks))
+            logger.info("Refreshed playlist from MOC: %d tracks, current_index=%d", len(tracks), current_index)
             # Set flag to prevent circular sync back to MOC
             try:
                 self._loading_from_moc = True
+                # Update AppState (source of truth) - this publishes PLAYLIST_CHANGED event
                 self._state.set_playlist(tracks, current_index)
             finally:
                 self._loading_from_moc = False
+            
+            # Sync to PlaylistManager to keep file in sync
+            # Get PlaylistManager from the event bus or app (we need access to it)
+            # Actually, PlaylistManager sync should happen via the PLAYLIST_CHANGED event
+            # But we need to ensure current_index is synced too
+            # The event handler in PlaylistView will update the UI, but we should also
+            # sync PlaylistManager's current_index from AppState
+            
             # Update mtime to prevent duplicate reload from polling
-            config = get_config()
-            moc_playlist_path = config.moc_playlist_path
             if moc_playlist_path.exists():
                 self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
         else:
-            logger.warning("No tracks found in MOC playlist")
+            # Check if file has content but no valid tracks (parsing issue)
+            try:
+                with moc_playlist_path.open("r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read().strip()
+                    if content and not content.startswith("#EXTM3U"):
+                        # File has content but no tracks parsed - likely path resolution issue
+                        logger.warning(
+                            "MOC playlist file has content but no valid tracks were parsed. "
+                            "This may indicate a path resolution issue."
+                        )
+                    elif not content or content == "#EXTM3U":
+                        # File is empty or only has header
+                        logger.debug("MOC playlist file is empty")
+            except Exception as e:
+                logger.debug("Could not read MOC playlist file: %s", e)
 
     def _on_action_append_folder(self, data: Optional[dict]) -> None:
         """Handle append folder action - add folder to MOC playlist."""

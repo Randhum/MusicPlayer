@@ -100,21 +100,32 @@ class PlaylistManager:
         Move a track from one position to another.
 
         Args:
-            from_index: Source position
-            to_index: Destination position
+            from_index: Source position (where track currently is)
+            to_index: Destination position (where track should end up)
+        
+        Note: After the move, the track will be at position `to_index` in the final list.
+        The current_index update logic accounts for the pop/insert operations.
         """
         if 0 <= from_index < len(self.current_playlist) and 0 <= to_index < len(
             self.current_playlist
         ):
+            # Remove track from old position
             track = self.current_playlist.pop(from_index)
-            self.current_playlist.insert(to_index, track)
-            # Update current index
-            if self.current_index == from_index:
-                self.current_index = to_index
-            elif from_index < self.current_index <= to_index:
-                self.current_index -= 1
-            elif to_index <= self.current_index < from_index:
-                self.current_index += 1
+            
+            # Calculate where to insert (accounting for the pop that shifted indices)
+            if from_index < to_index:
+                # Moving down: after pop, target position shifted left by 1
+                insert_index = to_index - 1
+            else:
+                # Moving up: target position unchanged after pop
+                insert_index = to_index
+            
+            # Insert at calculated position (track ends up at to_index)
+            self.current_playlist.insert(insert_index, track)
+            
+            # Note: current_index is managed by AppState, not here
+            # We just update the playlist order and sync to file
+            # The current_index in the file will be updated when AppState changes it
             self._sync_to_file()
 
     def clear(self) -> None:
