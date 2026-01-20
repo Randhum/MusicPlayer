@@ -580,7 +580,7 @@ rm ~/.config/musicplayer/layout.json
 ### "Bluetooth battery/quality monitoring crashes!"
 
 **What was fixed:**
-- D-Bus signal receivers in `BluetoothAdvanced` were missing the `path_keyword` parameter
+- D-Bus signal receivers for battery/quality monitoring were missing the `path_keyword` parameter
 - This caused a `TypeError` when battery or quality change signals were received
 - The signal handlers now correctly receive the device path for proper callback routing
 
@@ -593,15 +593,16 @@ rm ~/.config/musicplayer/layout.json
 
 ### "Clicking a playlist row plays the wrong track!"
 
-If tapping or clicking a row in the playlist plays the next track (or 2nd next) instead of the selected one:
+If tapping or clicking a row in the playlist plays the wrong track:
 
 **What was fixed:**
-- In GTK4, `GestureDrag` and `GestureClick` have different coordinate behaviors with `TreeView.get_path_at_pos()`
-- `GestureClick` coordinates work correctly with `get_path_at_pos()`, while `GestureDrag` coordinates may be offset
-- Added a `GestureClick` handler for left-clicks that fires BEFORE `GestureDrag.drag-begin`
-- The click handler stores the correctly-identified row index, which `drag-begin` then uses
-- This ensures the clicked row is always the one that plays, regardless of scroll position or gesture timing
-- Context menu positioning also uses `GestureClick` coordinates for accuracy
+- The playlist view now uses the GTK selection model as the source of truth for all row operations
+- All gesture handlers (tap, double-tap, long-press, drag) read from the selection model instead of coordinate-based lookups
+- `GestureClick` updates the selection on left-click, and all other handlers read from this selection
+- This ensures the correct row is always used for playback, context menu, and drag operations
+- Drag-to-reorder has been optimized to only update the moved row instead of rebuilding the entire view
+- File I/O for playlist persistence is deferred to avoid blocking the UI thread
+- Drop target visualization shows a dark highlight on the target row during drag
 
 ### "Move Down in playlist context menu crashes!"
 
@@ -1187,10 +1188,9 @@ MusicPlayer/
 ├── 📦 core/                      # The "brain" - logic without UI
 │   ├── audio_player.py           # GStreamer playback
 │   ├── audio_effects.py           # Equalizer, ReplayGain, crossfade
-│   ├── bluetooth_manager.py      # Device discovery & connection
-│   ├── bluetooth_agent.py         # Pairing confirmations
+│   ├── bluetooth_manager.py      # Device management, codecs, battery, quality
+│   ├── bluetooth_agent.py        # Pairing confirmations & dialogs
 │   ├── bluetooth_sink.py         # A2DP sink mode (speaker mode!)
-│   ├── bluetooth_advanced.py     # Codec selection, battery monitoring
 │   ├── config.py                 # XDG-based configuration
 │   ├── dbus_utils.py             # D-Bus error handling
 │   ├── logging.py                # Structured logging system

@@ -1,4 +1,10 @@
-"""Bluetooth device management using D-Bus and BlueZ."""
+"""Bluetooth device management using D-Bus and BlueZ.
+
+This module provides:
+- Device discovery, pairing, and connection management
+- Bluetooth agent for handling pairing confirmations
+- Advanced features: codec info, battery monitoring, connection quality
+"""
 
 # ============================================================================
 # Standard Library Imports (alphabetical)
@@ -19,7 +25,6 @@ from gi.repository import GLib, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
-from core.bluetooth_advanced import BluetoothAdvanced
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 from core.dbus_utils import DBusConnectionMonitor, dbus_retry
 from core.events import EventBus
@@ -106,8 +111,9 @@ class BluetoothManager:
         # Track signal receivers for cleanup
         self._signal_receivers = []
 
-        # Advanced features
-        self.advanced: Optional[BluetoothAdvanced] = None
+        # Advanced features: battery and quality monitoring callbacks
+        self._battery_callbacks: Dict[str, Callable[[int], None]] = {}
+        self._quality_callbacks: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
         # D-Bus connection monitoring
         self._dbus_monitor = DBusConnectionMonitor(self.bus)
@@ -116,13 +122,6 @@ class BluetoothManager:
         self._setup_agent()
         self._setup_signals()
         self._refresh_devices()
-
-        # Initialize advanced features if adapter is available
-        if self.adapter_path:
-            try:
-                self.advanced = BluetoothAdvanced(self.bus, self.adapter_path)
-            except Exception as e:
-                logger.warning("Bluetooth: Advanced features not available: %s", e)
 
     @dbus_retry(max_retries=3, backoff=0.5)
     def _setup_adapter(self) -> None:
@@ -812,6 +811,224 @@ class BluetoothManager:
             logger.error("Error disconnecting device: %s", e, exc_info=True)
             return False
 
+    # ========================================================================
+    # Advanced Features: Codec, Battery, and Quality Monitoring
+    # ========================================================================
+
+    def get_available_codecs(self, device_path: str) -> List[str]:
+        """
+        Get available audio codecs for a device.
+
+        Args:
+            device_path: D-Bus path of the device
+
+        Returns:
+            List of codec names (e.g., ['SBC', 'AAC', 'aptX'])
+        """
+        codecs = []
+        try:
+            manager = dbus.Interface(
+                self.bus.get_object(self.BLUEZ_SERVICE, "/"),
+                "org.freedesktop.DBus.ObjectManager",
+            )
+            objects = manager.GetManagedObjects()
+
+            for path, interfaces in objects.items():
+                if "org.bluez.MediaTransport1" in interfaces:
+                    transport_props = interfaces["org.bluez.MediaTransport1"]
+                    device = str(transport_props.get("Device", ""))
+                    if device == device_path:
+                        codec = transport_props.get("Codec", 0)
+                        codec_map = {
+                            0: "SBC",
+                            1: "MPEG24",
+                            2: "AAC",
+                            3: "aptX",
+                            4: "aptX HD",
+                            5: "LDAC",
+                        }
+                        codec_name = codec_map.get(codec, f"Unknown({codec})")
+                        if codec_name not in codecs:
+                            codecs.append(codec_name)
+        except Exception as e:
+            logger.debug("Error getting codecs for %s: %s", device_path, e)
+
+        return codecs if codecs else ["SBC"]
+
+    def get_battery_level(self, device_path: str) -> Optional[int]:
+        """
+        Get battery level for a Bluetooth device.
+
+        Args:
+            device_path: D-Bus path of the device
+
+        Returns:
+            Battery level (0-100), or None if unavailable
+        """
+        try:
+            device_obj = self.bus.get_object(self.BLUEZ_SERVICE, device_path)
+            props = dbus.Interface(device_obj, self.PROPERTIES_INTERFACE)
+
+            # Try Battery1 interface first
+            try:
+                battery = props.Get("org.bluez.Battery1", "Percentage")
+                return int(battery)
+            except dbus.exceptions.DBusException:
+                pass
+
+            # Fallback to device properties
+            device_props = props.GetAll(self.DEVICE_INTERFACE)
+            if "Battery" in device_props:
+                return int(device_props["Battery"])
+        except Exception as e:
+            logger.debug("Error getting battery level: %s", e)
+
+        return None
+
+    def monitor_battery(self, device_path: str, callback: Callable[[int], None]):
+        """
+        Monitor battery level changes for a device.
+
+        Args:
+            device_path: D-Bus path of the device
+            callback: Function to call with battery level (0-100)
+        """
+        self._battery_callbacks[device_path] = callback
+
+        try:
+            receiver = self.bus.add_signal_receiver(
+                self._on_battery_changed,
+                dbus_interface=self.PROPERTIES_INTERFACE,
+                signal_name="PropertiesChanged",
+                path=device_path,
+                path_keyword="path",
+            )
+            self._signal_receivers.append(receiver)
+            logger.debug("Started battery monitoring for %s", device_path)
+        except Exception as e:
+            logger.error("Error setting up battery monitoring: %s", e)
+
+    def _on_battery_changed(
+        self, interface: str, changed: Dict[str, Any], invalidated: List[str], path: str
+    ):
+        """Handle battery property changes."""
+        if path in self._battery_callbacks:
+            battery = None
+            if "Percentage" in changed:
+                battery = changed["Percentage"]
+            elif "Battery" in changed:
+                battery = changed["Battery"]
+
+            if battery is not None:
+                self._battery_callbacks[path](int(battery))
+
+    def get_rssi(self, device_path: str) -> Optional[int]:
+        """
+        Get RSSI (signal strength) for a device.
+
+        Args:
+            device_path: D-Bus path of the device
+
+        Returns:
+            RSSI value in dBm, or None if unavailable
+        """
+        try:
+            device_obj = self.bus.get_object(self.BLUEZ_SERVICE, device_path)
+            props = dbus.Interface(device_obj, self.PROPERTIES_INTERFACE)
+            rssi = props.Get(self.DEVICE_INTERFACE, "RSSI")
+            return int(rssi)
+        except dbus.exceptions.DBusException:
+            pass
+        except Exception as e:
+            logger.debug("Error getting RSSI: %s", e)
+
+        return None
+
+    def get_link_quality(self, device_path: str) -> Optional[float]:
+        """
+        Get link quality for a device (0.0 to 1.0).
+
+        Args:
+            device_path: D-Bus path of the device
+
+        Returns:
+            Link quality (0.0 to 1.0), or None if unavailable
+        """
+        rssi = self.get_rssi(device_path)
+        if rssi is not None:
+            # RSSI typically -100 (poor) to 0 (excellent)
+            return max(0.0, min(1.0, (rssi + 100) / 100.0))
+        return None
+
+    def monitor_quality(
+        self, device_path: str, callback: Callable[[Dict[str, Any]], None]
+    ):
+        """
+        Monitor connection quality changes.
+
+        Args:
+            device_path: D-Bus path of the device
+            callback: Function to call with quality info dict
+        """
+        self._quality_callbacks[device_path] = callback
+
+        try:
+            receiver = self.bus.add_signal_receiver(
+                self._on_quality_changed,
+                dbus_interface=self.PROPERTIES_INTERFACE,
+                signal_name="PropertiesChanged",
+                path=device_path,
+                path_keyword="path",
+            )
+            self._signal_receivers.append(receiver)
+            logger.debug("Started quality monitoring for %s", device_path)
+        except Exception as e:
+            logger.error("Error setting up quality monitoring: %s", e)
+
+    def _on_quality_changed(
+        self, interface: str, changed: Dict[str, Any], invalidated: List[str], path: str
+    ):
+        """Handle quality property changes."""
+        if path in self._quality_callbacks and "RSSI" in changed:
+            rssi = int(changed["RSSI"])
+            quality_info = {
+                "rssi": rssi,
+                "quality": max(0.0, min(1.0, (rssi + 100) / 100.0)),
+            }
+            self._quality_callbacks[path](quality_info)
+
+    def get_device_info(self, device_path: str) -> Dict[str, Any]:
+        """
+        Get comprehensive device information.
+
+        Args:
+            device_path: D-Bus path of the device
+
+        Returns:
+            Dictionary with device information
+        """
+        info = {
+            "path": device_path,
+            "codecs": self.get_available_codecs(device_path),
+            "battery": self.get_battery_level(device_path),
+            "rssi": self.get_rssi(device_path),
+            "link_quality": self.get_link_quality(device_path),
+        }
+
+        device = self.devices.get(device_path)
+        if device:
+            info.update(
+                {
+                    "name": device.name,
+                    "address": device.address,
+                    "connected": device.connected,
+                    "paired": device.paired,
+                    "trusted": device.trusted,
+                }
+            )
+
+        return info
+
     def cleanup(self):
         """
         Clean up Bluetooth resources.
@@ -819,7 +1036,7 @@ class BluetoothManager:
         This should be called when the application shuts down to:
         - Unregister the Bluetooth agent
         - Remove signal receivers
-        - Disconnect devices if needed
+        - Clear monitoring callbacks
         """
         try:
             # Unregister agent
@@ -831,16 +1048,15 @@ class BluetoothManager:
                 try:
                     self.bus.remove_signal_receiver(receiver)
                 except (AttributeError, RuntimeError, dbus.exceptions.DBusException):
-                    # Receiver may have already been removed or bus destroyed
                     pass
             self._signal_receivers.clear()
 
             # Stop discovery if active
             self.stop_discovery()
 
-            # Cleanup advanced features
-            if self.advanced:
-                self.advanced.cleanup()
+            # Clear monitoring callbacks
+            self._battery_callbacks.clear()
+            self._quality_callbacks.clear()
 
             logger.info("Bluetooth manager cleaned up")
         except Exception as e:

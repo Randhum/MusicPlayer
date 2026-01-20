@@ -24,8 +24,11 @@ from gi.repository import Gdk, GLib, GObject, Gtk
 # ============================================================================
 from core.app_state import AppState
 from core.events import EventBus
+from core.logging import get_logger
 from core.metadata import TrackMetadata
 from core.playlist_manager import PlaylistManager
+
+logger = get_logger(__name__)
 
 
 class PlaylistView(Gtk.Box):
@@ -343,9 +346,51 @@ class PlaylistView(Gtk.Box):
     def move_track(self, from_index: int, to_index: int):
         """Move a track in the playlist (updates AppState and UI)."""
         self._state.move_track(from_index, to_index)
-        self.playlist_manager.move_track(from_index, to_index)
-        # Shuffle queue regeneration is handled by PlaybackController
-        self._update_view()
+        
+        # Optimize UI update: move the row in the store instead of rebuilding everything
+        if from_index != to_index and 0 <= from_index < len(self.store) and 0 <= to_index < len(self.store):
+            try:
+                from_path = Gtk.TreePath.new_from_indices([from_index])
+                from_iter = self.store.get_iter(from_path)
+                
+                if from_iter:
+                    # Get the row data
+                    row_data = list(self.store[from_iter])
+                    # Remove from old position
+                    self.store.remove(from_iter)
+                    
+                    # Insert at new position
+                    if to_index > from_index:
+                        # Moving down - target index decreased by 1 after removal
+                        to_path = Gtk.TreePath.new_from_indices([to_index - 1])
+                    else:
+                        # Moving up
+                        to_path = Gtk.TreePath.new_from_indices([to_index])
+                    
+                    to_iter = self.store.get_iter(to_path) if to_path else None
+                    
+                    if to_iter:
+                        self.store.insert_before(to_iter, row_data)
+                    else:
+                        # Fallback: append if insert fails
+                        self.store.append(row_data)
+                    
+                    # Update row numbers efficiently
+                    self._update_row_numbers()
+                    self._update_selection()
+                    self._update_button_states()
+                else:
+                    # Fallback: full update if iter access fails
+                    self._update_view()
+            except (ValueError, AttributeError, RuntimeError):
+                # Fallback: full update on any error
+                self._update_view()
+        else:
+            # Fallback: full update if indices invalid
+            self._update_view()
+        
+        # Defer file sync to avoid blocking UI (run in idle callback)
+        GLib.idle_add(self._sync_playlist_manager_move, from_index, to_index)
 
     def clear(self):
         """Clear the playlist (updates AppState and UI)."""
@@ -514,6 +559,23 @@ class PlaylistView(Gtk.Box):
             enabled = data.get("enabled", False)
             self.set_shuffle_enabled(enabled)
 
+    def _update_row_numbers(self):
+        """Update row numbers in the store after a move operation."""
+        # Update the index column (column 0) for all rows
+        for i in range(len(self.store)):
+            path = Gtk.TreePath.new_from_indices([i])
+            tree_iter = self.store.get_iter(path)
+            if tree_iter:
+                self.store.set_value(tree_iter, 0, i + 1)
+    
+    def _sync_playlist_manager_move(self, from_index: int, to_index: int):
+        """Sync move operation to PlaylistManager (called asynchronously)."""
+        try:
+            self.playlist_manager.move_track(from_index, to_index)
+        except Exception as e:
+            logger.warning("Failed to sync move to PlaylistManager: %s", e)
+        return False  # Don't repeat
+    
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""
         has_tracks = len(self._state.playlist) > 0

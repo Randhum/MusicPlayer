@@ -224,68 +224,32 @@ class BluetoothSink:
         return bool(re.match(pattern, address))
 
     def _check_gst_bluez_plugin(self) -> None:
-        """
-        Check if GStreamer BlueZ plugin is available.
-
-        Verifies that the GStreamer BlueZ plugin is installed and can be used
-        for A2DP audio streaming.
-        """
+        """Check if GStreamer BlueZ plugin is available."""
         try:
-            # Initialize GStreamer if not already done
             if not Gst.is_initialized():
                 Gst.init(None)
 
-            # Check for BlueZ plugin by inspecting registry
-            # The plugin package is media-libs/gst-plugins-bluez
-            # It provides elements for BlueZ A2DP integration
             registry = Gst.Registry.get()
-
-            # Check for BlueZ-related plugins in the registry
-            plugins_to_check = [
-                "bluez",
-                "gstbluez",
-                "bluezaudio",
-                "bluezsrc",
-                "bluezsink",
-            ]
-
-            # Also check for factory names that might contain bluez
             factories = registry.get_feature_list(Gst.ElementFactory)
+
+            # Check for BlueZ-related elements in registry
             for factory in factories:
-                factory_name = factory.get_name().lower()
-                if "bluez" in factory_name:
+                if "bluez" in factory.get_name().lower():
                     self.gst_bluez_available = True
                     logger.debug("GStreamer BlueZ plugin found: %s", factory.get_name())
                     return
 
-            # Try to create common BlueZ element names
-            bluez_elements = [
-                "bluezsrc",
-                "bluezsink",
-                "bluezaudiosrc",
-                "bluezaudiosink",
-                "bluetoothaudiosink",
-                "bluetoothaudiosrc",
-            ]
-
-            for element_name in bluez_elements:
-                element = Gst.ElementFactory.make(element_name, element_name)
-                if element:
+            # Try common BlueZ element names
+            for element_name in ["bluezsrc", "bluezsink", "bluezaudiosrc"]:
+                if Gst.ElementFactory.make(element_name, element_name):
                     self.gst_bluez_available = True
-                    logger.debug("GStreamer BlueZ plugin found: %s", element_name)
+                    logger.debug("GStreamer BlueZ element found: %s", element_name)
                     return
 
-            # If not found, check if the plugin is installed but not loaded
-            # This is informational - the plugin might work via D-Bus integration
-            logger.info("GStreamer BlueZ plugin elements not found in registry.")
-            logger.info("Note: media-libs/gst-plugins-bluez may use D-Bus integration")
-            logger.info("and may not expose traditional GStreamer elements.")
-            logger.info(
-                "Bluetooth audio will work via PipeWire/PulseAudio if available."
-            )
+            logger.debug("GStreamer BlueZ plugin not found, using PipeWire/PulseAudio")
             self.gst_bluez_available = False
         except Exception as e:
-            logger.error("Error checking GStreamer BlueZ plugin: %s", e, exc_info=True)
+            logger.debug("Error checking GStreamer BlueZ plugin: %s", e)
             self.gst_bluez_available = False
 
     def enable_sink_mode(self) -> bool:
@@ -378,27 +342,16 @@ class BluetoothSink:
                         connected_devices.append(device)
 
             for device in connected_devices:
-                logger.info(
-                    "Disconnecting device: %s (%s)", device.name, device.address
-                )
+                logger.info("Disconnecting device: %s (%s)", device.name, device.address)
 
-                # Notify that audio stream is stopping
                 if self.on_audio_stream_stopped:
                     self.on_audio_stream_stopped()
 
-                # Terminate A2DP transport if active (this closes the audio stream)
                 self._terminate_a2dp_transport(device)
+                time.sleep(0.3)  # Allow transport to close
 
-                # Small delay to allow transport to close
-                import time
-
-                time.sleep(0.3)
-
-                # Disconnect the device
                 self.bt_manager.disconnect_device(device.path)
-
-                # Small delay to allow disconnection to complete
-                time.sleep(0.2)
+                time.sleep(0.2)  # Allow disconnection to complete
 
             # Stop being discoverable and pairable
             self._set_discoverable(False)
@@ -431,9 +384,6 @@ class BluetoothSink:
             return True
         except Exception as e:
             logger.error("Error disabling Bluetooth sink: %s", e, exc_info=True)
-            import traceback
-
-            traceback.print_exc()
             return False
 
     def _verify_a2dp_sink_support(self) -> bool:
@@ -909,48 +859,24 @@ class BluetoothSink:
     def _configure_audio_routing(self, device: BluetoothDevice):
         """Configure audio routing for the connected device."""
         try:
-            logger.info(
-                "Configuring audio routing for %s (%s)", device.name, device.address
-            )
+            logger.info("Configuring audio routing for %s (%s)", device.name, device.address)
 
-            # Check if A2DP transport is available
-            transport_available = self._check_a2dp_transport(device)
-            if not transport_available:
-                logger.warning("A2DP transport not yet available for %s", device.name)
-                logger.info(
-                    "Audio routing will be configured when A2DP transport becomes active"
-                )
-                # Try again after a short delay
-                import gi
-
-                gi.require_version("GLib", "2.0")
-                from gi.repository import GLib
-
+            if not self._check_a2dp_transport(device):
+                logger.debug("A2DP transport not yet available, retrying in 1s")
                 GLib.timeout_add(1000, lambda: self._retry_audio_routing(device))
                 return
 
-            # Prefer GStreamer BlueZ plugin if available
             if self.gst_bluez_available:
                 self._setup_gst_bluez_routing(device)
             else:
                 audio_system = self._detect_audio_system()
-
                 if audio_system == "pipewire":
-                    # PipeWire handles routing automatically
-                    logger.info(
-                        "Audio from %s will be routed via PipeWire", device.name
-                    )
+                    logger.info("Audio from %s routed via PipeWire", device.name)
                 elif audio_system == "pulseaudio":
-                    # Find the Bluetooth source and loopback to ALSA sink
                     self._setup_pulseaudio_routing(device)
-
-            # Audio stream started - could publish event here if needed
 
         except Exception as e:
             logger.error("Error configuring audio routing: %s", e, exc_info=True)
-            import traceback
-
-            traceback.print_exc()
 
     def _check_a2dp_transport(self, device: BluetoothDevice) -> bool:
         """Check if A2DP transport is available for the device."""
@@ -1040,9 +966,6 @@ class BluetoothSink:
 
         except Exception as e:
             logger.error("Error terminating A2DP transport: %s", e, exc_info=True)
-            import traceback
-
-            traceback.print_exc()
 
     def _retry_audio_routing(self, device: BluetoothDevice) -> bool:
         """Retry audio routing configuration after delay."""
@@ -1053,25 +976,10 @@ class BluetoothSink:
     def _setup_gst_bluez_routing(self, device: BluetoothDevice):
         """Set up audio routing using GStreamer BlueZ plugin."""
         try:
-            # GStreamer BlueZ plugin automatically handles A2DP connections
-            # The plugin integrates with BlueZ D-Bus to receive audio streams
-            logger.info(
-                "GStreamer BlueZ: Audio from %s (%s) will be handled automatically",
-                device.name,
-                device.address,
-            )
-            logger.info(
-                "The BlueZ plugin integrates with the BlueZ D-Bus service for A2DP audio routing"
-            )
-
-            # Note: The actual audio pipeline is managed by GStreamer/BlueZ
-            # We don't need to manually create pipelines - BlueZ handles it via D-Bus
-            # The audio will be available through the default audio sink
-
+            # GStreamer BlueZ plugin handles A2DP via D-Bus automatically
+            logger.info("GStreamer BlueZ: Audio from %s routed automatically", device.name)
         except Exception as e:
-            logger.error(
-                "Error setting up GStreamer BlueZ routing: %s", e, exc_info=True
-            )
+            logger.error("Error setting up GStreamer BlueZ routing: %s", e, exc_info=True)
 
     def _setup_pulseaudio_routing(self, device: BluetoothDevice):
         """Set up PulseAudio loopback from Bluetooth to ALSA."""
