@@ -183,6 +183,41 @@ class AppState:
             {"tracks": self._playlist, "index": self._current_index},
         )
 
+    def add_tracks(
+        self, tracks: List[TrackMetadata], position: Optional[int] = None
+    ) -> None:
+        """
+        Add multiple tracks to the playlist (batch operation).
+
+        Args:
+            tracks: List of tracks to add
+            position: Insert position (None appends to end)
+        """
+        if not tracks:
+            return
+
+        if position is None:
+            # Append all tracks
+            self._playlist.extend(tracks)
+        else:
+            # Insert all tracks at position
+            for i, track in enumerate(tracks):
+                self._playlist.insert(position + i, track)
+            # Adjust current_index if needed
+            if position <= self._current_index:
+                self._current_index += len(tracks)
+                # Update current_track reference
+                if 0 <= self._current_index < len(self._playlist):
+                    self._current_track = self._playlist[self._current_index]
+
+        # Publish events once for the batch operation
+        # Note: We don't publish individual PLAYLIST_TRACK_ADDED events for each track
+        # to avoid flooding the event bus. The PLAYLIST_CHANGED event is sufficient.
+        self._event_bus.publish(
+            EventBus.PLAYLIST_CHANGED,
+            {"tracks": self._playlist, "index": self._current_index},
+        )
+
     def remove_track(self, index: int) -> None:
         """
         Remove a track from the playlist.

@@ -96,12 +96,44 @@ class MainWindow(Gtk.ApplicationWindow):
         # Create UI with dockable panels
         self._create_ui()
 
-        # Load current playlist from auto-save file on startup
-        if self.playlist_manager.load_current_playlist():
-            # Restore state from saved playlist
-            tracks = self.playlist_manager.get_playlist()
-            current_index = self.playlist_manager.get_current_index()
-            self.app_state.set_playlist(tracks, current_index)
+        # Sync with MOC playlist on startup if MOC is running
+        # This takes priority over the auto-save file since MOC is the source of truth
+        if self.use_moc:
+            status = self.moc_controller.get_status(force_refresh=True)
+            if status:
+                # MOC is running - load its playlist
+                tracks, current_index = self.moc_controller.get_playlist()
+                if tracks:
+                    logger.info("Syncing playlist from MOC on startup: %d tracks", len(tracks))
+                    # Update playlist manager to match MOC state
+                    self.playlist_manager.clear()
+                    self.playlist_manager.add_tracks(tracks)
+                    if current_index >= 0:
+                        self.playlist_manager.set_current_index(current_index)
+                    # Update app state and UI
+                    self.app_state.set_playlist(tracks, current_index)
+                    # Sync shuffle state from MOC
+                    moc_shuffle = self.moc_controller.get_shuffle_state()
+                    if moc_shuffle is not None:
+                        self.app_state.set_shuffle_enabled(moc_shuffle)
+                else:
+                    # MOC is running but has no playlist - load from auto-save file
+                    if self.playlist_manager.load_current_playlist():
+                        tracks = self.playlist_manager.get_playlist()
+                        current_index = self.playlist_manager.get_current_index()
+                        self.app_state.set_playlist(tracks, current_index)
+            else:
+                # MOC is not running - load from auto-save file
+                if self.playlist_manager.load_current_playlist():
+                    tracks = self.playlist_manager.get_playlist()
+                    current_index = self.playlist_manager.get_current_index()
+                    self.app_state.set_playlist(tracks, current_index)
+        else:
+            # MOC not available - load from auto-save file
+            if self.playlist_manager.load_current_playlist():
+                tracks = self.playlist_manager.get_playlist()
+                current_index = self.playlist_manager.get_current_index()
+                self.app_state.set_playlist(tracks, current_index)
 
         # Load saved layout
         GLib.idle_add(self.dock_manager.load_layout)

@@ -177,6 +177,9 @@ class PlaylistView(Gtk.Box):
         self._blink_state = False  # Toggle state for blinking
         self._row_css_classes = {}  # Track CSS classes per row path
         self._setup_blinking_highlight()
+        
+        # Guard flag to prevent event handler from rebuilding view during optimized move
+        self._updating_from_move = False
 
         # Columns with touch-friendly padding
         col_index = Gtk.TreeViewColumn("#")
@@ -330,9 +333,13 @@ class PlaylistView(Gtk.Box):
 
     def add_tracks(self, tracks: List[TrackMetadata]):
         """Add multiple tracks to the playlist (updates AppState and UI)."""
-        for track in tracks:
-            self._state.add_track(track)
-            self.playlist_manager.add_track(track)
+        if not tracks:
+            return
+        
+        # Batch add to AppState (single event publication)
+        self._state.add_tracks(tracks)
+        # Batch add to PlaylistManager (single file sync)
+        self.playlist_manager.add_tracks(tracks)
         # Shuffle queue regeneration is handled by PlaybackController
         self._update_view()
 
@@ -345,49 +352,58 @@ class PlaylistView(Gtk.Box):
 
     def move_track(self, from_index: int, to_index: int):
         """Move a track in the playlist (updates AppState and UI)."""
-        self._state.move_track(from_index, to_index)
-        
-        # Optimize UI update: move the row in the store instead of rebuilding everything
-        if from_index != to_index and 0 <= from_index < len(self.store) and 0 <= to_index < len(self.store):
-            try:
-                from_path = Gtk.TreePath.new_from_indices([from_index])
-                from_iter = self.store.get_iter(from_path)
-                
-                if from_iter:
-                    # Get the row data
-                    row_data = list(self.store[from_iter])
-                    # Remove from old position
-                    self.store.remove(from_iter)
+        # Set flag to prevent event handler from rebuilding view
+        self._updating_from_move = True
+        try:
+            self._state.move_track(from_index, to_index)
+            
+            # Optimize UI update: move the row in the store instead of rebuilding everything
+            if from_index != to_index and 0 <= from_index < len(self.store) and 0 <= to_index < len(self.store):
+                try:
+                    from_path = Gtk.TreePath.new_from_indices([from_index])
+                    from_iter = self.store.get_iter(from_path)
                     
-                    # Insert at new position
-                    if to_index > from_index:
-                        # Moving down - target index decreased by 1 after removal
-                        to_path = Gtk.TreePath.new_from_indices([to_index - 1])
+                    if from_iter:
+                        # Get the row data
+                        row_data = list(self.store[from_iter])
+                        # Remove from old position
+                        self.store.remove(from_iter)
+                        
+                        # Insert at new position
+                        if to_index > from_index:
+                            # Moving down - target index decreased by 1 after removal
+                            to_path = Gtk.TreePath.new_from_indices([to_index - 1])
+                        else:
+                            # Moving up
+                            to_path = Gtk.TreePath.new_from_indices([to_index])
+                        
+                        to_iter = self.store.get_iter(to_path) if to_path else None
+                        
+                        if to_iter:
+                            self.store.insert_before(to_iter, row_data)
+                        else:
+                            # Fallback: append if insert fails
+                            self.store.append(row_data)
+                        
+                        # Update row numbers efficiently - only update affected range
+                        min_idx = min(from_index, to_index)
+                        max_idx = max(from_index, to_index) + 1
+                        self._update_row_numbers(min_idx, max_idx)
+                        # Skip scrolling during drag for better performance
+                        self._update_selection(skip_scroll=True)
+                        self._update_button_states()
                     else:
-                        # Moving up
-                        to_path = Gtk.TreePath.new_from_indices([to_index])
-                    
-                    to_iter = self.store.get_iter(to_path) if to_path else None
-                    
-                    if to_iter:
-                        self.store.insert_before(to_iter, row_data)
-                    else:
-                        # Fallback: append if insert fails
-                        self.store.append(row_data)
-                    
-                    # Update row numbers efficiently
-                    self._update_row_numbers()
-                    self._update_selection()
-                    self._update_button_states()
-                else:
-                    # Fallback: full update if iter access fails
+                        # Fallback: full update if iter access fails
+                        self._update_view()
+                except (ValueError, AttributeError, RuntimeError):
+                    # Fallback: full update on any error
                     self._update_view()
-            except (ValueError, AttributeError, RuntimeError):
-                # Fallback: full update on any error
+            else:
+                # Fallback: full update if indices invalid
                 self._update_view()
-        else:
-            # Fallback: full update if indices invalid
-            self._update_view()
+        finally:
+            # Always clear the flag, even if an exception occurs
+            self._updating_from_move = False
         
         # Defer file sync to avoid blocking UI (run in idle callback)
         GLib.idle_add(self._sync_playlist_manager_move, from_index, to_index)
@@ -541,6 +557,10 @@ class PlaylistView(Gtk.Box):
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
         """Handle playlist changed event."""
+        # Skip if we're already updating from a move operation (optimized path)
+        if self._updating_from_move:
+            return
+        
         if data:
             tracks = data.get("tracks", [])
             index = data.get("index", -1)
@@ -559,10 +579,20 @@ class PlaylistView(Gtk.Box):
             enabled = data.get("enabled", False)
             self.set_shuffle_enabled(enabled)
 
-    def _update_row_numbers(self):
-        """Update row numbers in the store after a move operation."""
-        # Update the index column (column 0) for all rows
-        for i in range(len(self.store)):
+    def _update_row_numbers(self, start_index: Optional[int] = None, end_index: Optional[int] = None):
+        """Update row numbers in the store after a move operation.
+        
+        Args:
+            start_index: First row to update (None = 0)
+            end_index: Last row to update (None = end of store)
+        """
+        if start_index is None:
+            start_index = 0
+        if end_index is None:
+            end_index = len(self.store)
+        
+        # Only update the affected range
+        for i in range(start_index, end_index):
             path = Gtk.TreePath.new_from_indices([i])
             tree_iter = self.store.get_iter(path)
             if tree_iter:
@@ -598,8 +628,12 @@ class PlaylistView(Gtk.Box):
         # Update button states
         self._update_button_states()
 
-    def _update_selection(self):
-        """Update the selection to highlight current track or show blinking highlight."""
+    def _update_selection(self, skip_scroll: bool = False):
+        """Update the selection to highlight current track or show blinking highlight.
+        
+        Args:
+            skip_scroll: If True, skip scrolling to current track (faster, use during drag operations)
+        """
         selection = self.tree_view.get_selection()
         tracks = self._state.playlist
         current_index = self._state.current_index
@@ -645,8 +679,8 @@ class PlaylistView(Gtk.Box):
             # No current track - stop blinking
             self._stop_blinking_highlight()
 
-        # Scroll to current track if it exists
-        if 0 <= current_index < len(tracks):
+        # Scroll to current track if it exists (skip during drag operations for performance)
+        if not skip_scroll and 0 <= current_index < len(tracks):
             path = Gtk.TreePath.new_from_indices([current_index])
             self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
 
