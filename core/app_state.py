@@ -260,7 +260,13 @@ class AppState:
             return
 
         track = self._playlist.pop(from_index)
-        self._playlist.insert(to_index, track)
+        # When moving down (from_index < to_index), adjust insert position
+        # because pop() shifted all elements after from_index down by 1
+        if from_index < to_index:
+            insert_index = to_index - 1
+        else:
+            insert_index = to_index
+        self._playlist.insert(insert_index, track)
 
         # Update current_index
         if self._current_index == from_index:

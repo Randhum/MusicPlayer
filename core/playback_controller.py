@@ -406,16 +406,23 @@ class PlaybackController:
             current_file=current_file
         )
         if tracks:
-            logger.info("Refreshed playlist from MOC: %d tracks", len(tracks))
+            logger.info("Refreshed playlist from MOC: %d tracks, current_index=%d", len(tracks), current_index)
             # Set flag to prevent circular sync back to MOC
             try:
                 self._loading_from_moc = True
+                # Update AppState (source of truth) - this publishes PLAYLIST_CHANGED event
                 self._state.set_playlist(tracks, current_index)
             finally:
                 self._loading_from_moc = False
+            
+            # Sync to PlaylistManager to keep file in sync
+            # Get PlaylistManager from the event bus or app (we need access to it)
+            # Actually, PlaylistManager sync should happen via the PLAYLIST_CHANGED event
+            # But we need to ensure current_index is synced too
+            # The event handler in PlaylistView will update the UI, but we should also
+            # sync PlaylistManager's current_index from AppState
+            
             # Update mtime to prevent duplicate reload from polling
-            config = get_config()
-            moc_playlist_path = config.moc_playlist_path
             if moc_playlist_path.exists():
                 self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
         else:

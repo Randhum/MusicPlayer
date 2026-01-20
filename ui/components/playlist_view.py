@@ -178,8 +178,6 @@ class PlaylistView(Gtk.Box):
         self._row_css_classes = {}  # Track CSS classes per row path
         self._setup_blinking_highlight()
         
-        # Guard flag to prevent event handler from rebuilding view during optimized move
-        self._updating_from_move = False
 
         # Columns with touch-friendly padding
         col_index = Gtk.TreeViewColumn("#")
@@ -351,117 +349,22 @@ class PlaylistView(Gtk.Box):
         self._update_view()
 
     def move_track(self, from_index: int, to_index: int):
-        """Move a track in the playlist (updates AppState and UI)."""
-        # Set flag to prevent event handler from rebuilding view
-        self._updating_from_move = True
-        try:
-            # Capture selected index before move (to update it after)
-            selection = self.tree_view.get_selection()
-            model_sel, tree_iter_sel = selection.get_selected()
-            selected_index_before = -1
-            if tree_iter_sel:
-                path_sel = model_sel.get_path(tree_iter_sel)
-                indices_sel = path_sel.get_indices()
-                if indices_sel:
-                    selected_index_before = indices_sel[0]
-            
-            self._state.move_track(from_index, to_index)
-            
-            # Calculate what the selected index should be after the move
-            selected_index_after = selected_index_before
-            if selected_index_before >= 0:
-                if selected_index_before == from_index:
-                    # The moved track was selected - it's now at to_index
-                    selected_index_after = to_index
-                elif from_index < selected_index_before <= to_index:
-                    # Selected track was after the source - it moved up by 1
-                    selected_index_after = selected_index_before - 1
-                elif to_index <= selected_index_before < from_index:
-                    # Selected track was before the source - it moved down by 1
-                    selected_index_after = selected_index_before + 1
-                # else: selected_index_before is unaffected
-            
-            # Optimize UI update: move the row in the store instead of rebuilding everything
-            if from_index != to_index and 0 <= from_index < len(self.store) and 0 <= to_index < len(self.store):
-                try:
-                    from_path = Gtk.TreePath.new_from_indices([from_index])
-                    from_iter = self.store.get_iter(from_path)
-                    
-                    if from_iter:
-                        # Get the row data
-                        row_data = list(self.store[from_iter])
-                        # Remove from old position
-                        self.store.remove(from_iter)
-                        
-                        # Insert at new position
-                        if to_index > from_index:
-                            # Moving down - target index decreased by 1 after removal
-                            to_path = Gtk.TreePath.new_from_indices([to_index - 1])
-                        else:
-                            # Moving up
-                            to_path = Gtk.TreePath.new_from_indices([to_index])
-                        
-                        to_iter = self.store.get_iter(to_path) if to_path else None
-                        
-                        if to_iter:
-                            self.store.insert_before(to_iter, row_data)
-                        else:
-                            # Fallback: append if insert fails
-                            self.store.append(row_data)
-                        
-                        # Update row numbers efficiently - only update affected range
-                        min_idx = min(from_index, to_index)
-                        max_idx = max(from_index, to_index) + 1
-                        self._update_row_numbers(min_idx, max_idx)
-                        
-                        # Update selection to point to the correct row after move
-                        # Do this BEFORE calling _update_selection so it reads the correct value
-                        if selected_index_after >= 0 and selected_index_after < len(self.store):
-                            new_selected_path = Gtk.TreePath.new_from_indices([selected_index_after])
-                            selection.select_path(new_selected_path)
-                            self.tree_view.set_cursor(new_selected_path, None, False)
-                            # Update member variable used by context menu
-                            self.selected_index = selected_index_after
-                            
-                            # Force redraw of the selected row to ensure highlighting updates
-                            try:
-                                tree_iter = self.store.get_iter(new_selected_path)
-                                if tree_iter:
-                                    self.store.row_changed(new_selected_path, tree_iter)
-                            except (ValueError, AttributeError, RuntimeError):
-                                pass
-                        else:
-                            # No valid selection after move
-                            self.selected_index = -1
-                        
-                        # Force redraw of current playing track row if it exists and is different
-                        current_index = self._state.current_index
-                        if current_index >= 0 and current_index < len(self.store) and current_index != selected_index_after:
-                            current_path = Gtk.TreePath.new_from_indices([current_index])
-                            try:
-                                tree_iter = self.store.get_iter(current_path)
-                                if tree_iter:
-                                    self.store.row_changed(current_path, tree_iter)
-                            except (ValueError, AttributeError, RuntimeError):
-                                pass
-                        
-                        # Update selection and blinking highlight (skip scrolling during drag for better performance)
-                        self._update_selection(skip_scroll=True)
-                        self._update_button_states()
-                    else:
-                        # Fallback: full update if iter access fails
-                        self._update_view()
-                except (ValueError, AttributeError, RuntimeError):
-                    # Fallback: full update on any error
-                    self._update_view()
-            else:
-                # Fallback: full update if indices invalid
-                self._update_view()
-        finally:
-            # Always clear the flag, even if an exception occurs
-            self._updating_from_move = False
+        """
+        Move a track from one position to another.
         
-        # Defer file sync to avoid blocking UI (run in idle callback)
+        Args:
+            from_index: Current position of the track (0-based)
+            to_index: Final position where track should end up (0-based)
+        
+        Example: Moving track from position 2 to position 5
+        - Before: [A, B, C, D, E, F]  (C is at index 2)
+        - After:  [A, B, D, E, C, F]  (C is now at index 4, but to_index=5 means "after E")
+        """
+        # Update AppState - this handles the actual move and publishes PLAYLIST_CHANGED event
+        self._state.move_track(from_index, to_index)
+        
+        # UI will be refreshed automatically by _on_playlist_changed() event handler
+        # Just sync to PlaylistManager file asynchronously (non-blocking)
         GLib.idle_add(self._sync_playlist_manager_move, from_index, to_index)
 
     def clear(self):
@@ -613,15 +516,19 @@ class PlaylistView(Gtk.Box):
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
         """Handle playlist changed event."""
-        # Skip if we're already updating from a move operation (optimized path)
-        if self._updating_from_move:
-            return
+        # Sync PlaylistManager to match AppState (source of truth)
+        # This ensures the saved playlist file stays in sync
+        try:
+            # Update playlist and current_index in PlaylistManager
+            self.playlist_manager.current_playlist = self._state.playlist.copy()
+            self.playlist_manager.current_index = self._state.current_index
+            # Save to file
+            self.playlist_manager._sync_to_file()
+        except Exception as e:
+            logger.warning("Failed to sync PlaylistManager: %s", e)
         
-        if data:
-            tracks = data.get("tracks", [])
-            index = data.get("index", -1)
-            # Shuffle queue regeneration is handled by PlaybackController
-            self._update_view()
+        # Refresh the view from current state
+        self._update_view()
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
         """Handle current index changed event."""
@@ -635,31 +542,25 @@ class PlaylistView(Gtk.Box):
             enabled = data.get("enabled", False)
             self.set_shuffle_enabled(enabled)
 
-    def _update_row_numbers(self, start_index: Optional[int] = None, end_index: Optional[int] = None):
-        """Update row numbers in the store after a move operation.
-        
-        Args:
-            start_index: First row to update (None = 0)
-            end_index: Last row to update (None = end of store)
-        """
-        if start_index is None:
-            start_index = 0
-        if end_index is None:
-            end_index = len(self.store)
-        
-        # Only update the affected range
-        for i in range(start_index, end_index):
-            path = Gtk.TreePath.new_from_indices([i])
-            tree_iter = self.store.get_iter(path)
-            if tree_iter:
-                self.store.set_value(tree_iter, 0, i + 1)
-    
     def _sync_playlist_manager_move(self, from_index: int, to_index: int):
-        """Sync move operation to PlaylistManager (called asynchronously)."""
+        """
+        Sync the move to PlaylistManager file (runs asynchronously, non-blocking).
+        
+        This keeps the saved playlist file in sync with AppState.
+        Also syncs current_index from AppState to ensure it's correct.
+        """
         try:
-            self.playlist_manager.move_track(from_index, to_index)
+            playlist_len = len(self._state.playlist)
+            if (0 <= from_index < playlist_len and 
+                0 <= to_index < playlist_len and 
+                from_index != to_index):
+                # Update playlist order
+                self.playlist_manager.move_track(from_index, to_index)
+                # Sync current_index from AppState (source of truth)
+                self.playlist_manager.current_index = self._state.current_index
+                self.playlist_manager._sync_to_file()
         except Exception as e:
-            logger.warning("Failed to sync move to PlaylistManager: %s", e)
+            logger.warning("Failed to sync move to file: %s", e)
         return False  # Don't repeat
     
     def _update_button_states(self):
@@ -986,16 +887,22 @@ class PlaylistView(Gtk.Box):
             return
 
         # Last resort: try get_path_at_pos (may be inaccurate)
-        path_info = self.tree_view.get_path_at_pos(int(start_x), int(start_y))
-        if path_info:
-            path = path_info[0]
-            indices = path.get_indices()
-            if indices:
-                self._drag_source_index = indices[0]
-                self._drag_target_index = self._drag_source_index
-                # Update selection to match
-                selection.select_path(path)
-                self.tree_view.set_cursor(path, None, False)
+        try:
+            path_info = self.tree_view.get_path_at_pos(int(start_x), int(start_y))
+            if path_info:
+                path = path_info[0]
+                indices = path.get_indices()
+                if indices:
+                    self._drag_source_index = indices[0]
+                    self._drag_target_index = self._drag_source_index
+                    # Update selection to match (safe during drag-begin, before drag starts)
+                    try:
+                        selection.select_path(path)
+                        self.tree_view.set_cursor(path, None, False)
+                    except (ValueError, AttributeError, RuntimeError):
+                        pass  # Selection update failed, but we have the index
+        except (ValueError, AttributeError, RuntimeError):
+            pass  # get_path_at_pos failed, but we tried other methods
 
     def _on_drag_update(self, gesture, offset_x, offset_y):
         """Handle drag update - enter drag mode if held long enough and moved."""
@@ -1027,65 +934,82 @@ class PlaylistView(Gtk.Box):
             return
 
         # Calculate target row based on Y position and visible rows
-        # This avoids using get_path_at_pos with GestureDrag coordinates which are unreliable
-        success, start_x, start_y = gesture.get_start_point()
-        if not success:
-            return
+        # DO NOT update selection during drag - only visual highlight
+        try:
+            success, start_x, start_y = gesture.get_start_point()
+            if not success:
+                return
 
-        current_y = start_y + offset_y
+            current_y = start_y + offset_y
 
-        # Get visible range to calculate which row we're over
-        visible_range = self.tree_view.get_visible_range()
-        playlist = self._state.playlist
-        if not playlist or not visible_range:
-            return
+            # Get visible range - add error handling
+            visible_range = self.tree_view.get_visible_range()
+            playlist = self._state.playlist
+            if not playlist or not visible_range:
+                return
 
-        start_path, end_path = visible_range
-        if not start_path or not end_path:
-            return
+            start_path, end_path = visible_range
+            if not start_path or not end_path:
+                return
 
-        start_idx = start_path.get_indices()[0]
-        end_idx = end_path.get_indices()[0]
+            # Get indices with error handling
+            start_indices = start_path.get_indices()
+            end_indices = end_path.get_indices()
+            if not start_indices or not end_indices:
+                return
+            
+            start_idx = start_indices[0]
+            end_idx = end_indices[0]
 
-        # Get cell area to determine row height
-        start_rect = self.tree_view.get_cell_area(start_path, None)
-        if start_rect.height <= 0:
-            return
+            # Get cell area - add error handling
+            try:
+                start_rect = self.tree_view.get_cell_area(start_path, None)
+                if not start_rect or start_rect.height <= 0:
+                    return
+                row_height = start_rect.height
+            except (AttributeError, RuntimeError, ValueError):
+                return
 
-        row_height = start_rect.height
-        # Get tree view bounds
-        allocation = self.tree_view.get_allocation()
-        if allocation.height <= 0:
-            return
+            # Get tree view bounds - add error handling
+            try:
+                allocation = self.tree_view.get_allocation()
+                if not allocation or allocation.height <= 0:
+                    return
+            except (AttributeError, RuntimeError):
+                return
 
-        # Calculate which visible row the Y coordinate corresponds to
-        # Account for header (approximately 30px) and scroll offset
-        header_height = 30
-        # Get scroll position
-        scrolled = self.tree_view.get_parent()
-        if isinstance(scrolled, Gtk.ScrolledWindow):
-            vadjustment = scrolled.get_vadjustment()
-            scroll_offset = vadjustment.get_value() if vadjustment else 0
-        else:
+            # Calculate which visible row the Y coordinate corresponds to
+            header_height = 30
             scroll_offset = 0
+            
+            # Get scroll position - add error handling
+            try:
+                scrolled = self.tree_view.get_parent()
+                if isinstance(scrolled, Gtk.ScrolledWindow):
+                    vadjustment = scrolled.get_vadjustment()
+                    if vadjustment:
+                        scroll_offset = vadjustment.get_value()
+            except (AttributeError, RuntimeError):
+                pass  # Use default scroll_offset = 0
 
-        # Calculate relative Y position within visible area
-        adjusted_y = current_y - header_height + scroll_offset
-        row_offset = int(adjusted_y / row_height) if row_height > 0 else 0
+            # Calculate relative Y position within visible area
+            adjusted_y = current_y - header_height + scroll_offset
+            row_offset = int(adjusted_y / row_height) if row_height > 0 else 0
 
-        # Calculate target index
-        target_index = start_idx + row_offset
-        target_index = max(0, min(target_index, len(playlist) - 1))
+            # Calculate target index with bounds checking
+            target_index = start_idx + row_offset
+            target_index = max(0, min(target_index, len(playlist) - 1))
 
-        if target_index != self._drag_target_index:
-            self._drag_target_index = target_index
-            # Update selection to match calculated target
-            target_path = Gtk.TreePath.new_from_indices([target_index])
-            selection = self.tree_view.get_selection()
-            selection.select_path(target_path)
-            self.tree_view.set_cursor(target_path, None, False)
-            # Update visual feedback - highlight target row with dark background
-            self._highlight_drop_target(target_index)
+            # Only update visual highlight, NOT selection model
+            if target_index != self._drag_target_index:
+                self._drag_target_index = target_index
+                # Update visual feedback - highlight target row with dark background
+                # DO NOT update selection or cursor during drag
+                self._highlight_drop_target(target_index)
+        except Exception as e:
+            # Catch any unexpected errors to prevent fatal crashes
+            logger.debug("Error in drag update: %s", e, exc_info=True)
+            return
 
     def _on_drag_end(self, gesture, offset_x, offset_y):
         """Handle drag end - play track (tap), show menu (long-press), or reorder (drag)."""
@@ -1093,8 +1017,10 @@ class PlaylistView(Gtk.Box):
         time_held = current_time - self._drag_start_time
         movement = abs(offset_x) + abs(offset_y)
 
-        source_idx = self._drag_source_index
-        target_idx = self._drag_target_index
+        # Validate indices before using them
+        playlist_len = len(self._state.playlist)
+        source_idx = self._drag_source_index if 0 <= self._drag_source_index < playlist_len else -1
+        target_idx = self._drag_target_index if 0 <= self._drag_target_index < playlist_len else -1
         was_drag_mode = self._drag_mode
 
         # Remove visual feedback
@@ -1151,33 +1077,20 @@ class PlaylistView(Gtk.Box):
                             )
                     # else: single tap only selects (already selected by GTK)
         elif was_drag_mode and movement >= movement_threshold:
-            # Was in drag mode and moved - reorder
-            # Always use selection model to get the final target (most reliable)
-            selection = self.tree_view.get_selection()
-            model, tree_iter = selection.get_selected()
-            final_target_idx = target_idx  # Default to calculated target
-
-            if tree_iter:
-                path = model.get_path(tree_iter)
-                indices = path.get_indices()
-                if indices:
-                    final_target_idx = indices[0]
-
-            # Validate indices before moving
+            # User dragged a track to reorder it
+            # source_idx = where the track started
+            # target_idx = where the user dropped it (calculated during drag)
+            
             playlist_len = len(self._state.playlist)
             if (
                 source_idx >= 0
-                and final_target_idx >= 0
+                and target_idx >= 0
                 and source_idx < playlist_len
-                and final_target_idx < playlist_len
-                and source_idx != final_target_idx
+                and target_idx < playlist_len
+                and source_idx != target_idx
             ):
-                self.move_track(source_idx, final_target_idx)
-                # After moving, update selection to the new position
-                # The track that was at source_idx is now at final_target_idx
-                new_path = Gtk.TreePath.new_from_indices([final_target_idx])
-                selection.select_path(new_path)
-                self.tree_view.set_cursor(new_path, None, False)
+                # Move the track - UI will refresh automatically via event
+                self.move_track(source_idx, target_idx)
         elif time_held >= long_press_time and movement < movement_threshold:
             # Long press without significant movement - show context menu
             # Always use selection model to get the correct row (most reliable)
@@ -1203,7 +1116,10 @@ class PlaylistView(Gtk.Box):
 
     def _highlight_drop_target(self, target_index: int):
         """Highlight the row where the dragged item will be dropped with dark background."""
-        if 0 <= target_index < len(self._state.playlist):
+        if not (0 <= target_index < len(self._state.playlist)):
+            return
+        
+        try:
             # Update drop target index
             old_target = self._drop_target_index
             self._drop_target_index = target_index
@@ -1226,6 +1142,8 @@ class PlaylistView(Gtk.Box):
                     self.store.row_changed(path, tree_iter)
             except (ValueError, AttributeError, RuntimeError):
                 pass
+        except Exception as e:
+            logger.debug("Error highlighting drop target: %s", e, exc_info=True)
 
     def _clear_drop_highlight(self):
         """Clear the drop target highlight."""
@@ -1233,14 +1151,15 @@ class PlaylistView(Gtk.Box):
             old_target = self._drop_target_index
             self._drop_target_index = -1
             
-            # Force redraw to clear highlight
-            try:
-                path = Gtk.TreePath.new_from_indices([old_target])
-                tree_iter = self.store.get_iter(path)
-                if tree_iter:
-                    self.store.row_changed(path, tree_iter)
-            except (ValueError, AttributeError, RuntimeError):
-                pass
+            # Force redraw to clear highlight (only if target is valid)
+            if 0 <= old_target < len(self._state.playlist):
+                try:
+                    path = Gtk.TreePath.new_from_indices([old_target])
+                    tree_iter = self.store.get_iter(path)
+                    if tree_iter:
+                        self.store.row_changed(path, tree_iter)
+                except (ValueError, AttributeError, RuntimeError):
+                    pass
         
         # Restore selection to current playing track
         self._update_selection()

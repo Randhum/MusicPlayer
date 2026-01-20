@@ -168,54 +168,52 @@ class MocController:
 
         # Convert to TrackMetadata objects, using EXTINF metadata if available
         for _, extinf_line, file_path in parsed_tracks:
-            # Try to resolve the path (handle both absolute and relative paths)
+            # Resolve path (handle both absolute and relative paths)
             path_obj = Path(file_path)
             resolved_path = None
-            
-            # First try as-is (if absolute path)
-            if path_obj.is_absolute() and path_obj.exists():
-                resolved_path = path_obj
-            else:
-                # Try resolving relative to playlist file directory or current working directory
-                if not path_obj.is_absolute():
-                    # Try relative to playlist file location
-                    playlist_dir = self._playlist_path.parent
-                    potential_path = playlist_dir / path_obj
-                    if potential_path.exists():
-                        resolved_path = potential_path
-                    else:
-                        # Try relative to current working directory
-                        try:
-                            potential_path = Path.cwd() / path_obj
-                            if potential_path.exists():
-                                resolved_path = potential_path
-                        except OSError:
-                            pass
-                
-                # If still not found, try resolving (expands ~, resolves symlinks, etc.)
-                if resolved_path is None:
+
+            if path_obj.is_absolute():
+                # Try as-is first
+                if path_obj.exists():
+                    resolved_path = path_obj
+                else:
+                    # Try resolving (handles symlinks, ~, etc.)
                     try:
                         resolved = path_obj.resolve()
                         if resolved.exists():
                             resolved_path = resolved
                     except (OSError, RuntimeError):
                         pass
-            
+            else:
+                # Relative path - try relative to playlist file directory
+                playlist_dir = self._playlist_path.parent
+                potential_path = playlist_dir / path_obj
+                if potential_path.exists():
+                    resolved_path = potential_path
+                else:
+                    # Try relative to current working directory
+                    try:
+                        potential_path = Path.cwd() / path_obj
+                        if potential_path.exists():
+                            resolved_path = potential_path
+                    except OSError:
+                        pass
+
+                    # Last resort: try resolving (might expand ~, etc.)
+                    if resolved_path is None:
+                        try:
+                            resolved = path_obj.resolve()
+                            if resolved.exists():
+                                resolved_path = resolved
+                        except (OSError, RuntimeError):
+                            pass
+
             # Only include files that actually exist
             if resolved_path and resolved_path.exists():
                 # Create TrackMetadata from resolved path
+                # This extracts metadata directly from the file (same as internal tracks)
+                # We don't override with EXTINF metadata to match internal behavior
                 metadata = TrackMetadata(str(resolved_path))
-
-                # Override with EXTINF metadata if available (preserves title/artist from M3U)
-                if extinf_line:
-                    extinf_meta = self._extinf_to_metadata(extinf_line)
-                    if extinf_meta.get("title"):
-                        metadata.title = extinf_meta["title"]
-                    if extinf_meta.get("artist"):
-                        metadata.artist = extinf_meta["artist"]
-                    if extinf_meta.get("duration") is not None:
-                        metadata.duration = extinf_meta["duration"]
-
                 tracks.append(metadata)
             else:
                 # Log when we skip a track due to missing file (debug level to avoid spam)
@@ -428,6 +426,8 @@ class MocController:
         This briefly connects to MOC with --sync and immediately sends 'q' to detach.
         The connection triggers MOC to write its in-memory playlist to the M3U file.
         Playback is not interrupted.
+        
+        Waits for the file to actually be written before returning.
 
         Returns:
             True if sync was successful, False otherwise.
@@ -448,7 +448,8 @@ class MocController:
                 text=True,
             )
             proc.communicate(input="q\n", timeout=3.0)
-            return proc.returncode == 0
+            if proc.returncode != 0:
+                return False
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning("Failed to sync MOC playlist: %s", e)
             try:
@@ -456,6 +457,30 @@ class MocController:
             except Exception:
                 pass
             return False
+
+        # Wait for file to be written (MOC writes asynchronously)
+        if self._playlist_path.exists():
+            initial_mtime = self._playlist_path.stat().st_mtime
+        else:
+            initial_mtime = 0
+
+        # Poll for file update (up to 1 second)
+        for _ in range(10):
+            time.sleep(0.1)
+            if self._playlist_path.exists():
+                current_mtime = self._playlist_path.stat().st_mtime
+                if current_mtime > initial_mtime:
+                    return True  # File was updated
+
+        # If file doesn't exist yet, wait for it to be created
+        if not self._playlist_path.exists():
+            for _ in range(10):
+                time.sleep(0.1)
+                if self._playlist_path.exists():
+                    return True
+
+        # Assume success even if we can't detect change (file might already be up to date)
+        return True
 
     def jump_to_index(self, index: int, start_playback: bool = False):
         """
