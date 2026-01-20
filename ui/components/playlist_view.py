@@ -161,6 +161,7 @@ class PlaylistView(Gtk.Box):
             0  # Timestamp when drag started (for long-press detection)
         )
         self._long_press_threshold = 500000  # 500ms in microseconds
+        self._drop_target_index = -1  # Index of row being highlighted as drop target
 
         # Context menu
         self.context_menu = None
@@ -611,8 +612,14 @@ class PlaylistView(Gtk.Box):
             if indices_sel:
                 selected_index = indices_sel[0]
 
-        # Apply background color if this is the current playing track and another row is selected
-        if (
+        # Apply background color based on state
+        # Priority: drop target > current playing (blinking) > normal
+        
+        # Check if this is the drop target during drag
+        if self._drag_mode and row_index == self._drop_target_index and self._drop_target_index >= 0:
+            # Dark highlight for drop target
+            cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.2, 0.2, 0.7))
+        elif (
             row_index == current_index
             and current_index >= 0
             and selected_index != current_index
@@ -637,8 +644,15 @@ class PlaylistView(Gtk.Box):
         self._blink_path = path
         self._blink_state = True
 
-        # Trigger redraw to apply initial state
-        self.tree_view.queue_draw()
+        # Force initial redraw by invalidating the row
+        try:
+            if 0 <= path.get_indices()[0] < len(self._state.playlist):
+                tree_iter = self.store.get_iter(path)
+                if tree_iter:
+                    self.store.row_changed(path, tree_iter)
+        except (ValueError, AttributeError, RuntimeError):
+            # Fallback: just queue a redraw
+            self.tree_view.queue_draw()
 
         # Start timeout for blinking (1000ms interval - slower blink)
         self._blink_timeout_id = GLib.timeout_add(1000, self._blink_toggle)
@@ -660,8 +674,19 @@ class PlaylistView(Gtk.Box):
         """Toggle blink state - called by timeout."""
         if self._blink_path:
             self._blink_state = not self._blink_state
-            # Trigger redraw to update cell backgrounds
-            self.tree_view.queue_draw()
+            # Force cell renderers to update by invalidating the row
+            # This ensures the cell_data_func is called again
+            try:
+                # Get the row at the blink path and invalidate it
+                if 0 <= self._blink_path.get_indices()[0] < len(self._state.playlist):
+                    # Invalidate the row to force redraw
+                    self.store.row_changed(
+                        self._blink_path, 
+                        self.store.get_iter(self._blink_path)
+                    )
+            except (ValueError, AttributeError, RuntimeError):
+                # Fallback: just queue a redraw
+                self.tree_view.queue_draw()
             return True  # Continue timeout
         return False  # Stop timeout
 
@@ -706,11 +731,32 @@ class PlaylistView(Gtk.Box):
         """Handle row activation (double-click or Enter key)."""
         # Cancel any pending single-tap timeout to prevent double-play
         self._cancel_tap_timeout()
-
+        
+        # Always use selection model to get the correct row (most reliable)
+        # First, ensure selection is set to the activated path
+        selection = self.tree_view.get_selection()
+        selection.select_path(path)
+        self.tree_view.set_cursor(path, None, False)
+        
+        # Now read from selection model (most reliable)
+        model, tree_iter = selection.get_selected()
+        
+        if tree_iter:
+            # Use selection model path (most reliable)
+            selected_path = model.get_path(tree_iter)
+            indices = selected_path.get_indices()
+            if indices:
+                index = indices[0]
+                # Only play if not already locked (prevents double-play from double-tap detection)
+                if not self._playback_lock:
+                    self.play_track_at_index(index)
+                return
+        
+        # Fallback: if selection failed, use path from signal directly
         indices = path.get_indices()
         if indices:
             index = indices[0]
-            # Only play if not already locked (prevents double-play from double-tap detection)
+            # Only play if not already locked
             if not self._playback_lock:
                 self.play_track_at_index(index)
 
@@ -864,7 +910,7 @@ class PlaylistView(Gtk.Box):
             selection = self.tree_view.get_selection()
             selection.select_path(target_path)
             self.tree_view.set_cursor(target_path, None, False)
-            # Update visual feedback - highlight target row
+            # Update visual feedback - highlight target row with dark background
             self._highlight_drop_target(target_index)
 
     def _on_drag_end(self, gesture, offset_x, offset_y):
@@ -892,6 +938,8 @@ class PlaylistView(Gtk.Box):
         self._drag_target_index = -1
         self._drag_start_time = 0
         self._click_selected_index = -1  # Reset click selection
+        # Clear drop target highlight (will be cleared by _clear_drop_highlight, but ensure it's reset)
+        self._drop_target_index = -1
 
         # Determine what action to take based on time held and movement
         tap_threshold = 200000  # 200ms in microseconds - quick tap
@@ -900,19 +948,30 @@ class PlaylistView(Gtk.Box):
 
         if time_held < tap_threshold and movement < movement_threshold:
             # Quick tap with minimal movement
-            if source_idx >= 0 and not self._playback_lock:
+            # Always use selection model to get the correct row (most reliable)
+            selection = self.tree_view.get_selection()
+            model, tree_iter = selection.get_selected()
+            tap_index = source_idx  # Default to source_idx
+            
+            if tree_iter:
+                path = model.get_path(tree_iter)
+                indices = path.get_indices()
+                if indices:
+                    tap_index = indices[0]
+            
+            if tap_index >= 0 and not self._playback_lock:
                 playlist = self._state.playlist
-                if 0 <= source_idx < len(playlist):
+                if 0 <= tap_index < len(playlist):
                     if self._single_tap_plays:
-                        if self._tap_pending and self._pending_tap_index == source_idx:
+                        if self._tap_pending and self._pending_tap_index == tap_index:
                             # Second tap on same row - double-tap detected, play immediately
                             self._cancel_tap_timeout()
-                            self.play_track_at_index(source_idx)
+                            self.play_track_at_index(tap_index)
                         else:
                             # First tap - wait for potential second tap
                             self._cancel_tap_timeout()  # Cancel any previous pending tap
                             self._tap_pending = True
-                            self._pending_tap_index = source_idx
+                            self._pending_tap_index = tap_index
                             self._tap_timeout_id = GLib.timeout_add(
                                 self._double_tap_window, self._on_single_tap_timeout
                             )
@@ -947,9 +1006,19 @@ class PlaylistView(Gtk.Box):
                 self.tree_view.set_cursor(new_path, None, False)
         elif time_held >= long_press_time and movement < movement_threshold:
             # Long press without significant movement - show context menu
-            # Use selection-based lookup (not coordinates) since GestureDrag coords don't work with get_path_at_pos
-            if source_idx >= 0 and not self._menu_showing:
-                self.selected_index = source_idx
+            # Always use selection model to get the correct row (most reliable)
+            selection = self.tree_view.get_selection()
+            model, tree_iter = selection.get_selected()
+            menu_index = source_idx  # Default to source_idx
+            
+            if tree_iter:
+                path = model.get_path(tree_iter)
+                indices = path.get_indices()
+                if indices:
+                    menu_index = indices[0]
+            
+            if menu_index >= 0 and not self._menu_showing:
+                self.selected_index = menu_index
                 # Get coordinates for menu positioning (use start point from gesture)
                 success, start_x, start_y = gesture.get_start_point()
                 if success:
@@ -959,14 +1028,46 @@ class PlaylistView(Gtk.Box):
                     self._show_context_menu(0, 0)
 
     def _highlight_drop_target(self, target_index: int):
-        """Highlight the row where the dragged item will be dropped."""
-        # Select the target row to show where it will be dropped
+        """Highlight the row where the dragged item will be dropped with dark background."""
         if 0 <= target_index < len(self._state.playlist):
-            path = Gtk.TreePath.new_from_indices([target_index])
-            self.tree_view.set_cursor(path, None, False)
+            # Update drop target index
+            old_target = self._drop_target_index
+            self._drop_target_index = target_index
+            
+            # Force redraw of both old and new target rows
+            if old_target >= 0 and old_target != target_index:
+                try:
+                    old_path = Gtk.TreePath.new_from_indices([old_target])
+                    old_iter = self.store.get_iter(old_path)
+                    if old_iter:
+                        self.store.row_changed(old_path, old_iter)
+                except (ValueError, AttributeError, RuntimeError):
+                    pass
+            
+            # Force redraw of new target row
+            try:
+                path = Gtk.TreePath.new_from_indices([target_index])
+                tree_iter = self.store.get_iter(path)
+                if tree_iter:
+                    self.store.row_changed(path, tree_iter)
+            except (ValueError, AttributeError, RuntimeError):
+                pass
 
     def _clear_drop_highlight(self):
         """Clear the drop target highlight."""
+        if self._drop_target_index >= 0:
+            old_target = self._drop_target_index
+            self._drop_target_index = -1
+            
+            # Force redraw to clear highlight
+            try:
+                path = Gtk.TreePath.new_from_indices([old_target])
+                tree_iter = self.store.get_iter(path)
+                if tree_iter:
+                    self.store.row_changed(path, tree_iter)
+            except (ValueError, AttributeError, RuntimeError):
+                pass
+        
         # Restore selection to current playing track
         self._update_selection()
 
