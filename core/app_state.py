@@ -142,18 +142,15 @@ class AppState:
             self._event_bus.publish(
                 EventBus.CURRENT_INDEX_CHANGED, {"index": index, "old_index": old_index}
             )
-            # If track actually changed, also publish TRACK_CHANGED
-            # Compare by file_path to detect actual track change
-            if new_track != old_track:
-                if new_track and (
-                    not old_track or new_track.file_path != old_track.file_path
-                ):
-                    self._event_bus.publish(
-                        EventBus.TRACK_CHANGED, {"track": new_track}
-                    )
-                elif not new_track and old_track:
-                    # Track was cleared
-                    self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": None})
+            # Always publish TRACK_CHANGED when index changes to ensure labels update
+            # Even if the track object reference is the same, the index changed so UI should update
+            if new_track:
+                self._event_bus.publish(
+                    EventBus.TRACK_CHANGED, {"track": new_track}
+                )
+            elif old_track:
+                # Track was cleared
+                self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": None})
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None) -> None:
         """

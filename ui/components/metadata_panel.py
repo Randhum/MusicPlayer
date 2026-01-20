@@ -45,6 +45,7 @@ class MetadataPanel(Gtk.Box):
         self.set_margin_bottom(10)
 
         # Subscribe to track changes
+        self._event_bus = event_bus
         if event_bus:
             event_bus.subscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
 
@@ -57,6 +58,9 @@ class MetadataPanel(Gtk.Box):
 
         # Track pending art path for lazy loading
         self._pending_art_path: Optional[str] = None
+        
+        # Track current track to detect changes
+        self._current_track: Optional[TrackMetadata] = None
 
         # Connect to visibility changes for lazy loading
         self.connect("notify::visible", self._on_visibility_changed)
@@ -97,37 +101,70 @@ class MetadataPanel(Gtk.Box):
         info_box.append(details_box)
 
         self.append(info_box)
+    
+    def sync_with_state(self, current_track: Optional[TrackMetadata]) -> None:
+        """
+        Sync metadata panel with current track state.
+        
+        Call this after initialization to ensure panel shows current track
+        if one is already playing.
+        
+        Args:
+            current_track: Current track from AppState, or None
+        """
+        if current_track:
+            self.set_track(current_track)
 
     def _on_track_changed(self, data: Optional[dict]) -> None:
-        """Handle track changed event."""
-        if data and "track" in data:
-            self.set_track(data["track"])
-        else:
-            self.set_track(None)
+        """Handle track changed event - always updates labels to ensure they stay in sync."""
+        try:
+            if data and "track" in data:
+                track = data["track"]
+                # Always update, even if it's the same track object (metadata might have changed)
+                # This ensures labels always reflect the current state
+                self.set_track(track)
+            else:
+                # Track was cleared
+                self.set_track(None)
+        except Exception as e:
+            logger.error("Error updating metadata panel: %s", e, exc_info=True)
+            # On error, at least clear the display to avoid showing stale data
+            self._clear()
 
     def set_track(self, track: Optional[TrackMetadata]):
         """Update display with track metadata."""
         if not track:
+            self._current_track = None
             self._clear()
             return
 
-        # Lazy load album art - only load when visible
-        # Clear first to avoid showing wrong art
-        self.art_image.set_filename(None)
+        # Check if track actually changed (by file path) to avoid unnecessary art reloads
+        # But always update labels (metadata might have been updated)
+        old_track = self._current_track
+        track_changed = (
+            not old_track
+            or not hasattr(old_track, 'file_path')
+            or not hasattr(track, 'file_path')
+            or (old_track.file_path != track.file_path)
+        )
+        
+        # Check if album art path changed (before we update _current_track)
+        old_art_path = getattr(old_track, 'album_art_path', None) if old_track else None
+        new_art_path = getattr(track, 'album_art_path', None)
+        art_path_changed = track_changed or (old_art_path != new_art_path)
+        
+        # Store current track (after checking for changes)
+        self._current_track = track
 
-        # Set album art lazily (only when panel is visible)
-        if track.album_art_path and self.get_visible():
-            self._load_album_art(track.album_art_path)
-        elif track.album_art_path:
-            # Store path for later loading
-            self._pending_art_path = track.album_art_path
-        else:
-            self._pending_art_path = None
-
-        # Set text labels - use filename as fallback for title
+        # Always update labels (even if same track - metadata might have been updated)
         from pathlib import Path
 
-        title = track.title or Path(track.file_path).stem
+        # Handle missing file_path gracefully
+        if not track.file_path:
+            title = track.title or "Unknown Track"
+        else:
+            title = track.title or Path(track.file_path).stem
+        
         self.title_label.set_text(title)
         self.artist_label.set_text(track.artist or "Unknown Artist")
         self.album_label.set_text(track.album or "Unknown Album")
@@ -138,6 +175,22 @@ class MetadataPanel(Gtk.Box):
 
         year_text = f"Year: {track.year}" if track.year else ""
         self.year_label.set_text(year_text)
+
+        # Update album art only if track changed or art path changed
+        # This avoids unnecessary reloads of the same art
+        if art_path_changed:
+            # Lazy load album art - only load when visible
+            # Clear first to avoid showing wrong art
+            self.art_image.set_filename(None)
+
+            # Set album art lazily (only when panel is visible)
+            if track.album_art_path and self.get_visible():
+                self._load_album_art(track.album_art_path)
+            elif track.album_art_path:
+                # Store path for later loading
+                self._pending_art_path = track.album_art_path
+            else:
+                self._pending_art_path = None
 
     def _load_album_art(self, art_path: str) -> None:
         """
@@ -175,3 +228,4 @@ class MetadataPanel(Gtk.Box):
         self.genre_label.set_text("")
         self.year_label.set_text("")
         self._pending_art_path = None
+        self._current_track = None

@@ -95,6 +95,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Create UI with dockable panels
         self._create_ui()
+        
+        # Initialize metadata panel with current track if one exists
+        current_track = self.app_state.current_track
+        if current_track:
+            self.metadata_panel.sync_with_state(current_track)
 
         # Sync with MOC playlist on startup if MOC is running
         # This takes priority over the auto-save file since MOC is the source of truth
