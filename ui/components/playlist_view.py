@@ -355,7 +355,31 @@ class PlaylistView(Gtk.Box):
         # Set flag to prevent event handler from rebuilding view
         self._updating_from_move = True
         try:
+            # Capture selected index before move (to update it after)
+            selection = self.tree_view.get_selection()
+            model_sel, tree_iter_sel = selection.get_selected()
+            selected_index_before = -1
+            if tree_iter_sel:
+                path_sel = model_sel.get_path(tree_iter_sel)
+                indices_sel = path_sel.get_indices()
+                if indices_sel:
+                    selected_index_before = indices_sel[0]
+            
             self._state.move_track(from_index, to_index)
+            
+            # Calculate what the selected index should be after the move
+            selected_index_after = selected_index_before
+            if selected_index_before >= 0:
+                if selected_index_before == from_index:
+                    # The moved track was selected - it's now at to_index
+                    selected_index_after = to_index
+                elif from_index < selected_index_before <= to_index:
+                    # Selected track was after the source - it moved up by 1
+                    selected_index_after = selected_index_before - 1
+                elif to_index <= selected_index_before < from_index:
+                    # Selected track was before the source - it moved down by 1
+                    selected_index_after = selected_index_before + 1
+                # else: selected_index_before is unaffected
             
             # Optimize UI update: move the row in the store instead of rebuilding everything
             if from_index != to_index and 0 <= from_index < len(self.store) and 0 <= to_index < len(self.store):
@@ -389,7 +413,39 @@ class PlaylistView(Gtk.Box):
                         min_idx = min(from_index, to_index)
                         max_idx = max(from_index, to_index) + 1
                         self._update_row_numbers(min_idx, max_idx)
-                        # Skip scrolling during drag for better performance
+                        
+                        # Update selection to point to the correct row after move
+                        # Do this BEFORE calling _update_selection so it reads the correct value
+                        if selected_index_after >= 0 and selected_index_after < len(self.store):
+                            new_selected_path = Gtk.TreePath.new_from_indices([selected_index_after])
+                            selection.select_path(new_selected_path)
+                            self.tree_view.set_cursor(new_selected_path, None, False)
+                            # Update member variable used by context menu
+                            self.selected_index = selected_index_after
+                            
+                            # Force redraw of the selected row to ensure highlighting updates
+                            try:
+                                tree_iter = self.store.get_iter(new_selected_path)
+                                if tree_iter:
+                                    self.store.row_changed(new_selected_path, tree_iter)
+                            except (ValueError, AttributeError, RuntimeError):
+                                pass
+                        else:
+                            # No valid selection after move
+                            self.selected_index = -1
+                        
+                        # Force redraw of current playing track row if it exists and is different
+                        current_index = self._state.current_index
+                        if current_index >= 0 and current_index < len(self.store) and current_index != selected_index_after:
+                            current_path = Gtk.TreePath.new_from_indices([current_index])
+                            try:
+                                tree_iter = self.store.get_iter(current_path)
+                                if tree_iter:
+                                    self.store.row_changed(current_path, tree_iter)
+                            except (ValueError, AttributeError, RuntimeError):
+                                pass
+                        
+                        # Update selection and blinking highlight (skip scrolling during drag for better performance)
                         self._update_selection(skip_scroll=True)
                         self._update_button_states()
                     else:
@@ -737,12 +793,14 @@ class PlaylistView(Gtk.Box):
         # Stop any existing blinking
         self._stop_blinking_highlight()
 
+        # Store the path (will be updated in _blink_toggle if index changes)
         self._blink_path = path
         self._blink_state = True
 
         # Force initial redraw by invalidating the row
         try:
-            if 0 <= path.get_indices()[0] < len(self._state.playlist):
+            path_index = path.get_indices()[0] if path.get_indices() else -1
+            if 0 <= path_index < len(self._state.playlist) and 0 <= path_index < len(self.store):
                 tree_iter = self.store.get_iter(path)
                 if tree_iter:
                     self.store.row_changed(path, tree_iter)
@@ -768,23 +826,43 @@ class PlaylistView(Gtk.Box):
 
     def _blink_toggle(self):
         """Toggle blink state - called by timeout."""
-        if self._blink_path:
+        # Verify that we should still be blinking
+        current_index = self._state.current_index
+        selection = self.tree_view.get_selection()
+        model_sel, tree_iter_sel = selection.get_selected()
+        selected_index = -1
+        if tree_iter_sel:
+            path_sel = model_sel.get_path(tree_iter_sel)
+            indices_sel = path_sel.get_indices()
+            if indices_sel:
+                selected_index = indices_sel[0]
+        
+        # Check if we should still be blinking (current track exists and another row is selected)
+        if (
+            current_index >= 0
+            and 0 <= current_index < len(self._state.playlist)
+            and selected_index >= 0
+            and selected_index != current_index
+        ):
+            # Update blink_path to current_index (in case it changed due to moves)
+            self._blink_path = Gtk.TreePath.new_from_indices([current_index])
             self._blink_state = not self._blink_state
+            
             # Force cell renderers to update by invalidating the row
-            # This ensures the cell_data_func is called again
             try:
-                # Get the row at the blink path and invalidate it
-                if 0 <= self._blink_path.get_indices()[0] < len(self._state.playlist):
-                    # Invalidate the row to force redraw
-                    self.store.row_changed(
-                        self._blink_path, 
-                        self.store.get_iter(self._blink_path)
-                    )
+                if 0 <= current_index < len(self.store):
+                    tree_iter = self.store.get_iter(self._blink_path)
+                    if tree_iter:
+                        # Invalidate the row to force redraw
+                        self.store.row_changed(self._blink_path, tree_iter)
             except (ValueError, AttributeError, RuntimeError):
                 # Fallback: just queue a redraw
                 self.tree_view.queue_draw()
             return True  # Continue timeout
-        return False  # Stop timeout
+        else:
+            # Conditions no longer met - stop blinking
+            self._stop_blinking_highlight()
+            return False  # Stop timeout
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration in seconds to MM:SS."""
