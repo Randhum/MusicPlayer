@@ -390,10 +390,16 @@ class PlaybackController:
 
         # Sync MOC's in-memory playlist to disk first
         self._moc_controller.sync_playlist()
-
+        
+        # Wait a moment for MOC to finish writing the file
+        # MOC writes asynchronously, so we need to wait for the file to be updated
+        GLib.timeout_add(100, self._do_refresh_moc_after_sync)
+    
+    def _do_refresh_moc_after_sync(self) -> bool:
+        """Actually refresh playlist from MOC after sync has completed."""
         # Get current playing file from MOC status
         status = self._moc_controller.get_status(force_refresh=True)
-        current_file = status.get("file") if status else None
+        current_file = status.get("file_path") if status else None
 
         # Load playlist from MOC's M3U file
         tracks, current_index = self._moc_controller.get_playlist(
@@ -413,7 +419,54 @@ class PlaybackController:
             if moc_playlist_path.exists():
                 self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
         else:
-            logger.warning("No tracks found in MOC playlist")
+            # Check if MOC actually has tracks by checking the playlist file directly
+            config = get_config()
+            moc_playlist_path = config.moc_playlist_path
+            file_has_content = False
+            if moc_playlist_path.exists():
+                try:
+                    # Read file directly to see if it has content
+                    with moc_playlist_path.open("r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                        # Check if file has actual track entries (not just header)
+                        lines = [line.strip() for line in content.splitlines() if line.strip()]
+                        has_tracks = any(
+                            line and not line.startswith("#EXTM3U") and not line.startswith("#EXTINF")
+                            for line in lines
+                        )
+                        if has_tracks:
+                            file_has_content = True
+                            # File has content but parsing failed - this is the real issue
+                            logger.warning(
+                                "MOC playlist file exists and has track entries (%d lines), "
+                                "but no valid tracks were parsed. This might indicate a path resolution issue. "
+                                "Using internal playlist state instead.",
+                                len(lines)
+                            )
+                            # Fallback: use our internal playlist state since MOC has tracks but we can't parse them
+                            internal_tracks = self._state.playlist
+                            if internal_tracks:
+                                logger.info(
+                                    "Using internal playlist state (%d tracks) instead of MOC file",
+                                    len(internal_tracks)
+                                )
+                                # Don't update state (it's already correct), just update mtime
+                                if moc_playlist_path.exists():
+                                    self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
+                        else:
+                            # File is empty or only has header
+                            logger.debug("MOC playlist file is empty or only contains header")
+                except Exception as e:
+                    logger.debug("Could not read MOC playlist file to verify: %s", e)
+            
+            if not file_has_content:
+                # File doesn't exist or is empty - MOC might not have synced yet or playlist is actually empty
+                logger.warning(
+                    "No tracks found in MOC playlist. "
+                    "This might be a timing issue (MOC hasn't written file yet) or the playlist is empty."
+                )
+        
+        return False  # Don't repeat
 
     def _on_action_append_folder(self, data: Optional[dict]) -> None:
         """Handle append folder action - add folder to MOC playlist."""
@@ -516,10 +569,15 @@ class PlaybackController:
     # MOC Synchronization
     # ============================================================================
 
-    def _sync_moc_playlist(self, start_playback: bool = False) -> None:
-        """Sync playlist to MOC using native MOC commands."""
+    def _sync_moc_playlist(self, start_playback: bool = False) -> bool:
+        """
+        Sync playlist to MOC using native MOC commands.
+        
+        Returns:
+            False to indicate this is a one-time callback (for GLib.idle_add)
+        """
         if not self._use_moc:
-            return
+            return False
 
         playlist = self._state.playlist
         current_index = self._state.current_index
@@ -532,6 +590,7 @@ class PlaybackController:
 
         # Use MOC's native commands to set the playlist
         # This keeps MOC's internal state in sync
+        # Note: This does many --append commands which can be slow for large playlists
         self._moc_controller.set_playlist(
             playlist, current_index, start_playback=should_start
         )
@@ -547,6 +606,8 @@ class PlaybackController:
                 self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
         except OSError:
             pass
+        
+        return False  # Don't repeat
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
         """Handle playlist change - sync to MOC if using MOC and regenerate shuffle queue."""
@@ -557,7 +618,8 @@ class PlaybackController:
             and self._state.active_backend == "moc"
             and not self._loading_from_moc
         ):
-            self._sync_moc_playlist(start_playback=False)
+            # Defer MOC sync to avoid blocking UI (set_playlist does many --append commands)
+            GLib.idle_add(self._sync_moc_playlist, False)
 
         # Regenerate shuffle queue when playlist changes
         if self._state.shuffle_enabled:

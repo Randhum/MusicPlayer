@@ -168,10 +168,43 @@ class MocController:
 
         # Convert to TrackMetadata objects, using EXTINF metadata if available
         for _, extinf_line, file_path in parsed_tracks:
+            # Try to resolve the path (handle both absolute and relative paths)
+            path_obj = Path(file_path)
+            resolved_path = None
+            
+            # First try as-is (if absolute path)
+            if path_obj.is_absolute() and path_obj.exists():
+                resolved_path = path_obj
+            else:
+                # Try resolving relative to playlist file directory or current working directory
+                if not path_obj.is_absolute():
+                    # Try relative to playlist file location
+                    playlist_dir = self._playlist_path.parent
+                    potential_path = playlist_dir / path_obj
+                    if potential_path.exists():
+                        resolved_path = potential_path
+                    else:
+                        # Try relative to current working directory
+                        try:
+                            potential_path = Path.cwd() / path_obj
+                            if potential_path.exists():
+                                resolved_path = potential_path
+                        except OSError:
+                            pass
+                
+                # If still not found, try resolving (expands ~, resolves symlinks, etc.)
+                if resolved_path is None:
+                    try:
+                        resolved = path_obj.resolve()
+                        if resolved.exists():
+                            resolved_path = resolved
+                    except (OSError, RuntimeError):
+                        pass
+            
             # Only include files that actually exist
-            if Path(file_path).exists():
-                # Create TrackMetadata from file (will extract metadata from file)
-                metadata = TrackMetadata(file_path)
+            if resolved_path and resolved_path.exists():
+                # Create TrackMetadata from resolved path
+                metadata = TrackMetadata(str(resolved_path))
 
                 # Override with EXTINF metadata if available (preserves title/artist from M3U)
                 if extinf_line:
@@ -184,6 +217,9 @@ class MocController:
                         metadata.duration = extinf_meta["duration"]
 
                 tracks.append(metadata)
+            else:
+                # Log when we skip a track due to missing file (debug level to avoid spam)
+                logger.debug("Skipping track in M3U - file does not exist: %s", file_path)
 
         # Find current track index
         if current_file is None:
