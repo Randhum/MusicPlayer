@@ -106,7 +106,13 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.use_moc:
             status = self.moc_controller.get_status(force_refresh=True)
             if status:
-                # MOC is running - load its playlist
+                # MOC is running - sync shuffle state FIRST before loading playlist
+                # This ensures shuffle state is correct before any playlist operations
+                moc_shuffle = self.moc_controller.get_shuffle_state()
+                if moc_shuffle is not None:
+                    self.app_state.set_shuffle_enabled(moc_shuffle)
+                
+                # Load its playlist
                 tracks, current_index = self.moc_controller.get_playlist()
                 if tracks:
                     logger.info("Syncing playlist from MOC on startup: %d tracks", len(tracks))
@@ -117,10 +123,6 @@ class MainWindow(Gtk.ApplicationWindow):
                         self.playlist_manager.set_current_index(current_index)
                     # Update app state and UI
                     self.app_state.set_playlist(tracks, current_index)
-                    # Sync shuffle state from MOC
-                    moc_shuffle = self.moc_controller.get_shuffle_state()
-                    if moc_shuffle is not None:
-                        self.app_state.set_shuffle_enabled(moc_shuffle)
                 else:
                     # MOC is running but has no playlist - load from auto-save file
                     if self.playlist_manager.load_current_playlist():

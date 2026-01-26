@@ -58,6 +58,7 @@ class PlaylistView(Gtk.Box):
         self._events = event_bus
         self.playlist_manager = playlist_manager  # Only for file persistence
         self.window = window
+        self._use_moc: bool = False  # Track MOC mode state
 
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -443,9 +444,9 @@ class PlaylistView(Gtk.Box):
         """
         Add a folder to the playlist.
 
-        If MOC is active, collects tracks in library order and adds them individually
-        to maintain the same order as shown in the library view.
-        Otherwise, falls back to collecting tracks and adding individually.
+        If MOC is active, uses MOC's native append command which recursively adds
+        all tracks in one operation (much faster, single sync).
+        Otherwise, collects tracks and adds them individually.
 
         Args:
             folder_path: Path to the folder to add.
@@ -454,17 +455,22 @@ class PlaylistView(Gtk.Box):
         if not folder.exists() or not folder.is_dir():
             return
         
-        # Collect all tracks from the folder recursively
-        tracks = []
-        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-        
-        # Sort tracks by file path to match library order (library sorts by file_path)
-        tracks.sort(key=lambda t: t.file_path)
-        
-        if tracks:
-            # Add tracks to maintain order (same for all backends)
-            self.add_tracks(tracks)
+        if self._use_moc:
+            # Use MOC's native append command - it handles recursion and is much faster
+            # This triggers a single sync after MOC processes all tracks
+            self._events.publish(EventBus.ACTION_APPEND_FOLDER, {"folder_path": str(folder.resolve())})
+        else:
+            # For non-MOC mode, collect tracks and add them
+            tracks = []
+            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
+                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+            
+            # Sort tracks by file path to match library order (library sorts by file_path)
+            tracks.sort(key=lambda t: t.file_path)
+            
+            if tracks:
+                # Add tracks to maintain order
+                self.add_tracks(tracks)
 
     def replace_and_play_folder(self, folder_path: str) -> None:
         """
@@ -499,6 +505,7 @@ class PlaylistView(Gtk.Box):
 
     def set_moc_mode(self, enabled: bool):
         """Show or hide the Refresh button based on whether MOC mode is active."""
+        self._use_moc = enabled
         self.refresh_button.set_visible(enabled)
 
     # ============================================================================
@@ -514,17 +521,23 @@ class PlaylistView(Gtk.Box):
         """Handle playlist changed event."""
         # Sync PlaylistManager to match AppState (source of truth)
         # This ensures the saved playlist file stays in sync
+        # Defer file I/O to avoid blocking UI thread
+        GLib.idle_add(self._sync_playlist_manager_to_state)
+        
+        # Refresh the view from current state
+        self._update_view()
+    
+    def _sync_playlist_manager_to_state(self) -> bool:
+        """Sync PlaylistManager to AppState (runs asynchronously, non-blocking)."""
         try:
-            # Update playlist and current_index in PlaylistManager
+            # Update playlist and current_index in PlaylistManager to match AppState
             self.playlist_manager.current_playlist = self._state.playlist.copy()
             self.playlist_manager.current_index = self._state.current_index
             # Save to file
             self.playlist_manager._sync_to_file()
         except Exception as e:
             logger.warning("Failed to sync PlaylistManager: %s", e)
-        
-        # Refresh the view from current state
-        self._update_view()
+        return False  # Don't repeat
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
         """Handle current index changed event."""

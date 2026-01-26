@@ -375,7 +375,11 @@ class AppState:
             duration: Duration in seconds
         """
         self._duration = max(0.0, duration)
-        self._event_bus.publish(EventBus.DURATION_CHANGED, {"duration": self._duration})
+        # Include position in event so UI can update both together
+        self._event_bus.publish(
+            EventBus.DURATION_CHANGED,
+            {"duration": self._duration, "position": self._position},
+        )
 
     def set_current_track(self, track: Optional[TrackMetadata]) -> None:
         """
