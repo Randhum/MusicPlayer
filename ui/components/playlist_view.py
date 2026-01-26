@@ -428,15 +428,15 @@ class PlaylistView(Gtk.Box):
 
     def replace_and_play_track(self, track: TrackMetadata) -> None:
         """Replace playlist with single track and play it."""
-        self.clear()
-        self.add_track(track)
+        # Use set_playlist for atomic update (triggers PLAYLIST_CHANGED event)
+        self.set_playlist([track], 0)
         # play_track_at_index will set the index and publish action
         self.play_track_at_index(0)
 
     def replace_and_play_album(self, tracks: List[TrackMetadata]) -> None:
         """Replace playlist with album tracks and play first track."""
-        self.clear()
-        self.add_tracks(tracks)
+        # Use set_playlist for atomic update (triggers PLAYLIST_CHANGED event)
+        self.set_playlist(tracks, 0)
         # play_track_at_index will set the index and publish action
         self.play_track_at_index(0)
 
