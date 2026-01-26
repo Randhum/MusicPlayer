@@ -7,7 +7,7 @@ import random
 import time
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Any
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -92,6 +92,7 @@ class PlaybackController:
             None  # Guard to prevent circular shuffle sync
         )
         self._loading_from_moc: bool = False  # Guard to prevent circular sync
+        self._syncing_to_moc: bool = False  # Guard to prevent concurrent syncs
         self._user_action_time: float = 0.0  # Timestamp of last user-initiated action
 
         # Shuffle queue management (for both MOC and internal player)
@@ -165,6 +166,25 @@ class PlaybackController:
             moc_shuffle = self._moc_controller.get_shuffle_state()
             if moc_shuffle is not None:
                 self._state.set_shuffle_enabled(moc_shuffle)
+            
+            # Check if MOC playlist is empty but we have tracks in internal playlist
+            # Only sync if:
+            # 1. We haven't written to MOC recently (avoid race with startup sync)
+            # 2. We're not currently loading from MOC (avoid circular sync)
+            # 3. We're not already syncing (avoid concurrent syncs)
+            tracks, _ = self._moc_controller.get_playlist()
+            if not tracks:
+                # Check if we recently wrote to MOC (within last 2 seconds) - if so, skip to avoid race
+                recent_write = self._recent_moc_write and (time.time() - self._recent_moc_write < 2.0)
+                if not recent_write and not self._loading_from_moc and not self._syncing_to_moc:
+                    internal_tracks = self._state.playlist
+                    if internal_tracks:
+                        logger.info(
+                            "MOC playlist is empty on initialization, writing internal playlist (%d tracks) to MOC",
+                            len(internal_tracks)
+                        )
+                        GLib.idle_add(self._sync_moc_playlist, False)
+            
             return False  # Don't repeat
 
         return False
@@ -203,7 +223,7 @@ class PlaybackController:
     # Action Handlers
     # ============================================================================
 
-    def _on_action_play(self, data: Optional[dict]) -> None:
+    def _on_action_play(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle play action."""
         # Check BT sink first (takes priority)
         if self._should_use_bt_sink():
@@ -241,7 +261,7 @@ class PlaybackController:
         else:
             self._play_with_internal(track)
 
-    def _on_action_pause(self, data: Optional[dict]) -> None:
+    def _on_action_pause(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle pause action."""
         if self._should_use_bt_sink():
             if self._bt_sink:
@@ -256,7 +276,7 @@ class PlaybackController:
             self._internal_player.pause()
             self._state.set_playback_state(PlaybackState.PAUSED)
 
-    def _on_action_stop(self, data: Optional[dict]) -> None:
+    def _on_action_stop(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle stop action."""
         if self._should_use_bt_sink():
             if self._bt_sink:
@@ -276,7 +296,7 @@ class PlaybackController:
         self._state.set_position(0.0)
         self._state.set_duration(0.0)
 
-    def _on_action_next(self, data: Optional[dict]) -> None:
+    def _on_action_next(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle next track action."""
         if self._should_use_bt_sink():
             if self._bt_sink:
@@ -299,7 +319,7 @@ class PlaybackController:
             self._state.set_current_index(next_index)
             self._on_action_play(None)
 
-    def _on_action_previous(self, data: Optional[dict]) -> None:
+    def _on_action_previous(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle previous track action."""
         if self._should_use_bt_sink():
             if self._bt_sink:
@@ -311,7 +331,7 @@ class PlaybackController:
             self._state.set_current_index(current_index - 1)
             self._on_action_play(None)
 
-    def _on_action_seek(self, data: Optional[dict]) -> None:
+    def _on_action_seek(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle seek action."""
         if not data or "position" not in data:
             return
@@ -335,7 +355,7 @@ class PlaybackController:
             # Internal player updates position synchronously
             GLib.timeout_add(100, self._reset_seek_state)  # Short delay for consistency
 
-    def _on_action_play_track(self, data: Optional[dict]) -> None:
+    def _on_action_play_track(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle play specific track action."""
         if not data or "index" not in data:
             return
@@ -346,7 +366,7 @@ class PlaybackController:
         self._user_action_time = time.time()
         self._on_action_play(None)
 
-    def _on_action_set_shuffle(self, data: Optional[dict]) -> None:
+    def _on_action_set_shuffle(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle set shuffle action."""
         if not data or "enabled" not in data:
             return
@@ -363,7 +383,7 @@ class PlaybackController:
             # Track when we modified shuffle in MOC
             self._recent_shuffle_write = time.time()
 
-    def _on_action_set_loop_mode(self, data: Optional[dict]) -> None:
+    def _on_action_set_loop_mode(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle set loop mode action."""
         if not data or "mode" not in data:
             return
@@ -371,7 +391,7 @@ class PlaybackController:
         mode = int(data["mode"])
         self._state.set_loop_mode(mode)
 
-    def _on_action_set_volume(self, data: Optional[dict]) -> None:
+    def _on_action_set_volume(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle set volume action."""
         if not data or "volume" not in data:
             return
@@ -382,7 +402,7 @@ class PlaybackController:
         # Volume is controlled by SystemVolume, not by backends
         # The SystemVolume class will handle the actual volume change
 
-    def _on_action_refresh_moc(self, data: Optional[dict]) -> None:
+    def _on_action_refresh_moc(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle refresh from MOC action - reload playlist from MOC."""
         if not self._use_moc:
             logger.debug("Refresh MOC requested but MOC mode not active")
@@ -393,10 +413,15 @@ class PlaybackController:
         
         # Wait a moment for MOC to finish writing the file
         # MOC writes asynchronously, so we need to wait for the file to be updated
-        GLib.timeout_add(100, self._do_refresh_moc_after_sync)
+        if self._use_moc:
+            GLib.timeout_add(100, self._do_refresh_moc_after_sync)
     
     def _do_refresh_moc_after_sync(self) -> bool:
         """Actually refresh playlist from MOC after sync has completed."""
+        # Get config and playlist path first
+        config = get_config()
+        moc_playlist_path = config.moc_playlist_path
+        
         # Get current playing file from MOC status
         status = self._moc_controller.get_status(force_refresh=True)
         current_file = status.get("file_path") if status else None
@@ -427,8 +452,6 @@ class PlaybackController:
                 self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
         else:
             # Check if MOC actually has tracks by checking the playlist file directly
-            config = get_config()
-            moc_playlist_path = config.moc_playlist_path
             file_has_content = False
             if moc_playlist_path.exists():
                 try:
@@ -472,10 +495,20 @@ class PlaybackController:
                     "No tracks found in MOC playlist. "
                     "This might be a timing issue (MOC hasn't written file yet) or the playlist is empty."
                 )
+                # If we have tracks in the internal playlist, write them to MOC
+                # Only if we're not already syncing or loading from MOC
+                if not self._syncing_to_moc and not self._loading_from_moc:
+                    internal_tracks = self._state.playlist
+                    if internal_tracks:
+                        logger.info(
+                            "Writing internal playlist (%d tracks) to MOC",
+                            len(internal_tracks)
+                        )
+                        GLib.idle_add(self._sync_moc_playlist, False)
         
         return False  # Don't repeat
 
-    def _on_action_append_folder(self, data: Optional[dict]) -> None:
+    def _on_action_append_folder(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle append folder action - add folder to MOC playlist."""
         if not self._use_moc or not data or "folder_path" not in data:
             return
@@ -586,44 +619,54 @@ class PlaybackController:
         if not self._use_moc:
             return False
 
-        playlist = self._state.playlist
-        current_index = self._state.current_index
-        track = self._state.current_track
+        # Prevent concurrent syncs
+        if self._syncing_to_moc:
+            logger.debug("MOC sync already in progress, skipping duplicate sync")
+            return False
 
-        # Only start playback if track is audio (not video)
-        should_start = (
-            start_playback and track is not None and not is_video_file(track.file_path)
-        )
-
-        # Use MOC's native commands to set the playlist
-        # This keeps MOC's internal state in sync
-        # Note: This does many --append commands which can be slow for large playlists
-        self._moc_controller.set_playlist(
-            playlist, current_index, start_playback=should_start
-        )
-
-        # Track when we modified MOC
-        self._recent_moc_write = time.time()
-
-        # Update playlist mtime (MOC will write to the file after our commands)
+        self._syncing_to_moc = True
         try:
-            config = get_config()
-            moc_playlist_path = config.moc_playlist_path
-            if moc_playlist_path.exists():
-                self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
-        except OSError:
-            pass
+            playlist = self._state.playlist
+            current_index = self._state.current_index
+            track = self._state.current_track
+
+            # Only start playback if track is audio (not video)
+            should_start = (
+                start_playback and track is not None and not is_video_file(track.file_path)
+            )
+
+            # Use MOC's native commands to set the playlist
+            # This keeps MOC's internal state in sync
+            # Note: This does many --append commands which can be slow for large playlists
+            self._moc_controller.set_playlist(
+                playlist, current_index, start_playback=should_start
+            )
+
+            # Track when we modified MOC
+            self._recent_moc_write = time.time()
+
+            # Update playlist mtime (MOC will write to the file after our commands)
+            try:
+                config = get_config()
+                moc_playlist_path = config.moc_playlist_path
+                if moc_playlist_path.exists():
+                    self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
+            except OSError:
+                pass
+        finally:
+            self._syncing_to_moc = False
         
         return False  # Don't repeat
 
-    def _on_playlist_changed(self, data: Optional[dict]) -> None:
+    def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle playlist change - sync to MOC if using MOC and regenerate shuffle queue."""
-        # Only sync TO MOC if we're not currently loading FROM MOC
-        # This prevents circular sync issues
+        # Only sync TO MOC if we're not currently loading FROM MOC and not already syncing
+        # This prevents circular sync issues and concurrent syncs
         if (
             self._use_moc
             and self._state.active_backend == "moc"
             and not self._loading_from_moc
+            and not self._syncing_to_moc
         ):
             # Defer MOC sync to avoid blocking UI (set_playlist does many --append commands)
             GLib.idle_add(self._sync_moc_playlist, False)
@@ -632,7 +675,7 @@ class PlaybackController:
         if self._state.shuffle_enabled:
             self._regenerate_shuffle_queue()
 
-    def _on_shuffle_changed(self, data: Optional[dict]) -> None:
+    def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle shuffle state change - regenerate shuffle queue."""
         if data and data.get("enabled", False):
             self._regenerate_shuffle_queue()
@@ -947,20 +990,20 @@ class PlaybackController:
     # Bluetooth Event Handlers
     # ============================================================================
 
-    def _on_bt_sink_enabled(self, data: Optional[dict]) -> None:
+    def _on_bt_sink_enabled(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle BT sink enabled."""
         # Set active backend FIRST so _stop_inactive_backends knows what to stop
         self._state.set_active_backend("bt_sink")
         # Stop other backends
         self._stop_inactive_backends()
 
-    def _on_bt_sink_disabled(self, data: Optional[dict]) -> None:
+    def _on_bt_sink_disabled(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle BT sink disabled."""
         if self._state.active_backend == "bt_sink":
             self._state.set_active_backend("none")
             self._state.set_playback_state(PlaybackState.STOPPED)
 
-    def _on_bt_sink_device_connected(self, data: Optional[dict]) -> None:
+    def _on_bt_sink_device_connected(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle BT sink device connected."""
         # BT sink takes priority when device is connected
         if self._bt_sink and self._bt_sink.is_sink_enabled:

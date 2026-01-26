@@ -344,8 +344,11 @@ class BluetoothSink:
             for device in connected_devices:
                 logger.info("Disconnecting device: %s (%s)", device.name, device.address)
 
-                if self.on_audio_stream_stopped:
-                    self.on_audio_stream_stopped()
+                if self.on_audio_stream_stopped is not None:
+                    try:
+                        self.on_audio_stream_stopped()
+                    except Exception as e:
+                        logger.error("Error in audio stream stopped callback: %s", e)
 
                 self._terminate_a2dp_transport(device)
                 time.sleep(0.3)  # Allow transport to close

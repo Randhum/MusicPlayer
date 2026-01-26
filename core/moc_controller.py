@@ -794,24 +794,34 @@ class MocController:
                 if abs_path:
                     self.play_file(abs_path)
 
-    def play_file(self, file_path: str):
-        """Play a specific file via MOC, keeping the playlist intact."""
+    def play_file(self, file_path: str) -> bool:
+        """
+        Play a specific file via MOC, keeping the playlist intact.
+        
+        Returns:
+            True if playback was successfully initiated, False otherwise.
+        """
         if not self.is_available():
-            return
+            return False
         if not file_path:
             logger.error("Cannot play file - file path is empty")
-            return
+            return False
 
         # Validate file exists
         path = Path(file_path)
         if not path.exists() or not path.is_file():
             logger.error("Cannot play file - file does not exist: %s", file_path)
-            return
+            return False
 
-        self.ensure_server()
+        if not self.ensure_server():
+            return False
+            
         abs_path = str(path.resolve())
         result = self._run("--playit", abs_path, capture_output=True)
         if result.returncode != 0:
             logger.error("Failed to play file: %s", abs_path)
             if result.stderr:
                 logger.debug("MOC error: %s", result.stderr)
+            return False
+        
+        return True

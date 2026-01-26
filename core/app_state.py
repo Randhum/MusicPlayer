@@ -87,7 +87,6 @@ class AppState:
         # Return stored reference to ensure consistency
         # The stored reference is updated by set_current_index and set_playlist
         return self._current_track
-        return None
 
     def set_playlist(
         self, tracks: List[TrackMetadata], current_index: int = -1

@@ -540,6 +540,25 @@ ls -l /path/to/your/track.mp3
 - Better error messages to identify problematic tracks
 - Tracks with missing files are automatically skipped when syncing to MOC
 
+### "No tracks found in MOC playlist" warning
+
+If you see a warning that no tracks were found in the MOC playlist when refreshing:
+
+**What was fixed:**
+- When MOC's playlist file is empty or missing but the app has tracks in its internal playlist, the app now automatically writes the internal playlist to MOC
+- This handles timing issues where MOC hasn't written its playlist file yet
+- The app will log when it writes the internal playlist to MOC for recovery
+
+**When this happens:**
+- MOC's playlist file (`~/.moc/playlist.m3u`) is empty or missing
+- The app has tracks in its internal playlist
+- This can occur during startup or when refreshing from MOC
+
+**What the app does:**
+- Automatically detects this situation
+- Writes the internal playlist to MOC to restore playback state
+- Logs the action for debugging
+
 ### "Songs don't automatically advance to the next track!"
 
 If playback stops when a song finishes instead of automatically playing the next song:
@@ -1239,11 +1258,6 @@ MusicPlayer/
 ├── 📋 requirements.txt           # Python packages needed
 ├── 📄 README.md                  # You're reading it!
 ├── 📄 pytest.ini                 # Test configuration
-├── 📁 tests/                     # Test suite
-│   ├── test_audio_player.py
-│   ├── test_config.py
-│   ├── test_moc_controller.py
-│   └── test_security.py
 └── 📁 data/                      # Service files and desktop entry
     ├── musicplayer.desktop
     ├── musicplayer.service
@@ -1311,9 +1325,10 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
 The codebase follows systematic harmonization to ensure consistency and maintainability:
 
 **Harmonization Plan:**
-- See [HARMONIZATION_IMPLEMENTATION_PLAN.md](HARMONIZATION_IMPLEMENTATION_PLAN.md) for detailed implementation plan
-- See [CODE_ORGANIZATION_HARMONIZATION.md](CODE_ORGANIZATION_HARMONIZATION.md) for standards and guidelines
-- See [ARCHITECTURE_SIMPLIFICATION_ANALYSIS.md](ARCHITECTURE_SIMPLIFICATION_ANALYSIS.md) for architecture simplification opportunities
+- Event-driven architecture implemented
+- Single source of truth (AppState)
+- Consistent error handling patterns
+- Type hints completion in progress
 
 **Current Status:**
 - ✅ Event-driven architecture implemented

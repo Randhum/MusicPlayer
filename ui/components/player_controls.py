@@ -211,10 +211,7 @@ class PlayerControls(Gtk.Box):
         cb.append(self.shuffle_button)
 
         self.loop_button = Gtk.ToggleButton()
-        """
-        define self.loop_method to default value IF no config loaded 
-        -> Need to implement config manager
-        """
+        # Loop mode is initialized from AppState via _update_loop_icon()
         self._update_loop_icon()
         self.loop_button.set_size_request(bs, bs)
         self.loop_button.connect("clicked", self._on_loop_clicked)
@@ -598,6 +595,11 @@ class PlayerControls(Gtk.Box):
         self._update_mpris2_nav()
 
     def cleanup(self) -> None:
+        # Clean up drag timeout if active
+        if self._drag_timeout_id is not None:
+            GLib.source_remove(self._drag_timeout_id)
+            self._drag_timeout_id = None
+        
         if self.system_volume:
             self.system_volume.cleanup()
         if self.mpris2:

@@ -456,6 +456,9 @@ class MainWindow(Gtk.ApplicationWindow):
         # Cleanup playback controller (includes MOC shutdown)
         if hasattr(self, "playback_controller"):
             self.playback_controller.cleanup()
+        # Cleanup playlist view (includes timeout cleanup)
+        if hasattr(self, "playlist_view"):
+            self.playlist_view.cleanup()
         # Cleanup Bluetooth resources
         if hasattr(self, "bt_sink"):
             self.bt_sink.cleanup()

@@ -6,8 +6,6 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
-if TYPE_CHECKING:
-    from ui.components.player_controls import PlayerControls
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -445,57 +443,55 @@ class PlaylistView(Gtk.Box):
         """
         Add a folder to the playlist.
 
-        If MOC is active, uses MOC's native folder append (recursively adds all tracks).
+        If MOC is active, collects tracks in library order and adds them individually
+        to maintain the same order as shown in the library view.
         Otherwise, falls back to collecting tracks and adding individually.
 
         Args:
             folder_path: Path to the folder to add.
         """
-        if self._state.active_backend == "moc":
-            # Use MOC's native folder append via event
-            self._events.publish(
-                EventBus.ACTION_APPEND_FOLDER, {"folder_path": folder_path}
-            )
-        else:
-            # Fallback: collect tracks and add individually
-            folder = Path(folder_path)
-            if not folder.exists() or not folder.is_dir():
-                return
-            tracks = []
-            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-            if tracks:
-                self.add_tracks(tracks)
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            return
+        
+        # Collect all tracks from the folder recursively
+        tracks = []
+        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
+            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+        
+        # Sort tracks by file path to match library order (library sorts by file_path)
+        tracks.sort(key=lambda t: t.file_path)
+        
+        if tracks:
+            # Add tracks to maintain order (same for all backends)
+            self.add_tracks(tracks)
 
     def replace_and_play_folder(self, folder_path: str) -> None:
         """
         Replace playlist with folder contents and play first track.
 
-        If MOC is active, uses MOC's native folder append (recursively adds all tracks).
-        Otherwise, falls back to collecting tracks and adding individually.
+        Collects tracks in library order and adds them to maintain the same order
+        as shown in the library view.
 
         Args:
             folder_path: Path to the folder to play.
         """
         self.clear()
-        if self._state.active_backend == "moc":
-            # Use MOC's native folder append via event
-            self._events.publish(
-                EventBus.ACTION_APPEND_FOLDER, {"folder_path": folder_path}
-            )
-            # Wait a moment for MOC to process, then play first track
-            GLib.timeout_add(300, lambda: self.play_track_at_index(0) or False)
-        else:
-            # Fallback: collect tracks and add individually
-            folder = Path(folder_path)
-            if not folder.exists() or not folder.is_dir():
-                return
-            tracks = []
-            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-            if tracks:
-                self.add_tracks(tracks)
-                self.play_track_at_index(0)
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            return
+        
+        # Collect all tracks from the folder recursively
+        tracks = []
+        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
+            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+        
+        # Sort tracks by file path to match library order (library sorts by file_path)
+        tracks.sort(key=lambda t: t.file_path)
+        
+        if tracks:
+            self.add_tracks(tracks)
+            self.play_track_at_index(0)
 
     # ============================================================================
     # UI Configuration
@@ -1475,3 +1471,15 @@ class PlaylistView(Gtk.Box):
                 # Widget may have been destroyed
                 pass
         self._menu_showing = False
+    
+    def cleanup(self) -> None:
+        """Clean up resources when component is destroyed."""
+        # Stop blinking highlight if active
+        if self._blink_timeout_id is not None:
+            GLib.source_remove(self._blink_timeout_id)
+            self._blink_timeout_id = None
+        
+        # Cancel any pending tap timeout
+        if self._tap_timeout_id is not None:
+            GLib.source_remove(self._tap_timeout_id)
+            self._tap_timeout_id = None
