@@ -60,9 +60,6 @@ AUDIO_EXTENSIONS = {
     ".webm",  # WebM (may contain Opus/Vorbis)
 }
 
-# Index file location (will be overridden by config)
-INDEX_FILE = None
-
 
 class LibraryWatcher(FileSystemEventHandler if WATCHDOG_AVAILABLE else object):
     """File system watcher for incremental library updates."""

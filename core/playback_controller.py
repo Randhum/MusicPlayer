@@ -450,21 +450,12 @@ class PlaybackController:
         )
         if tracks:
             logger.info("Refreshed playlist from MOC: %d tracks, current_index=%d", len(tracks), current_index)
-            # Set flag to prevent circular sync back to MOC
             try:
                 self._loading_from_moc = True
-                # Update AppState (source of truth) - this publishes PLAYLIST_CHANGED event
+                # AppState.set_playlist delegates to PlaylistManager when set; events drive UI
                 self._state.set_playlist(tracks, current_index)
             finally:
                 self._loading_from_moc = False
-            
-            # Sync to PlaylistManager to keep file in sync
-            # Get PlaylistManager from the event bus or app (we need access to it)
-            # Actually, PlaylistManager sync should happen via the PLAYLIST_CHANGED event
-            # But we need to ensure current_index is synced too
-            # The event handler in PlaylistView will update the UI, but we should also
-            # sync PlaylistManager's current_index from AppState
-            
             # Update mtime to prevent duplicate reload from polling
             if moc_playlist_path.exists():
                 self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
@@ -796,31 +787,26 @@ class PlaybackController:
             self._moc_sync_chunk_id = None
 
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle playlist change - sync to MOC if using MOC and regenerate shuffle queue."""
-        # Only sync TO MOC if:
-        # 1. We're not currently loading FROM MOC
-        # 2. We're not already syncing
-        # 3. Startup is complete (avoid race with MainWindow initialization)
-        # 4. MOC backend is active (or will be active)
+        """Handle playlist change - sync to MOC only when content changed, regenerate shuffle queue."""
+        # Only sync TO MOC when playlist content changed (add/remove/move/clear), not on index-only
+        content_changed = data is None or data.get("content_changed", True)
         if (
-            self._use_moc
+            content_changed
+            and self._use_moc
             and self._startup_complete
             and (self._state.active_backend == "moc" or self._state.active_backend == "none")
             and not self._loading_from_moc
             and not self._syncing_to_moc
         ):
-            # Defer MOC sync to avoid blocking UI (set_playlist does many --append commands)
             GLib.idle_add(self._sync_moc_playlist, False)
 
-        # Regenerate shuffle queue when playlist changes
-        # For large playlists, defer to avoid blocking event handler
+        # Invalidate shuffle queue on playlist change, then regenerate if shuffle enabled
+        self._shuffle_queue = []
         if self._state.shuffle_enabled:
             playlist_size = len(self._state.playlist)
             if playlist_size > 100:
-                # Defer shuffle queue regeneration for large playlists
                 GLib.idle_add(self._regenerate_shuffle_queue)
             else:
-                # Synchronous regeneration for small playlists (fast enough)
                 self._regenerate_shuffle_queue()
 
     def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
@@ -838,7 +824,7 @@ class PlaybackController:
             self._shuffle_queue = []
 
     def _get_next_shuffled_index(self) -> int:
-        """Get next index from shuffle queue."""
+        """Get next index from shuffle queue. Skips indices invalid for current playlist."""
         playlist = self._state.playlist
         if not playlist:
             return -1
@@ -847,12 +833,13 @@ class PlaybackController:
         if not self._shuffle_queue:
             self._regenerate_shuffle_queue()
 
-        # If still empty (shouldn't happen, but handle edge case)
-        if not self._shuffle_queue:
-            return -1
-
-        # Pop the next index from the queue
-        return self._shuffle_queue.pop(0)
+        n = len(playlist)
+        # Pop until we get a valid index or queue is empty (playlist may have changed)
+        while self._shuffle_queue:
+            idx = self._shuffle_queue.pop(0)
+            if 0 <= idx < n:
+                return idx
+        return -1
 
     def _regenerate_shuffle_queue(self) -> bool:
         """

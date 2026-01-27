@@ -418,7 +418,7 @@ class BluetoothAgent(dbus.service.Object):
             props = dbus.Interface(device_obj, "org.freedesktop.DBus.Properties")
             name = props.Get("org.bluez.Device1", "Name")
             return str(name)
-        except:
+        except Exception:
             return "Unknown Device"
 
 

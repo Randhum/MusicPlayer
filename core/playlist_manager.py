@@ -15,6 +15,7 @@ from typing import List, Optional
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
+from core.events import EventBus
 from core.exceptions import PlaylistError, SecurityError
 from core.logging import get_logger
 from core.metadata import TrackMetadata
@@ -24,16 +25,22 @@ logger = get_logger(__name__)
 
 
 class PlaylistManager:
-    """Manages playlists - in-memory and persistent storage."""
+    """Manages playlists - in-memory and persistent storage. Publishes events when changed."""
 
-    def __init__(self, playlists_dir: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        event_bus: Optional[EventBus] = None,
+        playlists_dir: Optional[Path] = None,
+    ) -> None:
         """
         Initialize playlist manager.
 
         Args:
+            event_bus: EventBus instance for publishing playlist events. If None, no events are published.
             playlists_dir: Directory for storing saved playlists.
                           If None, uses config default.
         """
+        self._event_bus = event_bus
         if playlists_dir is None:
             from core.config import get_config
 
@@ -55,15 +62,25 @@ class PlaylistManager:
         Args:
             track: Track metadata to add
             position: Insert position (None appends to end)
-        
-        Note: File sync is handled by PlaylistView's debounced sync mechanism.
-        This method only updates in-memory state.
         """
         if position is None:
             self.current_playlist.append(track)
+            position = len(self.current_playlist) - 1
         else:
             self.current_playlist.insert(position, track)
-        # File sync is handled by PlaylistView's debounced sync mechanism
+            # Keep current_index pointing at same logical track when inserting before it
+            if position <= self.current_index:
+                self.current_index += 1
+        if self._event_bus:
+            self._event_bus.publish(
+                EventBus.PLAYLIST_TRACK_ADDED,
+                {"track": track, "position": position},
+            )
+            self._event_bus.publish(
+                EventBus.PLAYLIST_CHANGED,
+                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+            )
+        self._sync_to_file()
 
     def add_tracks(
         self, tracks: List[TrackMetadata], position: Optional[int] = None
@@ -74,16 +91,21 @@ class PlaylistManager:
         Args:
             tracks: List of track metadata to add
             position: Insert position (None appends to end)
-        
-        Note: File sync is handled by PlaylistView's debounced sync mechanism.
-        This method only updates in-memory state.
         """
         if position is None:
             self.current_playlist.extend(tracks)
         else:
             for i, track in enumerate(tracks):
                 self.current_playlist.insert(position + i, track)
-        # File sync is handled by PlaylistView's debounced sync mechanism
+            # Keep current_index pointing at same logical track when inserting before it
+            if position <= self.current_index:
+                self.current_index += len(tracks)
+        if self._event_bus:
+            self._event_bus.publish(
+                EventBus.PLAYLIST_CHANGED,
+                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+            )
+        self._sync_to_file()
 
     def remove_track(self, index: int) -> None:
         """
@@ -91,15 +113,24 @@ class PlaylistManager:
 
         Args:
             index: Index of track to remove
-        
-        Note: File sync and current_index updates are handled by PlaylistView's
-        debounced sync mechanism. This method only updates in-memory playlist state.
         """
-        if 0 <= index < len(self.current_playlist):
-            self.current_playlist.pop(index)
-            # Note: current_index adjustment is handled by AppState and synced via
-            # PlaylistView's debounced sync mechanism
-        # File sync is handled by PlaylistView's debounced sync mechanism
+        if not (0 <= index < len(self.current_playlist)):
+            return
+        removed_track = self.current_playlist.pop(index)
+        if index < self.current_index:
+            self.current_index -= 1
+        elif index == self.current_index:
+            self.current_index = -1
+        if self._event_bus:
+            self._event_bus.publish(
+                EventBus.PLAYLIST_TRACK_REMOVED,
+                {"index": index, "track": removed_track},
+            )
+            self._event_bus.publish(
+                EventBus.PLAYLIST_CHANGED,
+                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+            )
+        self._sync_to_file()
 
     def move_track(self, from_index: int, to_index: int) -> None:
         """
@@ -108,42 +139,48 @@ class PlaylistManager:
         Args:
             from_index: Source position (where track currently is)
             to_index: Destination position (where track should end up)
-        
-        Note: After the move, the track will be at position `to_index` in the final list.
-        File sync and current_index updates are handled by PlaylistView's debounced
-        sync mechanism. This method only updates in-memory playlist state.
+
+        After the move, the track is at position to_index in the final list.
         """
-        if 0 <= from_index < len(self.current_playlist) and 0 <= to_index < len(
-            self.current_playlist
+        if not (
+            0 <= from_index < len(self.current_playlist)
+            and 0 <= to_index < len(self.current_playlist)
         ):
-            # Remove track from old position
-            track = self.current_playlist.pop(from_index)
-            
-            # Calculate where to insert (accounting for the pop that shifted indices)
-            if from_index < to_index:
-                # Moving down: after pop, target position shifted left by 1
-                insert_index = to_index - 1
-            else:
-                # Moving up: target position unchanged after pop
-                insert_index = to_index
-            
-            # Insert at calculated position (track ends up at to_index)
-            self.current_playlist.insert(insert_index, track)
-            
-            # Note: current_index is managed by AppState and synced via
-            # PlaylistView's debounced sync mechanism
-        # File sync is handled by PlaylistView's debounced sync mechanism
+            return
+        track = self.current_playlist.pop(from_index)
+        if from_index < to_index:
+            insert_index = to_index - 1
+        else:
+            insert_index = to_index
+        self.current_playlist.insert(insert_index, track)
+        if self.current_index == from_index:
+            self.current_index = to_index
+        elif from_index < self.current_index <= to_index:
+            self.current_index -= 1
+        elif to_index <= self.current_index < from_index:
+            self.current_index += 1
+        if self._event_bus:
+            self._event_bus.publish(
+                EventBus.PLAYLIST_TRACK_MOVED,
+                {"from_index": from_index, "to_index": to_index},
+            )
+            self._event_bus.publish(
+                EventBus.PLAYLIST_CHANGED,
+                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+            )
+        self._sync_to_file()
 
     def clear(self) -> None:
-        """
-        Clear the current playlist and reset index.
-        
-        Note: File sync is handled by PlaylistView's debounced sync mechanism.
-        This method only updates in-memory state.
-        """
+        """Clear the current playlist and reset index."""
         self.current_playlist.clear()
         self.current_index = -1
-        # File sync is handled by PlaylistView's debounced sync mechanism
+        if self._event_bus:
+            self._event_bus.publish(EventBus.PLAYLIST_CLEARED, {})
+            self._event_bus.publish(
+                EventBus.PLAYLIST_CHANGED,
+                {"playlist_changed": True, "index": -1, "content_changed": True},
+            )
+        self._sync_to_file()
 
     def get_current_track(self) -> Optional[TrackMetadata]:
         """Get the currently playing track."""
@@ -156,11 +193,20 @@ class PlaylistManager:
         Set the current playing index.
 
         Args:
-            index: New current index (must be valid)
+            index: New current index (-1 for none, or 0..len-1)
         """
-        if 0 <= index < len(self.current_playlist):
-            self.current_index = index
-            self._sync_to_file()
+        if index < -1 or index >= len(self.current_playlist):
+            index = -1
+        old_index = self.current_index
+        self.current_index = index
+        if self._event_bus and old_index != index:
+            self._event_bus.publish(
+                EventBus.CURRENT_INDEX_CHANGED,
+                {"index": index, "old_index": old_index},
+            )
+            new_track = self.get_current_track()
+            self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": new_track})
+        self._sync_to_file()
 
     def get_next_track(self) -> Optional[TrackMetadata]:
         """Get the next track in the playlist."""
@@ -246,9 +292,12 @@ class PlaylistManager:
                     self.current_index = -1
             finally:
                 self._auto_save_enabled = True
-            # Sync after load to ensure consistency
             self._sync_to_file()
-
+            if self._event_bus:
+                self._event_bus.publish(
+                    EventBus.PLAYLIST_CHANGED,
+                    {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+                )
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
             logger.error("Error loading playlist: %s", e, exc_info=True)
@@ -371,7 +420,11 @@ class PlaylistManager:
                     self.current_index = -1
             finally:
                 self._auto_save_enabled = True
-
+            if self._event_bus:
+                self._event_bus.publish(
+                    EventBus.PLAYLIST_CHANGED,
+                    {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+                )
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
             logger.error("Error loading current playlist: %s", e, exc_info=True)

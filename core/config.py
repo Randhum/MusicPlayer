@@ -21,7 +21,9 @@ from typing import Any, Dict, Optional
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
-# None
+from core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class Config:
@@ -141,8 +143,8 @@ class Config:
                 # Update config to point to new location
                 self.config["library"]["index_file"] = str(new_index)
                 self.save()
-            except Exception:
-                pass  # Migration failed, continue with defaults
+            except Exception as e:
+                logger.debug("Migration of library index skipped: %s", e)
 
         # Migrate album art cache
         old_art_cache = Path.home() / ".cache" / "musicplayer" / "art"
@@ -150,8 +152,8 @@ class Config:
         if old_art_cache.exists() and not new_art_cache.exists():
             try:
                 shutil.copytree(old_art_cache, new_art_cache)
-            except Exception:
-                pass  # Migration failed, continue with defaults
+            except Exception as e:
+                logger.debug("Migration of album art cache skipped: %s", e)
 
     def save(self) -> None:
         """
@@ -163,9 +165,6 @@ class Config:
             with open(self.config_file, "w") as f:
                 self.config.write(f)
         except Exception as e:
-            from core.logging import get_logger
-
-            logger = get_logger(__name__)
             logger.error("Failed to save config: %s", e, exc_info=True)
 
     def get(

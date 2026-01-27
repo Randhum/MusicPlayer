@@ -23,6 +23,8 @@ except ImportError:
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
+from core.logging import get_logger
+
 # Try to use native PipeWire integration
 try:
     from core.pipewire_volume import PipeWireVolume
@@ -30,6 +32,8 @@ try:
     PIPEWIRE_AVAILABLE = True
 except ImportError:
     PIPEWIRE_AVAILABLE = False
+
+logger = get_logger(__name__)
 
 
 class SystemVolume:
@@ -64,9 +68,6 @@ class SystemVolume:
                     except Exception:
                         pass
             except Exception as e:
-                from core.logging import get_logger
-
-                logger = get_logger(__name__)
                 logger.debug("PipeWire integration not available: %s", e)
 
         # Fallback to subprocess monitoring if PipeWire not available

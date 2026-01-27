@@ -4,6 +4,7 @@
 # Standard Library Imports (alphabetical)
 # ============================================================================
 import base64
+import hashlib
 import struct
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -86,8 +87,7 @@ class TrackMetadata:
                     return
                 return
 
-            # Determine file type for format-specific handling
-            file_type = type(audio_file).__name__
+            # Format-specific handling
             is_flac = isinstance(audio_file, FLAC)
             is_mp3 = isinstance(audio_file, MP3)
             is_mp4 = isinstance(audio_file, MP4)
@@ -532,8 +532,6 @@ class TrackMetadata:
             cache_dir = config.album_art_cache_dir
 
             # Generate filename from track path hash
-            import hashlib
-
             track_hash = hashlib.md5(self.file_path.encode()).hexdigest()
             art_path = cache_dir / f"{track_hash}.jpg"
 

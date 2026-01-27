@@ -172,11 +172,8 @@ class SecurityValidator:
         if not name:
             return None
 
-        # Remove dangerous characters
+        # Remove dangerous characters (sanitize_filename already removes path separators)
         sanitized = SecurityValidator.sanitize_filename(name)
-
-        # Remove path separators
-        sanitized = sanitized.replace("/", "").replace("\\", "")
 
         # Limit length
         if len(sanitized) > 100:

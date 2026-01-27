@@ -425,7 +425,7 @@ class BluetoothManager:
         else:
             try:
                 return str(value)
-            except:
+            except Exception:
                 return value
 
     def _refresh_devices(self):

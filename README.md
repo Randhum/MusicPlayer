@@ -240,7 +240,7 @@ The application follows the **XDG Base Directory Specification** for Linux stand
 
 ### Configuration Locations
 
-- **Config**: `~/.config/musicplayer/settings.json`
+- **Config**: `~/.config/musicplayer/config.ini`
 - **Cache**: `~/.cache/musicplayer/` (includes album art cache)
 - **Data**: `~/.local/share/musicplayer/` (includes playlists)
 - **Logs**: `~/.local/share/musicplayer/logs/`
@@ -296,7 +296,7 @@ sudo /etc/init.d/musicplayer start
 
 #### Configuration Management
 - **XDG Base Directory** compliance
-- Configurable settings via JSON config file
+- Configurable settings via INI config file (`config.ini`)
 - Automatic directory creation
 - Environment variable support
 
@@ -640,8 +640,8 @@ If the application crashes with a GTK fatal error when dragging playlist items:
 **Issue:** After refreshing from MOC, loading a playlist, opening files from the command line, or replacing the playlist, clicking "Save Playlist" could persist an outdated playlist, or opened files did not appear in the saved/current playlist.
 
 **What was fixed:**
-- **Save:** `save_playlist()` now syncs AppState → PlaylistManager immediately before saving, so the named playlist file always reflects what is on screen, even when the last change was a refresh, load, or open-files.
-- **Open files:** Files added via command line or drag-and-drop now go through `PlaylistView.add_track()`, so both AppState and PlaylistManager (and the UI) stay in sync. Previously they only updated AppState, so PlaylistManager and auto-save could be stale until the 2s debounced sync.
+- **Save:** PlaylistManager is the source of truth for playlist data. `save_playlist()` writes from PlaylistManager, so the named playlist file always reflects current content.
+- **Open files:** All playlist changes go through PlaylistManager (which publishes events); the UI and AppState stay in sync via events.
 
 ### "Add Folder" button not working in library view
 
@@ -658,7 +658,7 @@ If the application crashes with a GTK fatal error when dragging playlist items:
 
 **What was fixed:**
 - The "Move Down" context menu action referenced a non-existent `self.tracks` attribute
-- Changed to use `self._state.playlist` which is the correct way to access the playlist
+- Playlist data is read from PlaylistManager via `get_playlist()` / `get_current_index()` (PlaylistManager is the source of truth)
 
 ### "Music keeps playing when Bluetooth speaker mode is enabled!"
 
@@ -1249,7 +1249,7 @@ MusicPlayer/
 │   ├── music_library.py          # Scanning folders for music
 │   ├── mpris2.py                 # MPRIS2 D-Bus interface
 │   ├── pipewire_volume.py        # PipeWire volume control
-│   ├── playlist_manager.py       # Queue management
+│   ├── playlist_manager.py       # Playlist data & persistence (source of truth)
 │   ├── security.py               # Path validation, input sanitization
 │   └── system_volume.py          # System volume control
 │
@@ -1275,10 +1275,10 @@ MusicPlayer/
 ### The Event-Driven Pattern
 
 We follow an event-driven architecture where:
-- **State** = `AppState` (single source of truth)
+- **State** = `AppState` (playback/UI state); playlist data lives in `PlaylistManager` (source of truth for playlist and persistence)
 - **Events** = `EventBus` (decoupled communication)
 - **Controller** = `PlaybackController` (routes commands to backends)
-- **View** = `ui/` components (pure views that subscribe to events)
+- **View** = `ui/` components (subscribe to events, call PlaylistManager for playlist ops)
 - **Backends** = `AudioPlayer`, `MocController`, `BluetoothSink` (playback engines)
 
 This architecture eliminates circular dependencies and makes the codebase much more maintainable!
@@ -1296,10 +1296,10 @@ The application uses an **event-driven architecture** with clear separation of c
    - Eliminates circular dependencies
    - Enables decoupled communication
 
-2. **AppState** (`core/app_state.py`) - Single source of truth
-   - All application state (playlist, playback state, volume, etc.)
-   - State changes automatically publish events
-   - Prevents duplicate state tracking
+2. **AppState** (`core/app_state.py`) - Application state
+   - Playback state, volume, shuffle, backend; when `PlaylistManager` is set, playlist reads/writes delegate to it
+   - State changes publish events
+   - **PlaylistManager** (`core/playlist_manager.py`) - Source of truth for playlist data and file persistence; publishes playlist events when changed
 
 3. **PlaybackController** (`core/playback_controller.py`) - Mediator pattern
    - Routes playback commands to appropriate backend (MOC, internal player, BT sink)
@@ -1322,9 +1322,9 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
 ```
 
 **Playlist data flow:**
-- **AppState** is the source of truth for the current playlist and index; all UI and playback read from it.
-- **PlaylistManager** holds the same data for persistence: auto-save to `current_playlist.json` and named save/load. It is kept in sync from AppState by PlaylistView (debounced sync on PLAYLIST_CHANGED, and an immediate sync before "Save Playlist").
-- Add/remove/move/clear should go through PlaylistView so both AppState and PlaylistManager are updated; open-files and save both use this path so saved and restored playlists match what is on screen.
+- **PlaylistManager** is the source of truth for playlist data and persistence (auto-save to `current_playlist.json`, named save/load). It publishes playlist events when changed.
+- **AppState** delegates playlist reads/writes to PlaylistManager when it is set (at startup); UI and playback read via AppState or PlaylistManager.
+- PlaylistView and other UI call PlaylistManager for add/remove/move/clear; events drive view updates. Save reads from PlaylistManager directly.
 
 **Benefits:**
 - **No circular dependencies** - Components only depend on EventBus and AppState
@@ -1354,6 +1354,8 @@ The codebase follows systematic harmonization to ensure consistency and maintain
 - 🔄 Type hints completion
 - 🔄 Documentation improvements
 - 🔄 Error handling improvements
+
+**Remaining implementations:** A detailed, actionable list of unfinished features (music library fs monitoring, user error notifications, tests, `data/` service files, harmonization) is in [TODO.md](TODO.md).
 
 #### MOC Integration Architecture
 
@@ -1421,6 +1423,7 @@ The codebase follows Linux best practices:
 - **Explicit state machines** using enums instead of boolean flags
 - **Separation of concerns** between UI updates and playback operations
 - **Race condition prevention** through explicit state management
+- **Code cleanup log**: All incremental cleanups (dead code, imports, exception handling) are documented in `cleanup.md`.
 
 #### Testing
 

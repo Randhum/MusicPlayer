@@ -3,7 +3,6 @@
 # ============================================================================
 # Standard Library Imports (alphabetical)
 # ============================================================================
-from pathlib import Path
 from typing import List, Optional
 
 # ============================================================================
@@ -58,14 +57,14 @@ class MainWindow(Gtk.ApplicationWindow):
         # Ensure window can be maximized
         self.set_resizable(True)
 
-        # Initialize event bus and state (foundation layer)
+        # Initialize event bus, playlist manager, and state (foundation layer)
         self.event_bus = EventBus()
-        self.app_state = AppState(self.event_bus)
+        self.playlist_manager = PlaylistManager(event_bus=self.event_bus)
+        self.app_state = AppState(self.event_bus, playlist_manager=self.playlist_manager)
 
         # Initialize core components (backends)
         self.library = MusicLibrary()
         self.player = AudioPlayer()
-        self.playlist_manager = PlaylistManager()
         # Initialize BT manager with event bus
         self.bt_manager = BluetoothManager(parent_window=self, event_bus=self.event_bus)
         # Initialize BT sink with event bus
@@ -101,46 +100,23 @@ class MainWindow(Gtk.ApplicationWindow):
         if current_track:
             self.metadata_panel.sync_with_state(current_track)
 
-        # Sync with MOC playlist on startup if MOC is running
-        # This takes priority over the auto-save file since MOC is the source of truth
+        # Sync with MOC playlist on startup if MOC is running; otherwise load from auto-save file
         if self.use_moc:
             status = self.moc_controller.get_status(force_refresh=True)
             if status:
-                # MOC is running - sync shuffle state FIRST before loading playlist
-                # This ensures shuffle state is correct before any playlist operations
                 moc_shuffle = self.moc_controller.get_shuffle_state()
                 if moc_shuffle is not None:
                     self.app_state.set_shuffle_enabled(moc_shuffle)
-                
-                # Load its playlist
                 tracks, current_index = self.moc_controller.get_playlist()
                 if tracks:
                     logger.info("Syncing playlist from MOC on startup: %d tracks", len(tracks))
-                    # Update playlist manager to match MOC state
-                    self.playlist_manager.clear()
-                    self.playlist_manager.add_tracks(tracks)
-                    if current_index >= 0:
-                        self.playlist_manager.set_current_index(current_index)
-                    # Update app state and UI
                     self.app_state.set_playlist(tracks, current_index)
                 else:
-                    # MOC is running but has no playlist - load from auto-save file
-                    if self.playlist_manager.load_current_playlist():
-                        tracks = self.playlist_manager.get_playlist()
-                        current_index = self.playlist_manager.get_current_index()
-                        self.app_state.set_playlist(tracks, current_index)
+                    self.playlist_manager.load_current_playlist()
             else:
-                # MOC is not running - load from auto-save file
-                if self.playlist_manager.load_current_playlist():
-                    tracks = self.playlist_manager.get_playlist()
-                    current_index = self.playlist_manager.get_current_index()
-                    self.app_state.set_playlist(tracks, current_index)
+                self.playlist_manager.load_current_playlist()
         else:
-            # MOC not available - load from auto-save file
-            if self.playlist_manager.load_current_playlist():
-                tracks = self.playlist_manager.get_playlist()
-                current_index = self.playlist_manager.get_current_index()
-                self.app_state.set_playlist(tracks, current_index)
+            self.playlist_manager.load_current_playlist()
 
         # Load saved layout
         GLib.idle_add(self.dock_manager.load_layout)
@@ -376,10 +352,7 @@ class MainWindow(Gtk.ApplicationWindow):
             playlist_manager=self.playlist_manager,
             window=self,
         )
-        self.playlist_view.connect("track-activated", self._on_playlist_track_activated)
-        self.playlist_view.connect(
-            "current-index-changed", self._on_playlist_current_index_changed
-        )
+        # PlaylistView handles track activation and index changes internally
         # Show refresh button only when MOC is available
         self.playlist_view.set_moc_mode(self.use_moc)
 
@@ -502,29 +475,6 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle album selection from library browser."""
         self.playlist_view.replace_and_play_album(tracks)
 
-    def _on_playlist_track_activated(self, view, index: int):
-        """Handle track activation in playlist - delegate to playlist_view."""
-        # PlaylistView now handles this internally via play_track_at_index()
-        # Keep signal connection for potential external coordination if needed
-        pass
-
-    def _on_playlist_current_index_changed(self, view, index: int):
-        """Handle current index change - for external coordination only."""
-        # MOC sync is now handled internally in playlist_view.play_track_at_index()
-        # Keep this handler only if needed for metadata panel or other external coordination
-        pass
-
-    def _on_track_changed(self, controls, track: TrackMetadata):
-        """Handle track change from player_controls (legacy signal)."""
-        # Metadata panel now subscribes to events directly
-        # MPRIS2 navigation is updated via events
-        pass
-
     def _on_system_volume_changed(self, volume: float):
         """Handle system volume change from external source (e.g., volume keys) - update UI."""
         self.app_state.set_volume(volume)
-
-    def _on_shuffle_toggled(self, controls, active: bool):
-        """Handle shuffle toggle state changes (legacy signal)."""
-        # Shuffle state is now managed by AppState and events
-        pass
