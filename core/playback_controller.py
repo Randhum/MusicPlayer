@@ -95,6 +95,11 @@ class PlaybackController:
         self._syncing_to_moc: bool = False  # Guard to prevent concurrent syncs
         self._user_action_time: float = 0.0  # Timestamp of last user-initiated action
         self._startup_complete: bool = False  # Guard to prevent startup race conditions
+        self._moc_sync_tracks: List[TrackMetadata] = []  # Tracks pending MOC sync
+        self._moc_sync_index: int = 0  # Current index in chunked sync
+        self._moc_sync_current_index: int = -1  # Current index to set after sync
+        self._moc_sync_start_playback: bool = False  # Whether to start playback after sync
+        self._moc_sync_chunk_id: Optional[int] = None  # Chunked sync timeout ID
 
         # Shuffle queue management (for both MOC and internal player)
         self._shuffle_queue: List[int] = (
@@ -654,6 +659,8 @@ class PlaybackController:
         """
         Sync playlist to MOC using native MOC commands.
         
+        For large playlists, uses chunked sync to avoid blocking UI.
+        
         Returns:
             False to indicate this is a one-time callback (for GLib.idle_add)
         """
@@ -665,28 +672,113 @@ class PlaybackController:
             logger.debug("MOC sync already in progress, skipping duplicate sync")
             return False
 
-        self._syncing_to_moc = True
-        try:
-            playlist = self._state.playlist
-            current_index = self._state.current_index
-            track = self._state.current_track
+        playlist = self._state.playlist
+        current_index = self._state.current_index
+        track = self._state.current_track
 
-            # Only start playback if track is audio (not video)
-            should_start = (
-                start_playback and track is not None and not is_video_file(track.file_path)
-            )
+        # Only start playback if track is audio (not video)
+        should_start = (
+            start_playback and track is not None and not is_video_file(track.file_path)
+        )
 
-            # Use MOC's native commands to set the playlist
-            # This keeps MOC's internal state in sync
-            # Note: This does many --append commands which can be slow for large playlists
-            self._moc_controller.set_playlist(
-                playlist, current_index, start_playback=should_start
-            )
-
+        # For large playlists, use chunked sync to avoid blocking
+        if len(playlist) >= 100:
+            # Store sync state for chunked processing
+            self._moc_sync_tracks = playlist.copy()
+            self._moc_sync_current_index = current_index
+            self._moc_sync_start_playback = should_start
+            self._moc_sync_index = 0
+            self._syncing_to_moc = True
+            
+            # Write M3U file first (fast, single operation)
+            self._moc_controller.write_m3u_playlist(playlist, current_index)
+            
+            # Clear playlist and start chunked append
+            self._moc_controller.clear_playlist()
+            
+            # Start chunked append process
+            self._moc_sync_chunk_id = GLib.idle_add(self._sync_moc_playlist_chunked)
+            
             # Track when we modified MOC
             self._recent_moc_write = time.time()
+            
+            return False
+        else:
+            # For small playlists, sync synchronously (fast enough)
+            self._syncing_to_moc = True
+            try:
+                # Use MOC's native commands to set the playlist
+                self._moc_controller.set_playlist(
+                    playlist, current_index, start_playback=should_start
+                )
 
-            # Update playlist mtime (MOC will write to the file after our commands)
+                # Track when we modified MOC
+                self._recent_moc_write = time.time()
+
+                # Update playlist mtime (MOC will write to the file after our commands)
+                try:
+                    config = get_config()
+                    moc_playlist_path = config.moc_playlist_path
+                    if moc_playlist_path.exists():
+                        self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
+                except OSError:
+                    pass
+            finally:
+                self._syncing_to_moc = False
+            
+            return False  # Don't repeat
+    
+    def _sync_moc_playlist_chunked(self) -> bool:
+        """
+        Append tracks to MOC playlist in chunks to avoid blocking.
+        
+        Returns:
+            False (always) - we schedule next chunks explicitly via GLib.idle_add
+        """
+        if not self._syncing_to_moc or not self._moc_sync_tracks:
+            # Sync was cancelled or completed
+            self._finalize_moc_sync()
+            return False
+        
+        chunk_size = 50  # Process 50 tracks per chunk
+        end_index = min(self._moc_sync_index + chunk_size, len(self._moc_sync_tracks))
+        
+        # Append tracks in this chunk
+        for i in range(self._moc_sync_index, end_index):
+            track = self._moc_sync_tracks[i]
+            if track and track.file_path:
+                file_path = Path(track.file_path)
+                if file_path.exists() and file_path.is_file():
+                    abs_path = str(file_path.resolve())
+                    self._moc_controller.append_track_file(abs_path)
+        
+        self._moc_sync_index = end_index
+        
+        # Check if more chunks to process
+        if end_index < len(self._moc_sync_tracks):
+            # Schedule next chunk with updated index
+            self._moc_sync_chunk_id = GLib.idle_add(self._sync_moc_playlist_chunked)
+            return False  # Don't repeat automatically - we scheduled next chunk
+        
+        # All chunks processed - finalize
+        self._finalize_moc_sync()
+        return False  # Done
+    
+    def _finalize_moc_sync(self) -> None:
+        """Finalize MOC sync - start playback if requested and update state."""
+        try:
+            # Start playback if requested
+            # Use play_file() which finds the track by path (works even if some tracks were filtered)
+            if self._moc_sync_start_playback and self._moc_sync_current_index >= 0:
+                if 0 <= self._moc_sync_current_index < len(self._moc_sync_tracks):
+                    track = self._moc_sync_tracks[self._moc_sync_current_index]
+                    if track and track.file_path:
+                        file_path = Path(track.file_path)
+                        if file_path.exists() and file_path.is_file():
+                            # play_file() uses --playit which finds the file in playlist
+                            self._moc_controller.play_file(track.file_path)
+            
+            # Update playlist mtime
             try:
                 config = get_config()
                 moc_playlist_path = config.moc_playlist_path
@@ -695,9 +787,13 @@ class PlaybackController:
             except OSError:
                 pass
         finally:
+            # Clear sync state
             self._syncing_to_moc = False
-        
-        return False  # Don't repeat
+            self._moc_sync_tracks = []
+            self._moc_sync_index = 0
+            self._moc_sync_current_index = -1
+            self._moc_sync_start_playback = False
+            self._moc_sync_chunk_id = None
 
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle playlist change - sync to MOC if using MOC and regenerate shuffle queue."""
@@ -717,13 +813,26 @@ class PlaybackController:
             GLib.idle_add(self._sync_moc_playlist, False)
 
         # Regenerate shuffle queue when playlist changes
+        # For large playlists, defer to avoid blocking event handler
         if self._state.shuffle_enabled:
-            self._regenerate_shuffle_queue()
+            playlist_size = len(self._state.playlist)
+            if playlist_size > 100:
+                # Defer shuffle queue regeneration for large playlists
+                GLib.idle_add(self._regenerate_shuffle_queue)
+            else:
+                # Synchronous regeneration for small playlists (fast enough)
+                self._regenerate_shuffle_queue()
 
     def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle shuffle state change - regenerate shuffle queue."""
         if data and data.get("enabled", False):
-            self._regenerate_shuffle_queue()
+            playlist_size = len(self._state.playlist)
+            if playlist_size > 100:
+                # Defer shuffle queue regeneration for large playlists
+                GLib.idle_add(self._regenerate_shuffle_queue)
+            else:
+                # Synchronous regeneration for small playlists
+                self._regenerate_shuffle_queue()
         else:
             # Clear shuffle queue when shuffle is disabled
             self._shuffle_queue = []
@@ -745,12 +854,17 @@ class PlaybackController:
         # Pop the next index from the queue
         return self._shuffle_queue.pop(0)
 
-    def _regenerate_shuffle_queue(self) -> None:
-        """Regenerate the shuffle queue with all playlist indices in random order."""
+    def _regenerate_shuffle_queue(self) -> bool:
+        """
+        Regenerate the shuffle queue with all playlist indices in random order.
+        
+        Returns:
+            False to indicate this is a one-time callback (for GLib.idle_add)
+        """
         playlist = self._state.playlist
         if not playlist:
             self._shuffle_queue = []
-            return
+            return False
 
         # Create a list of all indices
         indices = list(range(len(playlist)))
@@ -766,6 +880,7 @@ class PlaybackController:
             indices.append(current_idx)
 
         self._shuffle_queue = indices
+        return False  # Don't repeat
 
     def _poll_internal_player_status(self) -> bool:
         """Poll internal player status and update state."""
@@ -1094,6 +1209,13 @@ class PlaybackController:
     # ============================================================================
 
     def cleanup(self) -> None:
-        """Clean up resources."""
+        """Clean up resources when controller is destroyed."""
+        # Cancel any pending chunked sync
+        if self._moc_sync_chunk_id is not None:
+            GLib.source_remove(self._moc_sync_chunk_id)
+            self._moc_sync_chunk_id = None
+            self._syncing_to_moc = False
+            self._moc_sync_tracks = []
+        
         if self._use_moc:
             self._moc_controller.shutdown()

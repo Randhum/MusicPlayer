@@ -106,15 +106,15 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
         if not self.window:
             self.window = MainWindow(app)
 
-        # Add files to playlist
+        # Add files to playlist via PlaylistView so both AppState and
+        # PlaylistManager (and UI) stay in sync; avoids stale save/auto-save.
         for file_info in files:
             file_path = file_info.get_path()
             if file_path:
                 from core.metadata import TrackMetadata
 
                 track = TrackMetadata(file_path)
-                # Add track via AppState (which publishes events)
-                self.window.app_state.add_track(track)
+                self.window.playlist_view.add_track(track)
 
         self.window.present()
 

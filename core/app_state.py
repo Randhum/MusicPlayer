@@ -110,9 +110,11 @@ class AppState:
         else:
             self._current_track = None
 
+        # Publish event with minimal data - subscribers can read playlist from AppState directly
+        # This avoids copying the entire playlist list
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": current_index},
+            {"playlist_changed": True, "index": current_index},
         )
 
     def set_current_index(self, index: int) -> None:
@@ -174,9 +176,10 @@ class AppState:
             EventBus.PLAYLIST_TRACK_ADDED,
             {"track": track, "position": position or len(self._playlist) - 1},
         )
+        # Pass minimal data - subscribers can read playlist from AppState directly
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index},
         )
 
     def add_tracks(
@@ -209,9 +212,10 @@ class AppState:
         # Publish events once for the batch operation
         # Note: We don't publish individual PLAYLIST_TRACK_ADDED events for each track
         # to avoid flooding the event bus. The PLAYLIST_CHANGED event is sufficient.
+        # Pass minimal data - subscribers can read playlist from AppState directly
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index},
         )
 
     def remove_track(self, index: int) -> None:
@@ -299,7 +303,8 @@ class AppState:
         self._current_index = -1
         self._current_track = None
         self._event_bus.publish(EventBus.PLAYLIST_CLEARED, {})
-        self._event_bus.publish(EventBus.PLAYLIST_CHANGED, {"tracks": [], "index": -1})
+        # Pass minimal data - subscribers can read playlist from AppState directly
+        self._event_bus.publish(EventBus.PLAYLIST_CHANGED, {"playlist_changed": True, "index": -1})
 
     # ============================================================================
     # Playback State Properties

@@ -635,6 +635,14 @@ If the application crashes with a GTK fatal error when dragging playlist items:
 - All widget property accesses are now protected with try/except blocks to handle invalid widget states gracefully
 - The drag target index calculation now properly accounts for the move_track() logic which adjusts insert index when moving down
 
+### "Save Playlist" or "Load Playlist" shows wrong / missing tracks
+
+**Issue:** After refreshing from MOC, loading a playlist, opening files from the command line, or replacing the playlist, clicking "Save Playlist" could persist an outdated playlist, or opened files did not appear in the saved/current playlist.
+
+**What was fixed:**
+- **Save:** `save_playlist()` now syncs AppState → PlaylistManager immediately before saving, so the named playlist file always reflects what is on screen, even when the last change was a refresh, load, or open-files.
+- **Open files:** Files added via command line or drag-and-drop now go through `PlaylistView.add_track()`, so both AppState and PlaylistManager (and the UI) stay in sync. Previously they only updated AppState, so PlaylistManager and auto-save could be stale until the 2s debounced sync.
+
 ### "Add Folder" button not working in library view
 
 **Issue:** The "Add Folder to Playlist" option in the library browser context menu wasn't working, especially when MOC wasn't currently the active playback backend.
@@ -1312,6 +1320,11 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
                                                           ↓
                                                     UI Components (update display)
 ```
+
+**Playlist data flow:**
+- **AppState** is the source of truth for the current playlist and index; all UI and playback read from it.
+- **PlaylistManager** holds the same data for persistence: auto-save to `current_playlist.json` and named save/load. It is kept in sync from AppState by PlaylistView (debounced sync on PLAYLIST_CHANGED, and an immediate sync before "Save Playlist").
+- Add/remove/move/clear should go through PlaylistView so both AppState and PlaylistManager are updated; open-files and save both use this path so saved and restored playlists match what is on screen.
 
 **Benefits:**
 - **No circular dependencies** - Components only depend on EventBus and AppState

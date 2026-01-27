@@ -59,6 +59,9 @@ class PlaylistView(Gtk.Box):
         self.playlist_manager = playlist_manager  # Only for file persistence
         self.window = window
         self._use_moc: bool = False  # Track MOC mode state
+        self._bulk_update_in_progress: bool = False  # Track if bulk update is in progress
+        self._chunked_update_id: Optional[int] = None  # Track chunked update timeout ID
+        self._pending_save_id: Optional[int] = None  # Track pending save timeout ID
 
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -382,6 +385,10 @@ class PlaylistView(Gtk.Box):
 
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist."""
+        # Sync AppState → PlaylistManager so we always save what's on screen
+        # (avoids saving stale data when last change was set_playlist/refresh/open-files)
+        self.playlist_manager.current_playlist = self._state.playlist.copy()
+        self.playlist_manager.current_index = self._state.current_index
         return self.playlist_manager.save_playlist(name)
 
     def load_playlist(self, name: str) -> bool:
@@ -482,7 +489,6 @@ class PlaylistView(Gtk.Box):
         Args:
             folder_path: Path to the folder to play.
         """
-        self.clear()
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return
@@ -496,7 +502,10 @@ class PlaylistView(Gtk.Box):
         tracks.sort(key=lambda t: t.file_path)
         
         if tracks:
-            self.add_tracks(tracks)
+            # Use set_playlist for atomic update (triggers PLAYLIST_CHANGED event)
+            # This is consistent with replace_and_play_album and avoids double updates
+            self.set_playlist(tracks, 0)
+            # play_track_at_index will set the index and publish action
             self.play_track_at_index(0)
 
     # ============================================================================
@@ -519,16 +528,39 @@ class PlaylistView(Gtk.Box):
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
         """Handle playlist changed event."""
-        # Sync PlaylistManager to match AppState (source of truth)
-        # This ensures the saved playlist file stays in sync
-        # Defer file I/O to avoid blocking UI thread
-        GLib.idle_add(self._sync_playlist_manager_to_state)
+        # Schedule debounced save (cancels previous pending save)
+        self._schedule_deferred_save()
         
         # Refresh the view from current state
+        # For large playlists, _update_view() will use chunked updates automatically
         self._update_view()
     
+    def _schedule_deferred_save(self, delay: float = 2.0) -> None:
+        """
+        Schedule a deferred save with debouncing.
+        
+        Cancels any pending save and schedules a new one after the delay.
+        This prevents multiple saves during rapid playlist changes.
+        
+        Args:
+            delay: Delay in seconds before saving (default 2.0)
+        """
+        # Cancel any existing pending save
+        if self._pending_save_id is not None:
+            GLib.source_remove(self._pending_save_id)
+            self._pending_save_id = None
+        
+        # Schedule new save after delay
+        self._pending_save_id = GLib.timeout_add(
+            int(delay * 1000),  # Convert to milliseconds
+            self._sync_playlist_manager_to_state
+        )
+    
     def _sync_playlist_manager_to_state(self) -> bool:
-        """Sync PlaylistManager to AppState (runs asynchronously, non-blocking)."""
+        """Sync AppState → PlaylistManager and persist (runs asynchronously, non-blocking)."""
+        # Clear pending save ID
+        self._pending_save_id = None
+        
         try:
             # Update playlist and current_index in PlaylistManager to match AppState
             self.playlist_manager.current_playlist = self._state.playlist.copy()
@@ -580,9 +612,97 @@ class PlaylistView(Gtk.Box):
 
     def _update_view(self):
         """Update the tree view with current tracks."""
-        self.store.clear()
         tracks = self._state.playlist
-        for i, track in enumerate(tracks):
+        
+        # Always reset bulk update state before starting a new update
+        # This ensures consistent behavior regardless of previous state
+        if self._chunked_update_id is not None:
+            GLib.source_remove(self._chunked_update_id)
+            self._chunked_update_id = None
+        self._bulk_update_in_progress = False
+        
+        # For large playlists, use chunked updates to avoid blocking UI
+        if len(tracks) >= 100:
+            # Start chunked update
+            self._bulk_update_in_progress = True
+            self.store.clear()
+            # Process first chunk immediately to show something right away
+            # Then schedule remaining chunks asynchronously
+            first_chunk_size = min(100, len(tracks))
+            for i in range(first_chunk_size):
+                track = tracks[i]
+                title = track.title or Path(track.file_path).stem
+                artist = track.artist or "Unknown Artist"
+                duration = (
+                    self._format_duration(track.duration) if track.duration else "--:--"
+                )
+                self.store.append([i + 1, title, artist, duration])
+            
+            # If there are more tracks, schedule remaining chunks
+            if len(tracks) > first_chunk_size:
+                self._chunked_update_id = GLib.idle_add(self._update_view_chunked, first_chunk_size)
+            else:
+                # All tracks processed in first chunk
+                self._bulk_update_in_progress = False
+                self._chunked_update_id = None
+                self._update_selection()
+                self._update_button_states()
+        else:
+            # For small playlists, update synchronously (fast enough)
+            self.store.clear()
+            for i, track in enumerate(tracks):
+                # Use filename as fallback if title is missing
+                title = track.title or Path(track.file_path).stem
+                artist = track.artist or "Unknown Artist"
+                duration = (
+                    self._format_duration(track.duration) if track.duration else "--:--"
+                )
+                self.store.append([i + 1, title, artist, duration])
+            self._update_selection()
+            # Update button states
+            self._update_button_states()
+    
+    def _update_view_chunked(self, start_index: int, chunk_size: int = 100) -> bool:
+        """
+        Update tree view in chunks to avoid blocking UI.
+        
+        Args:
+            start_index: Index to start processing from
+            chunk_size: Number of tracks to process per chunk
+            
+        Returns:
+            False (always) - we schedule next chunks explicitly via GLib.idle_add
+        """
+        # Always read current playlist state (may have changed since callback was scheduled)
+        tracks = self._state.playlist
+        total_tracks = len(tracks)
+        
+        # Verify we're still in bulk update mode (might have been cancelled by another _update_view call)
+        if not self._bulk_update_in_progress:
+            # Update was cancelled, clean up and exit
+            self._chunked_update_id = None
+            return False
+        
+        # Safety check: if playlist is empty or start_index is out of bounds, finalize
+        if total_tracks == 0:
+            self._bulk_update_in_progress = False
+            self._chunked_update_id = None
+            self._update_selection()
+            self._update_button_states()
+            return False
+        
+        # If start_index is beyond current playlist, we're done (playlist might have shrunk)
+        if start_index >= total_tracks:
+            self._bulk_update_in_progress = False
+            self._chunked_update_id = None
+            self._update_selection()
+            self._update_button_states()
+            return False
+        
+        # Process one chunk
+        end_index = min(start_index + chunk_size, total_tracks)
+        for i in range(start_index, end_index):
+            track = tracks[i]
             # Use filename as fallback if title is missing
             title = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
@@ -590,9 +710,19 @@ class PlaylistView(Gtk.Box):
                 self._format_duration(track.duration) if track.duration else "--:--"
             )
             self.store.append([i + 1, title, artist, duration])
+        
+        # Check if more chunks to process
+        if end_index < total_tracks:
+            # Schedule next chunk with updated start_index
+            self._chunked_update_id = GLib.idle_add(self._update_view_chunked, end_index)
+            return False  # Don't repeat automatically - we scheduled the next chunk explicitly
+        
+        # All chunks processed - finalize
+        self._bulk_update_in_progress = False
+        self._chunked_update_id = None
         self._update_selection()
-        # Update button states
         self._update_button_states()
+        return False  # Done
 
     def _update_selection(self, skip_scroll: bool = False):
         """Update the selection to highlight current track or show blinking highlight.
@@ -600,6 +730,9 @@ class PlaylistView(Gtk.Box):
         Args:
             skip_scroll: If True, skip scrolling to current track (faster, use during drag operations)
         """
+        # Skip selection updates during bulk updates (will be called after all chunks are done)
+        if self._bulk_update_in_progress:
+            return
         selection = self.tree_view.get_selection()
         tracks = self._state.playlist
         current_index = self._state.current_index
@@ -1496,3 +1629,13 @@ class PlaylistView(Gtk.Box):
         if self._tap_timeout_id is not None:
             GLib.source_remove(self._tap_timeout_id)
             self._tap_timeout_id = None
+        
+        # Cancel any pending chunked update
+        if self._chunked_update_id is not None:
+            GLib.source_remove(self._chunked_update_id)
+            self._chunked_update_id = None
+        
+        # Cancel any pending save
+        if self._pending_save_id is not None:
+            GLib.source_remove(self._pending_save_id)
+            self._pending_save_id = None
