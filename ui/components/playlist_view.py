@@ -495,9 +495,18 @@ class PlaylistView(Gtk.Box):
             self._chunked_update_id = None
         self._bulk_update_in_progress = False
         
-        # Clear selection before clearing store to avoid invalid iters (GTK assertion)
+        # Save which row was selected so we can restore blink after repopulate (GTK assertion fix)
         selection = self.tree_view.get_selection()
+        self._saved_selected_index = -1
         if selection:
+            try:
+                model, tree_iter = selection.get_selected()
+                if tree_iter:
+                    path = model.get_path(tree_iter)
+                    if path and path.get_indices():
+                        self._saved_selected_index = path.get_indices()[0]
+            except (ValueError, AttributeError, RuntimeError):
+                pass
             try:
                 selection.unselect_all()
             except (ValueError, AttributeError, RuntimeError):
@@ -633,6 +642,13 @@ class PlaylistView(Gtk.Box):
                     selected_index = indices[0]
             except (ValueError, AttributeError, RuntimeError):
                 selected_index = -1
+        # Restore "other row selected" after repopulate so blink continues (used once per _update_view)
+        if selected_index < 0 and getattr(self, "_saved_selected_index", -1) >= 0:
+            saved = self._saved_selected_index
+            self._saved_selected_index = -1
+            if 0 <= saved < len(tracks):
+                selected_index = saved
+                selected_path = Gtk.TreePath.new_from_indices([saved])
 
         # If current playing track is selected, show normal selection
         if selected_index == current_index and current_index >= 0:
@@ -652,8 +668,9 @@ class PlaylistView(Gtk.Box):
             current_path = Gtk.TreePath.new_from_indices([current_index])
             self._start_blinking_highlight(current_path)
 
-            # Keep the user's selection visible
-            if selected_path:
+            # Keep the user's selection visible (selection model + cursor for _cell_data_func / _blink_toggle)
+            if selected_path is not None:
+                selection.select_path(selected_path)
                 self.tree_view.set_cursor(selected_path, None, False)
         elif current_index >= 0 and 0 <= current_index < len(tracks):
             # No other row selected - select current track normally
@@ -673,6 +690,7 @@ class PlaylistView(Gtk.Box):
     def _setup_blinking_highlight(self):
         """Setup blinking highlight system."""
         self._blink_path = None  # Track which path is blinking
+        self._saved_selected_index = -1  # Restore "other row selected" after store repopulate
 
     def _cell_data_func(self, column, cell, model, tree_iter, data):
         """Cell data function to apply background color for current playing track."""
@@ -700,10 +718,9 @@ class PlaylistView(Gtk.Box):
 
         # Apply background color based on state
         # Priority: drop target > current playing (blinking) > normal
-        
-        # Check if this is the drop target during drag
+        # cell-background-set must be True for custom background to be used (GTK 3/4)
         if self._drag_mode and row_index == self._drop_target_index and self._drop_target_index >= 0:
-            # Dark highlight for drop target
+            cell.set_property("cell-background-set", True)
             cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.2, 0.2, 0.7))
         elif (
             row_index == current_index
@@ -711,16 +728,14 @@ class PlaylistView(Gtk.Box):
             and selected_index != current_index
             and selected_index >= 0
         ):
-            # This is the current playing track and another row is selected - apply blinking blue
+            cell.set_property("cell-background-set", True)
             if self._blink_state:
-                # Brighter blue (blink on)
                 cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.6))
             else:
-                # Dimmer blue (blink off)
                 cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.3))
         else:
-            # Clear background
-            cell.set_property("cell-background-rgba", None)
+            cell.set_property("cell-background-set", False)
+            cell.set_property("cell-background-rgba", Gdk.RGBA(0, 0, 0, 0))
 
     def _start_blinking_highlight(self, path: Gtk.TreePath):
         """Start blinking highlight on the given path."""
@@ -731,16 +746,8 @@ class PlaylistView(Gtk.Box):
         self._blink_path = path
         self._blink_state = True
 
-        # Force initial redraw by invalidating the row
-        try:
-            path_index = path.get_indices()[0] if path.get_indices() else -1
-            if 0 <= path_index < len(self.playlist_manager.get_playlist()) and 0 <= path_index < len(self.store):
-                tree_iter = self.store.get_iter(path)
-                if tree_iter:
-                    self.store.row_changed(path, tree_iter)
-        except (ValueError, AttributeError, RuntimeError):
-            # Fallback: just queue a redraw
-            self.tree_view.queue_draw()
+        # Redraw so _cell_data_func runs with new _blink_state (not in model; queue_draw is required)
+        self.tree_view.queue_draw()
 
         # Start timeout for blinking (1000ms interval - slower blink)
         self._blink_timeout_id = GLib.timeout_add(1000, self._blink_toggle)
@@ -785,17 +792,9 @@ class PlaylistView(Gtk.Box):
             # Update blink_path to current_index (in case it changed due to moves)
             self._blink_path = Gtk.TreePath.new_from_indices([current_index])
             self._blink_state = not self._blink_state
-            
-            # Force cell renderers to update by invalidating the row
-            try:
-                if 0 <= current_index < len(self.store):
-                    tree_iter = self.store.get_iter(self._blink_path)
-                    if tree_iter:
-                        # Invalidate the row to force redraw
-                        self.store.row_changed(self._blink_path, tree_iter)
-            except (ValueError, AttributeError, RuntimeError):
-                # Fallback: just queue a redraw
-                self.tree_view.queue_draw()
+
+            # Redraw so _cell_data_func runs with new _blink_state (not in model; queue_draw required)
+            self.tree_view.queue_draw()
             return True  # Continue timeout
         else:
             # Conditions no longer met - stop blinking
@@ -894,6 +893,9 @@ class PlaylistView(Gtk.Box):
                 selection.select_path(path)
                 # Set cursor to visually select the row
                 self.tree_view.set_cursor(path, None, False)
+                # Defer selection logic to next main-loop iteration so GTK has committed selection;
+                # skip_scroll=True keeps the clicked row in view instead of scrolling to current track
+                GLib.idle_add(lambda: self._update_selection(skip_scroll=True))
                 return
 
         self._click_selected_index = -1
