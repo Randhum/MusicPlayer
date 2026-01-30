@@ -43,18 +43,17 @@ class OperationState(Enum):
 
 # MOC status update interval (milliseconds)
 MOC_STATUS_UPDATE_INTERVAL = 500
+# Seconds to treat a MOC/shuffle write as "recent" (skip reload to avoid races)
+RECENT_WRITE_WINDOW = 2.0
 
 
 class PlaybackController:
     """
-    Mediator that routes playback commands to appropriate backends.
-
-    Handles:
-    - Backend selection (MOC, internal player, BT sink)
-    - MOC status polling and state synchronization
-    - Track change detection
-    - Playlist synchronization with MOC
-    - Ensuring only one backend is active at a time
+    Routes playback to backends (MOC, internal player, BT sink). Subscribes to
+    action/playlist/shuffle events and publishes state via AppState; UI and
+    other components react to those events (pub/sub). Minimal guards: _loading_from_moc
+    and _syncing_to_moc prevent circular sync; _recent_*_write and RECENT_WRITE_WINDOW
+    avoid reload races.
     """
 
     def __init__(
@@ -84,18 +83,16 @@ class PlaybackController:
         self._use_moc = moc_controller.is_available()
         self._operation_state = OperationState.IDLE
 
-        # MOC tracking state
+        # MOC: file mtime, recent-write timestamps, load/sync guards
         self._moc_last_file: Optional[str] = None
         self._moc_playlist_mtime: float = 0.0
         self._recent_moc_write: Optional[float] = None
-        self._recent_shuffle_write: Optional[float] = (
-            None  # Guard to prevent circular shuffle sync
-        )
-        self._loading_from_moc: bool = False  # Guard to prevent circular sync
-        self._syncing_to_moc: bool = False  # Guard to prevent concurrent syncs
-        self._user_action_time: float = 0.0  # Timestamp of last user-initiated action
-        self._startup_complete: bool = False  # Guard to prevent startup race conditions
-        self._moc_sync_tracks: List[TrackMetadata] = []  # Tracks pending MOC sync
+        self._recent_shuffle_write: Optional[float] = None
+        self._loading_from_moc: bool = False
+        self._syncing_to_moc: bool = False
+        self._user_action_time: float = 0.0
+        self._startup_complete: bool = False
+        self._moc_sync_tracks: List[TrackMetadata] = []
         self._moc_sync_index: int = 0  # Current index in chunked sync
         self._moc_sync_current_index: int = -1  # Current index to set after sync
         self._moc_sync_start_playback: bool = False  # Whether to start playback after sync
@@ -131,6 +128,9 @@ class PlaybackController:
         self._events.subscribe(EventBus.ACTION_SET_VOLUME, self._on_action_set_volume)
         self._events.subscribe(EventBus.ACTION_REFRESH_MOC, self._on_action_refresh_moc)
         self._events.subscribe(
+            EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, self._on_action_sync_playlist_to_moc
+        )
+        self._events.subscribe(
             EventBus.ACTION_APPEND_FOLDER, self._on_action_append_folder
         )
 
@@ -161,42 +161,15 @@ class PlaybackController:
         GLib.timeout_add(500, self._poll_internal_player_status)  # 500ms interval
 
     def _initialize_moc(self) -> bool:
-        """Initialize MOC server and settings."""
+        """Initialize MOC server and settings. Playlist sync is driven by PLAYLIST_CHANGED (e.g. after main window loads)."""
         if not self._use_moc:
             self._startup_complete = True
             return False
-
         if self._moc_controller.ensure_server():
-            # Disable MOC's autonext - we handle track navigation ourselves
             self._moc_controller.disable_autonext()
-            # Sync shuffle state from MOC BEFORE checking playlist
-            # This ensures shuffle state is correct before any playlist operations
             moc_shuffle = self._moc_controller.get_shuffle_state()
             if moc_shuffle is not None:
                 self._state.set_shuffle_enabled(moc_shuffle)
-            
-            # Check if MOC playlist is empty but we have tracks in internal playlist
-            # Only sync if:
-            # 1. We haven't written to MOC recently (avoid race with startup sync)
-            # 2. We're not currently loading from MOC (avoid circular sync)
-            # 3. We're not already syncing (avoid concurrent syncs)
-            # 4. Startup is complete (avoid race with MainWindow initialization)
-            tracks, _ = self._moc_controller.get_playlist()
-            if not tracks:
-                # Check if we recently wrote to MOC (within last 2 seconds) - if so, skip to avoid race
-                recent_write = self._recent_moc_write and (time.time() - self._recent_moc_write < 2.0)
-                if not recent_write and not self._loading_from_moc and not self._syncing_to_moc:
-                    internal_tracks = self._state.playlist
-                    if internal_tracks:
-                        logger.info(
-                            "MOC playlist is empty on initialization, writing internal playlist (%d tracks) to MOC",
-                            len(internal_tracks)
-                        )
-                        GLib.idle_add(self._sync_moc_playlist, False)
-            
-            self._startup_complete = True
-            return False  # Don't repeat
-
         self._startup_complete = True
         return False
 
@@ -398,7 +371,6 @@ class PlaybackController:
                 self._moc_controller.enable_shuffle()
             else:
                 self._moc_controller.disable_shuffle()
-            # Track when we modified shuffle in MOC (increased window for slow MOC responses)
             self._recent_shuffle_write = time.time()
 
     def _on_action_set_loop_mode(self, data: Optional[Dict[str, Any]]) -> None:
@@ -421,119 +393,37 @@ class PlaybackController:
         # The SystemVolume class will handle the actual volume change
 
     def _on_action_refresh_moc(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle refresh from MOC action - reload playlist from MOC."""
+        """Handle refresh from MOC: sync MOC to disk, then reload playlist into app state (events drive UI)."""
         if not self._use_moc:
-            logger.debug("Refresh MOC requested but MOC mode not active")
             return
-
-        # Sync MOC's in-memory playlist to disk first
         self._moc_controller.sync_playlist()
-        
-        # Wait a moment for MOC to finish writing the file
-        # MOC writes asynchronously, so we need to wait for the file to be updated
-        if self._use_moc:
-            GLib.timeout_add(100, self._do_refresh_moc_after_sync)
-    
-    def _do_refresh_moc_after_sync(self) -> bool:
-        """Actually refresh playlist from MOC after sync has completed."""
-        # Get config and playlist path first
-        config = get_config()
-        moc_playlist_path = config.moc_playlist_path
-        
-        # Get current playing file from MOC status
+        GLib.timeout_add(100, self._refresh_moc_callback)
+
+    def _refresh_moc_callback(self) -> bool:
+        """Reload playlist from MOC after sync_playlist (used by refresh button)."""
         status = self._moc_controller.get_status(force_refresh=True)
         current_file = status.get("file_path") if status else None
+        self._reload_playlist_from_moc(current_file=current_file)
+        return False
 
-        # Load playlist from MOC's M3U file
-        tracks, current_index = self._moc_controller.get_playlist(
-            current_file=current_file
-        )
-        if tracks:
-            logger.info("Refreshed playlist from MOC: %d tracks, current_index=%d", len(tracks), current_index)
-            try:
-                self._loading_from_moc = True
-                # AppState.set_playlist delegates to PlaylistManager when set; events drive UI
-                self._state.set_playlist(tracks, current_index)
-            finally:
-                self._loading_from_moc = False
-            # Update mtime to prevent duplicate reload from polling
-            if moc_playlist_path.exists():
-                self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
-        else:
-            # Check if MOC actually has tracks by checking the playlist file directly
-            file_has_content = False
-            if moc_playlist_path.exists():
-                try:
-                    # Read file directly to see if it has content
-                    with moc_playlist_path.open("r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-                        # Check if file has actual track entries (not just header)
-                        lines = [line.strip() for line in content.splitlines() if line.strip()]
-                        has_tracks = any(
-                            line and not line.startswith("#EXTM3U") and not line.startswith("#EXTINF")
-                            for line in lines
-                        )
-                        if has_tracks:
-                            file_has_content = True
-                            # File has content but parsing failed - this is the real issue
-                            logger.warning(
-                                "MOC playlist file exists and has track entries (%d lines), "
-                                "but no valid tracks were parsed. This might indicate a path resolution issue. "
-                                "Using internal playlist state instead.",
-                                len(lines)
-                            )
-                            # Fallback: use our internal playlist state since MOC has tracks but we can't parse them
-                            internal_tracks = self._state.playlist
-                            if internal_tracks:
-                                logger.info(
-                                    "Using internal playlist state (%d tracks) instead of MOC file",
-                                    len(internal_tracks)
-                                )
-                                # Don't update state (it's already correct), just update mtime
-                                if moc_playlist_path.exists():
-                                    self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
-                        else:
-                            # File is empty or only has header
-                            logger.debug("MOC playlist file is empty or only contains header")
-                except Exception as e:
-                    logger.debug("Could not read MOC playlist file to verify: %s", e)
-            
-            if not file_has_content:
-                # File doesn't exist or is empty - MOC might not have synced yet or playlist is actually empty
-                logger.warning(
-                    "No tracks found in MOC playlist. "
-                    "This might be a timing issue (MOC hasn't written file yet) or the playlist is empty."
-                )
-                # If we have tracks in the internal playlist, write them to MOC
-                # Only if we're not already syncing or loading from MOC
-                if not self._syncing_to_moc and not self._loading_from_moc:
-                    internal_tracks = self._state.playlist
-                    if internal_tracks:
-                        logger.info(
-                            "Writing internal playlist (%d tracks) to MOC",
-                            len(internal_tracks)
-                        )
-                        GLib.idle_add(self._sync_moc_playlist, False)
-        
-        return False  # Don't repeat
+    def _on_action_sync_playlist_to_moc(self, data: Optional[Dict[str, Any]]) -> None:
+        """Handle explicit sync of internal playlist to MOC (e.g. after add track or play folder)."""
+        if not self._use_moc:
+            return
+        start_playback = data.get("start_playback", False) if data else False
+        GLib.idle_add(self._sync_moc_playlist, start_playback)
 
     def _on_action_append_folder(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle append folder action - add folder to MOC playlist."""
+        """Handle append folder action - add folder to MOC playlist, then reload into app state (UI updates via PLAYLIST_CHANGED)."""
         if not self._use_moc or not data or "folder_path" not in data:
             return
-
         folder_path = data["folder_path"]
         if not folder_path:
             return
-
-        # Use MOC's native append command for folders (recursively adds all tracks)
         if self._moc_controller.append_to_playlist(folder_path):
             logger.info("Appended folder to MOC playlist: %s", folder_path)
-            # Mark that we modified MOC (prevents polling from reloading immediately)
             self._recent_moc_write = time.time()
-            # Let polling mechanism handle the reload naturally after MOC writes the file
-            # This is more efficient than doing a full refresh immediately
-            # The polling will detect the mtime change after 0.5 seconds
+            self._reload_playlist_from_moc()
         else:
             logger.warning("Failed to append folder to MOC playlist: %s", folder_path)
 
@@ -790,21 +680,40 @@ class PlaybackController:
             self._moc_sync_start_playback = False
             self._moc_sync_chunk_id = None
 
+    def _reload_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
+        """Load playlist from MOC into app state. Events (PLAYLIST_CHANGED etc.) drive UI. Used by refresh, append_folder, and file-change polling."""
+        if not self._use_moc:
+            return
+        tracks, current_index = self._moc_controller.get_playlist(
+            current_file=current_file
+        )
+        if not tracks:
+            return
+        try:
+            self._loading_from_moc = True
+            self._state.set_playlist(tracks, current_index)
+        finally:
+            self._loading_from_moc = False
+        try:
+            config = get_config()
+            if config.moc_playlist_path.exists():
+                self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
+        except OSError:
+            pass
+
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle playlist change - sync to MOC only when content changed, regenerate shuffle queue."""
-        # Only sync TO MOC when playlist content changed (add/remove/move/clear), not on index-only
+        """React to playlist change: sync to MOC when content changed (pub/sub drives UI), regenerate shuffle queue."""
         content_changed = data is None or data.get("content_changed", True)
         if (
             content_changed
             and self._use_moc
-            and self._startup_complete
-            and (self._state.active_backend == "moc" or self._state.active_backend == "none")
+            and self._state.active_backend in ("moc", "none")
             and not self._loading_from_moc
             and not self._syncing_to_moc
         ):
             GLib.idle_add(self._sync_moc_playlist, False)
 
-        # Invalidate shuffle queue on playlist change, then regenerate if shuffle enabled
+        # Shuffle queue: invalidate and regenerate if shuffle enabled
         self._shuffle_queue = []
         if self._state.shuffle_enabled:
             playlist_size = len(self._state.playlist)
@@ -949,12 +858,11 @@ class PlaybackController:
             if self._state.playback_state != PlaybackState.STOPPED:
                 self._state.set_playback_state(PlaybackState.STOPPED)
 
-        # Sync shuffle state from MOC (but skip if we just changed it ourselves)
+        # Sync shuffle state from MOC (skip if we just changed it)
         moc_shuffle = status.get("shuffle", False)
         if moc_shuffle != self._state.shuffle_enabled:
-            # Check if we wrote it recently (within last 2.0 seconds) - increased window for slow MOC responses
             if not self._recent_shuffle_write or (
-                time.time() - self._recent_shuffle_write > 2.0
+                time.time() - self._recent_shuffle_write > RECENT_WRITE_WINDOW
             ):
                 # MOC's shuffle state changed externally - update our state
                 self._state.set_shuffle_enabled(moc_shuffle)
@@ -1028,19 +936,8 @@ class PlaybackController:
                     self._shuffle_queue.remove(idx)
                 return
 
-        # Track not found - MOC might have a different playlist
-        # Try to load from MOC
-        tracks, current_index = self._moc_controller.get_playlist(
-            current_file=file_path
-        )
-        if tracks:
-            # Update state with MOC's playlist (prevent circular sync)
-            # set_playlist will automatically update current_track based on current_index
-            try:
-                self._loading_from_moc = True
-                self._state.set_playlist(tracks, current_index)
-            finally:
-                self._loading_from_moc = False
+        # Track not in our playlist - MOC playlist may have changed; reload from MOC
+        self._reload_playlist_from_moc(current_file=file_path)
 
     def _handle_track_finished(self) -> None:
         """Handle track finished - auto-advance based on loop mode and autonext."""
@@ -1122,22 +1019,12 @@ class PlaybackController:
                 return
 
             mtime = moc_playlist_path.stat().st_mtime
-
-            # Check if file changed
             if abs(mtime - self._moc_playlist_mtime) > 0.1:
-                # Check if we wrote it recently (increased window to 2 seconds for slow file systems)
-                # Also check if startup is complete to avoid race with initialization
-                recent_write = self._recent_moc_write and (time.time() - self._recent_moc_write < 2.0)
+                recent_write = self._recent_moc_write and (
+                    time.time() - self._recent_moc_write < RECENT_WRITE_WINDOW
+                )
                 if not recent_write and self._startup_complete:
-                    # External change - load from MOC
-                    tracks, current_index = self._moc_controller.get_playlist()
-                    if tracks:
-                        # Set flag to prevent circular sync back to MOC
-                        try:
-                            self._loading_from_moc = True
-                            self._state.set_playlist(tracks, current_index)
-                        finally:
-                            self._loading_from_moc = False
+                    self._reload_playlist_from_moc()
                 self._moc_playlist_mtime = mtime
         except OSError:
             pass
