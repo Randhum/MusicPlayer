@@ -319,9 +319,10 @@ class MocController:
         except ValueError:
             pass
 
-        # Parse shuffle and autonext state from info
+        # Parse shuffle, autonext, and repeat state from info
         shuffle = info.get("Shuffle", "").strip().upper() == "ON"
         autonext = info.get("Autonext", "").strip().upper() == "ON"
+        repeat = info.get("Repeat", "").strip().upper() == "ON"
 
         status = {
             "state": state,  # PLAY, PAUSE, STOP
@@ -331,6 +332,7 @@ class MocController:
             "volume": volume,
             "shuffle": shuffle,
             "autonext": autonext,
+            "repeat": repeat,
         }
 
         # Update cache
@@ -609,6 +611,37 @@ class MocController:
             return status.get("autonext", False)
         return None
 
+    def enable_repeat(self):
+        """Enable repeat mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--on=repeat")
+
+    def disable_repeat(self):
+        """Disable repeat mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--off=repeat")
+
+    def toggle_repeat(self):
+        """Toggle repeat mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--toggle=repeat")
+
+    def get_repeat_state(self) -> Optional[bool]:
+        """Get current repeat state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("repeat", False)
+        return None
+
     # ------------------------------------------------------------------
     # Playlist write helpers
     # ------------------------------------------------------------------
@@ -708,6 +741,63 @@ class MocController:
         except Exception:
             return {}
 
+    def write_m3u_playlist(
+        self, tracks: List[TrackMetadata], current_index: int = -1
+    ) -> bool:
+        """
+        Write M3U playlist file directly with all tracks.
+        
+        This is much faster than sequential --append commands for large playlists.
+        
+        Args:
+            tracks: List of tracks to write to the playlist file
+            current_index: Current track index (for future use)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_available():
+            return False
+        
+        try:
+            # Ensure playlist directory exists
+            self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Build list of valid tracks with absolute paths
+            valid_tracks = []
+            for track in tracks:
+                if not track or not track.file_path:
+                    continue
+                file_path = Path(track.file_path)
+                if not file_path.exists() or not file_path.is_file():
+                    logger.warning("Track file does not exist: %s", track.file_path)
+                    continue
+                abs_path = str(file_path.resolve())
+                valid_tracks.append((track, abs_path))
+            
+            # Write M3U file
+            with self._playlist_path.open("w", encoding="utf-8") as f:
+                # Write header
+                f.write("#EXTM3U\n")
+                
+                # Write each track
+                for track, abs_path in valid_tracks:
+                    # Format EXTINF line: #EXTINF:duration,title - artist
+                    duration = int(track.duration) if track.duration else -1
+                    title = track.title or Path(track.file_path).stem
+                    artist = track.artist or "Unknown Artist"
+                    extinf_line = f"#EXTINF:{duration},{title} - {artist}\n"
+                    
+                    f.write(extinf_line)
+                    f.write(f"{abs_path}\n")
+            
+            logger.debug("Wrote M3U playlist file with %d tracks", len(valid_tracks))
+            return True
+            
+        except Exception as e:
+            logger.error("Failed to write M3U playlist file: %s", e, exc_info=True)
+            return False
+
     def clear_playlist(self):
         """Clear MOC's playlist using native command."""
         if not self.is_available():
@@ -740,6 +830,25 @@ class MocController:
         abs_path = str(p.resolve())
         result = self._run("--append", abs_path, capture_output=True)
         return result.returncode == 0
+    
+    def append_track_file(self, file_path: str) -> bool:
+        """
+        Append a single track file to MOC's playlist.
+        
+        Args:
+            file_path: Absolute path to the track file.
+            
+        Returns:
+            True if successful, False otherwise.
+        """
+        if not self.is_available():
+            return False
+        if not file_path:
+            return False
+        
+        self.ensure_server()
+        result = self._run("--append", file_path, capture_output=True)
+        return result.returncode == 0
 
     def set_playlist(
         self,
@@ -750,6 +859,9 @@ class MocController:
         """
         Replace MOC's playlist with the given tracks using native MOC commands.
 
+        Note: For large playlists (100+ tracks), PlaybackController uses chunked sync
+        instead of calling this method directly. This method is used for small playlists.
+
         Args:
             tracks: List of tracks to become the new playlist.
             current_index: Index of the track that should start playing (if start_playback is True).
@@ -759,9 +871,6 @@ class MocController:
             return
 
         self.ensure_server()
-
-        # Clear current playlist
-        self.clear_playlist()
 
         # Build list of valid tracks
         valid_tracks = []
@@ -778,7 +887,12 @@ class MocController:
             original_to_valid_index[orig_idx] = len(valid_tracks)
             valid_tracks.append((track, abs_path))
 
+        # Clear current playlist
+        self.clear_playlist()
+        
         # Append all tracks using native MOC command
+        # Note: For large playlists, chunked sync in PlaybackController handles this
+        # more efficiently. This method is used for small playlists (<100 tracks).
         for track, abs_path in valid_tracks:
             self._run("--append", abs_path)
 

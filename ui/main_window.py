@@ -3,7 +3,6 @@
 # ============================================================================
 # Standard Library Imports (alphabetical)
 # ============================================================================
-from pathlib import Path
 from typing import List, Optional
 
 # ============================================================================
@@ -18,7 +17,7 @@ from gi.repository import GLib, Gtk
 # ============================================================================
 # Local Imports (grouped by package, alphabetical)
 # ============================================================================
-from core.app_state import AppState
+from core.app_state import AppState, PlaybackState
 from core.audio_player import AudioPlayer
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
@@ -55,33 +54,38 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=app)
         self.set_title("Music Player")
         self.set_default_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
-        # Ensure window can be maximized
         self.set_resizable(True)
 
-        # Initialize event bus and state (foundation layer)
+        # ---------------------------------------------------------------------
+        # Layer 1: Foundation (event bus, playlist, app state)
+        # ---------------------------------------------------------------------
         self.event_bus = EventBus()
-        self.app_state = AppState(self.event_bus)
+        self.playlist_manager = PlaylistManager(event_bus=self.event_bus)
+        self.app_state = AppState(
+            self.event_bus, playlist_manager=self.playlist_manager
+        )
 
-        # Initialize core components (backends)
+        # ---------------------------------------------------------------------
+        # Layer 2: Backends (library, players, MOC, BT, volume, MPRIS2)
+        # ---------------------------------------------------------------------
         self.library = MusicLibrary()
         self.player = AudioPlayer()
-        self.playlist_manager = PlaylistManager()
-        # Initialize BT manager with event bus
-        self.bt_manager = BluetoothManager(parent_window=self, event_bus=self.event_bus)
-        # Initialize BT sink with event bus
-        self.bt_sink = BluetoothSink(self.bt_manager, event_bus=self.event_bus)
-        # System volume control
+        self.bt_manager = BluetoothManager(
+            parent_window=self, event_bus=self.event_bus
+        )
+        self.bt_sink = BluetoothSink(
+            self.bt_manager, event_bus=self.event_bus
+        )
         self.system_volume = SystemVolume(
             on_volume_changed=self._on_system_volume_changed
         )
-        # MOC integration (Music On Console)
         self.moc_controller = MocController()
         self.use_moc = self.moc_controller.is_available()
-
-        # MPRIS2 integration for desktop/media key support
         self.mpris2 = MPRIS2Manager()
 
-        # Initialize playback controller (mediator)
+        # ---------------------------------------------------------------------
+        # Layer 3: Playback controller (mediator; uses app_state and backends)
+        # ---------------------------------------------------------------------
         self.playback_controller = PlaybackController(
             app_state=self.app_state,
             event_bus=self.event_bus,
@@ -90,91 +94,87 @@ class MainWindow(Gtk.ApplicationWindow):
             bt_sink=self.bt_sink,
         )
 
-        # Initialize dock manager (needed before UI creation)
+        # ---------------------------------------------------------------------
+        # Layer 4: Dock manager (needed before UI)
+        # ---------------------------------------------------------------------
         self.dock_manager = DockManager(self)
 
-        # Create UI with dockable panels
+        # ---------------------------------------------------------------------
+        # Layer 5: UI (playlist_view and player_controls first for cross-refs)
+        # ---------------------------------------------------------------------
         self._create_ui()
-        
-        # Initialize metadata panel with current track if one exists
+
+        # ---------------------------------------------------------------------
+        # Layer 6: Post-UI init (playlist load, metadata sync, layout, library)
+        # ---------------------------------------------------------------------
+        self._init_playlist_and_state()
         current_track = self.app_state.current_track
         if current_track:
             self.metadata_panel.sync_with_state(current_track)
+        GLib.idle_add(self.dock_manager.load_layout)
+        self.library.scan_library(callback=self._on_library_scan_complete)
+        self.connect("close-request", self._on_close)
 
-        # Sync with MOC playlist on startup if MOC is running
-        # This takes priority over the auto-save file since MOC is the source of truth
+    def _init_playlist_and_state(self):
+        """Load playlist (from MOC or auto-save) and sync playback state. Called after UI is created."""
         if self.use_moc:
             status = self.moc_controller.get_status(force_refresh=True)
             if status:
-                # MOC is running - sync shuffle state FIRST before loading playlist
-                # This ensures shuffle state is correct before any playlist operations
-                moc_shuffle = self.moc_controller.get_shuffle_state()
-                if moc_shuffle is not None:
-                    self.app_state.set_shuffle_enabled(moc_shuffle)
-                
-                # Load its playlist
+                self.app_state.set_active_backend("moc")
+                if status.get("shuffle") is not None:
+                    self.app_state.set_shuffle_enabled(bool(status["shuffle"]))
+                if status.get("autonext") is not None:
+                    self.app_state.set_autonext_enabled(bool(status["autonext"]))
+                # Sync repeat state from MOC to loop mode
+                # MOC only has repeat on/off, so map to LOOP_PLAYLIST (2) if on, LOOP_FORWARD (0) if off
+                if status.get("repeat") is not None:
+                    loop_mode = 2 if status["repeat"] else 0
+                    self.app_state.set_loop_mode(loop_mode)
                 tracks, current_index = self.moc_controller.get_playlist()
                 if tracks:
-                    logger.info("Syncing playlist from MOC on startup: %d tracks", len(tracks))
-                    # Update playlist manager to match MOC state
-                    self.playlist_manager.clear()
-                    self.playlist_manager.add_tracks(tracks)
-                    if current_index >= 0:
-                        self.playlist_manager.set_current_index(current_index)
-                    # Update app state and UI
+                    logger.info(
+                        "Syncing playlist from MOC on startup: %d tracks",
+                        len(tracks),
+                    )
                     self.app_state.set_playlist(tracks, current_index)
                 else:
-                    # MOC is running but has no playlist - load from auto-save file
-                    if self.playlist_manager.load_current_playlist():
-                        tracks = self.playlist_manager.get_playlist()
-                        current_index = self.playlist_manager.get_current_index()
-                        self.app_state.set_playlist(tracks, current_index)
+                    self.playlist_view.load_current_playlist()
+                moc_state = (status.get("state") or "STOP").upper()
+                if moc_state == "PLAY":
+                    self.app_state.set_playback_state(PlaybackState.PLAYING)
+                elif moc_state == "PAUSE":
+                    self.app_state.set_playback_state(PlaybackState.PAUSED)
+                else:
+                    self.app_state.set_playback_state(PlaybackState.STOPPED)
+                self.app_state.set_position(
+                    float(status.get("position", 0) or 0)
+                )
+                self.app_state.set_duration(
+                    float(status.get("duration", 0) or 0)
+                )
+                vol = status.get("volume")
+                if vol is not None:
+                    self.app_state.set_volume(float(vol))
             else:
-                # MOC is not running - load from auto-save file
-                if self.playlist_manager.load_current_playlist():
-                    tracks = self.playlist_manager.get_playlist()
-                    current_index = self.playlist_manager.get_current_index()
-                    self.app_state.set_playlist(tracks, current_index)
+                self.playlist_view.load_current_playlist()
         else:
-            # MOC not available - load from auto-save file
-            if self.playlist_manager.load_current_playlist():
-                tracks = self.playlist_manager.get_playlist()
-                current_index = self.playlist_manager.get_current_index()
-                self.app_state.set_playlist(tracks, current_index)
-
-        # Load saved layout
-        GLib.idle_add(self.dock_manager.load_layout)
-
-        # Start library scan
-        self.library.scan_library(callback=self._on_library_scan_complete)
-
-        # Connect close signal to save layout
-        self.connect("close-request", self._on_close)
+            self.playlist_view.load_current_playlist()
 
     def _create_ui(self):
         """Create the user interface with dockable panels."""
-        # Apply CSS styling
         self._apply_css()
 
-        # Main container
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.set_child(main_box)
-
-        # Top bar with search and Bluetooth
         self._create_top_bar(main_box)
-
         main_box.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
 
-        # Create UI components
-        self._create_library_browser()
+        # Create playlist_view and player_controls first (library_browser needs them)
         self._create_playlist_view()
+        self._create_player_controls()
+        self._create_library_browser()
         self._create_metadata_panel()
         self._create_bluetooth_panel()
-        self._create_player_controls()
-        
-        # Set cross-references after all components are created
-        self.library_browser.playlist_view = self.playlist_view
-        self.library_browser.player_controls = self.player_controls
 
         # Create dockable panels
         library_panel = self.dock_manager.create_panel(
@@ -359,11 +359,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_library_browser(self):
         """Create and configure the library browser."""
-        # Library browser will be created after playlist_view
-        # We'll set references after UI creation
         self.library_browser = LibraryBrowser(
-            playlist_view=None,  # Will be set after playlist_view is created
-            player_controls=None,  # Will be set after player_controls is created
+            playlist_view=self.playlist_view,
+            player_controls=self.player_controls,
         )
         self.library_browser.connect("track-selected", self._on_track_selected)
         self.library_browser.connect("album-selected", self._on_album_selected)
@@ -376,10 +374,7 @@ class MainWindow(Gtk.ApplicationWindow):
             playlist_manager=self.playlist_manager,
             window=self,
         )
-        self.playlist_view.connect("track-activated", self._on_playlist_track_activated)
-        self.playlist_view.connect(
-            "current-index-changed", self._on_playlist_current_index_changed
-        )
+        # PlaylistView handles track activation and index changes internally
         # Show refresh button only when MOC is available
         self.playlist_view.set_moc_mode(self.use_moc)
 
@@ -502,29 +497,6 @@ class MainWindow(Gtk.ApplicationWindow):
         """Handle album selection from library browser."""
         self.playlist_view.replace_and_play_album(tracks)
 
-    def _on_playlist_track_activated(self, view, index: int):
-        """Handle track activation in playlist - delegate to playlist_view."""
-        # PlaylistView now handles this internally via play_track_at_index()
-        # Keep signal connection for potential external coordination if needed
-        pass
-
-    def _on_playlist_current_index_changed(self, view, index: int):
-        """Handle current index change - for external coordination only."""
-        # MOC sync is now handled internally in playlist_view.play_track_at_index()
-        # Keep this handler only if needed for metadata panel or other external coordination
-        pass
-
-    def _on_track_changed(self, controls, track: TrackMetadata):
-        """Handle track change from player_controls (legacy signal)."""
-        # Metadata panel now subscribes to events directly
-        # MPRIS2 navigation is updated via events
-        pass
-
     def _on_system_volume_changed(self, volume: float):
         """Handle system volume change from external source (e.g., volume keys) - update UI."""
         self.app_state.set_volume(volume)
-
-    def _on_shuffle_toggled(self, controls, active: bool):
-        """Handle shuffle toggle state changes (legacy signal)."""
-        # Shuffle state is now managed by AppState and events
-        pass

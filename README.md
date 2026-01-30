@@ -240,7 +240,7 @@ The application follows the **XDG Base Directory Specification** for Linux stand
 
 ### Configuration Locations
 
-- **Config**: `~/.config/musicplayer/settings.json`
+- **Config**: `~/.config/musicplayer/config.ini`
 - **Cache**: `~/.cache/musicplayer/` (includes album art cache)
 - **Data**: `~/.local/share/musicplayer/` (includes playlists)
 - **Logs**: `~/.local/share/musicplayer/logs/`
@@ -296,7 +296,7 @@ sudo /etc/init.d/musicplayer start
 
 #### Configuration Management
 - **XDG Base Directory** compliance
-- Configurable settings via JSON config file
+- Configurable settings via INI config file (`config.ini`)
 - Automatic directory creation
 - Environment variable support
 
@@ -371,6 +371,7 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
 - **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel
 - **Write back changes** you make in the GTK playlist into MOC's internal playlist
 - **Sync player controls** with MOC:
+  - **On startup**, if MOC is running, the app syncs full state from MOC: playlist, playback state (playing/paused/stopped), position, duration, volume, shuffle, and autonext
   - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood
   - The **volume slider** controls MOC's volume
   - The **current track / time** display follows whatever MOC is playing
@@ -491,14 +492,7 @@ pactl info
 ```
 
 ### "Bluetooth not working!"
-
-```bash
-# Is Bluetooth service running? (Gentoo uses OpenRC)
-rc-service bluetooth status
-
-# Start it if not running
-rc-service bluetooth start
-
+i
 # Is adapter on?
 bluetoothctl power on
 
@@ -534,31 +528,6 @@ ls -l /path/to/your/track.mp3
 # The app will automatically skip invalid tracks when syncing to MOC
 ```
 
-**What was fixed:**
-- File path validation before adding tracks to MOC playlist
-- Validation before attempting playback
-- Better error messages to identify problematic tracks
-- Tracks with missing files are automatically skipped when syncing to MOC
-
-### "No tracks found in MOC playlist" warning
-
-If you see a warning that no tracks were found in the MOC playlist when refreshing:
-
-**What was fixed:**
-- When MOC's playlist file is empty or missing but the app has tracks in its internal playlist, the app now automatically writes the internal playlist to MOC
-- This handles timing issues where MOC hasn't written its playlist file yet
-- The app will log when it writes the internal playlist to MOC for recovery
-
-**When this happens:**
-- MOC's playlist file (`~/.moc/playlist.m3u`) is empty or missing
-- The app has tracks in its internal playlist
-- This can occur during startup or when refreshing from MOC
-
-**What the app does:**
-- Automatically detects this situation
-- Writes the internal playlist to MOC to restore playback state
-- Logs the action for debugging
-
 ### "Songs don't automatically advance to the next track!"
 
 If playback stops when a song finishes instead of automatically playing the next song:
@@ -571,132 +540,6 @@ If playback stops when a song finishes instead of automatically playing the next
 - User action guard prevents MOC status polling from interfering with user-initiated track changes
 
 The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. The app is the single source of truth for track navigation, preventing conflicts between MOC's internal state and the app's playlist management.
-
-### "App silently quits when I start it again!"
-
-This is expected behavior. The app uses GTK's **single-instance pattern** — only one instance can run at a time with the same application ID.
-
-**What happens:**
-1. First instance registers itself via D-Bus under `com.musicplayer.app`
-2. Second instance detects the existing app
-3. Second instance activates the first app's window and exits
-
-**You'll see this message in the terminal:**
-```
-Another instance is already running. Activating existing window.
-```
-
-**If you really need multiple instances** (not recommended for a music player):
-- This would require code changes to remove the application ID or use `NON_UNIQUE` flag
-
-### "Panel layout is messed up!"
-
-```bash
-# Reset to default layout
-rm ~/.config/musicplayer/layout.json
-```
-
-### "Bluetooth battery/quality monitoring crashes!"
-
-**What was fixed:**
-- D-Bus signal receivers for battery/quality monitoring were missing the `path_keyword` parameter
-- This caused a `TypeError` when battery or quality change signals were received
-- The signal handlers now correctly receive the device path for proper callback routing
-
-### "Bluetooth sink mode fails to disable!"
-
-**What was fixed:**
-- `BluetoothSink` was missing the `on_audio_stream_stopped` callback attribute initialization
-- This caused an `AttributeError` when calling `disable_sink_mode()`
-- The callback is now properly initialized to `None` in `__init__`
-
-### "Clicking a playlist row plays the wrong track!"
-
-If tapping or clicking a row in the playlist plays the wrong track:
-
-**What was fixed:**
-- The playlist view now uses the GTK selection model as the source of truth for all row operations
-- All gesture handlers (tap, double-tap, long-press, drag) read from the selection model instead of coordinate-based lookups
-- `GestureClick` updates the selection on left-click, and all other handlers read from this selection
-- This ensures the correct row is always used for playback, context menu, and drag operations
-- Drag-to-reorder has been optimized to only update the moved row instead of rebuilding the entire view
-- File I/O for playlist persistence is deferred to avoid blocking the UI thread
-- Drop target visualization shows a dark highlight on the target row during drag
-
-### "Can't receive value from the server!" fatal error during drag operations
-
-If the application crashes with a GTK fatal error when dragging playlist items:
-
-**What was fixed:**
-- Removed selection model updates during drag operations (selection updates now only happen after drag completes)
-- Added comprehensive error handling for all widget property accesses during drag (get_visible_range, get_cell_area, get_allocation, get_vadjustment)
-- Added bounds checking and validation for all index calculations
-- Enhanced error handling in drag begin, update, and end handlers to prevent fatal crashes
-- All widget property accesses are now protected with try/except blocks to handle invalid widget states gracefully
-- The drag target index calculation now properly accounts for the move_track() logic which adjusts insert index when moving down
-
-### "Add Folder" button not working in library view
-
-**Issue:** The "Add Folder to Playlist" option in the library browser context menu wasn't working, especially when MOC wasn't currently the active playback backend.
-
-**Root cause:** The code was checking if MOC was currently active (`active_backend == "moc"`) instead of checking if MOC was available. This prevented adding folders when MOC wasn't playing.
-
-**What was fixed:**
-- Changed folder addition logic to check MOC availability (using `shutil.which("mocp")`) instead of checking if MOC is currently active
-- Improved context menu cleanup to prevent GTK assertion errors
-- Fixed race conditions in menu cleanup timeout handling
-
-### "Move Down in playlist context menu crashes!"
-
-**What was fixed:**
-- The "Move Down" context menu action referenced a non-existent `self.tracks` attribute
-- Changed to use `self._state.playlist` which is the correct way to access the playlist
-
-### "Music keeps playing when Bluetooth speaker mode is enabled!"
-
-**What was fixed:**
-- When Bluetooth sink mode was enabled or a device connected, the previous playback backend (MOC or internal player) wasn't properly stopped
-- The backend stop logic was checking the old active backend state before it was updated
-- Now the active backend is set to "bt_sink" BEFORE stopping other backends, ensuring proper cleanup
-
-### "Bluetooth resources not cleaned up on application exit!"
-
-**What was fixed:**
-- `BluetoothSink` was missing a `cleanup()` method to properly shut down when the application closes
-- The main window wasn't calling cleanup on the BT sink
-- Now `BluetoothSink.cleanup()` properly:
-  - Stops health monitoring timers
-  - Cancels reconnection attempts
-  - Disables sink mode if enabled
-  - Unsubscribes from EventBus events
-  - Logs cleanup completion
-
-### "Bluetooth connection drops and doesn't recover!"
-
-**What was fixed:**
-- Added automatic reconnection logic with configurable retry attempts (max 3 by default)
-- Added connection health monitoring that runs every 5 seconds
-- A2DP transport state is now tracked and recovered if lost
-- When a device disconnects unexpectedly, reconnection is automatically scheduled
-
-### "Unauthorized devices can connect to my speaker!"
-
-**Security improvements:**
-- **Trusted device whitelist**: Use `bt_sink.add_trusted_device("AA:BB:CC:DD:EE:FF")` to allow only specific devices
-- **Discoverable timeout**: Default is 5 minutes (was indefinite) - configurable via `bt_sink.set_discoverable_timeout(300)`
-- **Connection authorization**: Enable with `bt_sink.set_require_authorization(True)` for explicit approval
-- **D-Bus path validation**: All Bluetooth paths are validated to prevent injection attacks
-
-### "Missing icons (placeholders shown)!"
-
-```bash
-# Install Adwaita icon theme
-emerge -av x11-themes/adwaita-icon-theme
-
-# Set icon theme (add to ~/.config/gtk-4.0/settings.ini)
-echo "[Settings]" > ~/.config/gtk-4.0/settings.ini
-echo "gtk-icon-theme-name=Adwaita" >> ~/.config/gtk-4.0/settings.ini
-```
 
 ---
 
@@ -1241,7 +1084,7 @@ MusicPlayer/
 │   ├── music_library.py          # Scanning folders for music
 │   ├── mpris2.py                 # MPRIS2 D-Bus interface
 │   ├── pipewire_volume.py        # PipeWire volume control
-│   ├── playlist_manager.py       # Queue management
+│   ├── playlist_manager.py       # Playlist data & persistence (source of truth)
 │   ├── security.py               # Path validation, input sanitization
 │   └── system_volume.py          # System volume control
 │
@@ -1267,10 +1110,10 @@ MusicPlayer/
 ### The Event-Driven Pattern
 
 We follow an event-driven architecture where:
-- **State** = `AppState` (single source of truth)
+- **State** = `AppState` (playback/UI state); playlist data lives in `PlaylistManager` (source of truth for playlist and persistence)
 - **Events** = `EventBus` (decoupled communication)
 - **Controller** = `PlaybackController` (routes commands to backends)
-- **View** = `ui/` components (pure views that subscribe to events)
+- **View** = `ui/` components (subscribe to events, call PlaylistManager for playlist ops)
 - **Backends** = `AudioPlayer`, `MocController`, `BluetoothSink` (playback engines)
 
 This architecture eliminates circular dependencies and makes the codebase much more maintainable!
@@ -1288,16 +1131,15 @@ The application uses an **event-driven architecture** with clear separation of c
    - Eliminates circular dependencies
    - Enables decoupled communication
 
-2. **AppState** (`core/app_state.py`) - Single source of truth
-   - All application state (playlist, playback state, volume, etc.)
-   - State changes automatically publish events
-   - Prevents duplicate state tracking
+2. **AppState** (`core/app_state.py`) - Application state
+   - Playback state, volume, shuffle, backend; when `PlaylistManager` is set, playlist reads/writes delegate to it
+   - State changes publish events
+   - **PlaylistManager** (`core/playlist_manager.py`) - Single source of truth for playlist; publishes PLAYLIST_CHANGED (and index/track when needed). `set_playlist(tracks, index)` replaces in one go and publishes once; load/save and AppState/PlaylistView use it so UI and PlaybackController react via pub/sub
 
-3. **PlaybackController** (`core/playback_controller.py`) - Mediator pattern
-   - Routes playback commands to appropriate backend (MOC, internal player, BT sink)
-   - Manages MOC status polling
-   - Ensures only one backend is active at a time
-   - Handles track changes and playlist synchronization
+3. **PlaybackController** (`core/playback_controller.py`) - Pub/sub driven
+   - Subscribes to ACTION_* and PLAYLIST_CHANGED; updates AppState; UI reacts to state events
+   - Routes playback to MOC, internal player, or BT sink; MOC status polling; one backend active at a time
+   - Single “load from MOC” path: `_reload_playlist_from_moc()` used by refresh, append folder, file-change poll, and track-change reload
 
 **Data Flow:**
 
@@ -1312,6 +1154,10 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
                                                           ↓
                                                     UI Components (update display)
 ```
+
+**Playlist data flow:**
+- **PlaylistManager** is the single source of truth; `set_playlist(tracks, index)` replaces playlist and index in one go and publishes PLAYLIST_CHANGED (and index/track when needed). Load/save and AppState/PlaylistView use it; PlaybackController subscribes and syncs to MOC.
+- **AppState** and **PlaylistView** call `playlist_manager.set_playlist()` for full replace; add/remove/move/clear still call the fine-grained methods. Events drive view and playback; no duplicate state.
 
 **Benefits:**
 - **No circular dependencies** - Components only depend on EventBus and AppState
@@ -1341,6 +1187,8 @@ The codebase follows systematic harmonization to ensure consistency and maintain
 - 🔄 Type hints completion
 - 🔄 Documentation improvements
 - 🔄 Error handling improvements
+
+**Remaining implementations:** A detailed, actionable list of unfinished features (music library fs monitoring, user error notifications, tests, `data/` service files, harmonization) is in [TODO.md](TODO.md).
 
 #### MOC Integration Architecture
 
@@ -1408,6 +1256,7 @@ The codebase follows Linux best practices:
 - **Explicit state machines** using enums instead of boolean flags
 - **Separation of concerns** between UI updates and playback operations
 - **Race condition prevention** through explicit state management
+- **Code cleanup log**: All incremental cleanups (dead code, imports, exception handling) are documented in `cleanup.md`.
 
 #### Testing
 
@@ -1459,6 +1308,27 @@ Track your learning progress!
 - [ ] 📝 Read through `audio_player.py`
 - [ ] 🛠️ Modified the code (any small change counts!)
 - [ ] 🚀 Created your own IoT project idea
+
+---
+
+## 📝 Recent Changes
+
+### State Synchronization Fixes (Latest)
+
+Fixed critical synchronization issues between tracks, playlist, playback state, and UI components:
+
+- **PlayerControls Initialization**: Added `_initialize_from_state()` method to properly initialize all UI components (play/pause button, progress bar, shuffle/loop buttons, volume) from `AppState` on startup
+- **Playlist Loading Events**: `PlaylistManager.load_current_playlist()` now properly publishes `CURRENT_INDEX_CHANGED` and `TRACK_CHANGED` events after loading, ensuring UI components sync correctly on startup
+- **MainWindow Initialization Order**: Layered init (foundation → backends → playback controller → dock manager → UI → post-UI). All playlist operations go through `PlaylistView` (e.g. `load_current_playlist()`); playlist load runs after UI is created via `_init_playlist_and_state()`
+- **Event Data Standardization**: All `PLAYLIST_CHANGED` events now consistently include `content_changed` boolean field
+- **MPRIS2 Navigation Updates**: PlayerControls now subscribes to `PLAYLIST_CHANGED` events to update MPRIS2 navigation capabilities when playlist changes
+- **Track Change Flow**: Improved documentation and consistency in `PlaybackController` track change handling
+
+These fixes ensure that:
+- UI shows correct state on startup if a track is already playing
+- Playlist view shows correct selection on startup
+- Metadata panel shows correct track on startup
+- All UI components stay in sync during track and playlist changes
 
 ---
 

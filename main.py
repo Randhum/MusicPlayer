@@ -8,10 +8,11 @@ by the MainWindow class.
 
 Architecture:
 - Event-driven architecture with EventBus for decoupled communication
-- AppState provides single source of truth for application state
+- AppState holds playback/UI state; playlist state delegates to PlaylistManager when set
+- PlaylistManager is the source of truth for playlist data and persistence
 - PlaybackController routes playback commands to appropriate backends
-- UI components are pure views that subscribe to events and publish actions
-- No circular dependencies - components only depend on EventBus and AppState
+- UI components subscribe to events and publish actions
+- No circular dependencies - components depend on EventBus, AppState, and PlaylistManager
 """
 
 import sys
@@ -33,7 +34,8 @@ except ValueError:
 from typing import Optional, Any
 
 from core.config import get_config
-from core.logging import get_logger
+from core.logging import get_logger, LinuxLogger
+from core.metadata import TrackMetadata
 from ui.main_window import MainWindow
 
 logger = get_logger(__name__)
@@ -106,15 +108,13 @@ class MusicPlayerApp(Adw.Application if USE_ADW else Gtk.Application):
         if not self.window:
             self.window = MainWindow(app)
 
-        # Add files to playlist
+        # Add files to playlist via PlaylistView so both AppState and
+        # PlaylistManager (and UI) stay in sync; avoids stale save/auto-save.
         for file_info in files:
             file_path = file_info.get_path()
             if file_path:
-                from core.metadata import TrackMetadata
-
                 track = TrackMetadata(file_path)
-                # Add track via AppState (which publishes events)
-                self.window.app_state.add_track(track)
+                self.window.playlist_view.add_track(track)
 
         self.window.present()
 
@@ -130,8 +130,6 @@ def main() -> int:
     config = get_config()
 
     # Initialize logging (uses config for log directory)
-    from core.logging import LinuxLogger
-
     LinuxLogger(log_dir=config.log_dir)
 
     # Check if GTK can be initialized (display available, etc.)

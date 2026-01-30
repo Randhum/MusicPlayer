@@ -102,6 +102,7 @@ class PlayerControls(Gtk.Box):
         self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
         self._events.subscribe(EventBus.LOOP_MODE_CHANGED, self._on_loop_mode_changed)
         self._events.subscribe(EventBus.VOLUME_CHANGED, self._on_volume_changed)
+        self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
 
         # Initialize UI from state
         if self.system_volume:
@@ -117,6 +118,9 @@ class PlayerControls(Gtk.Box):
             "volume-changed",
             lambda c, v: self._on_volume_slider_changed(v),
         )
+
+        # Initialize UI from current app state (after subscriptions are set up)
+        self._initialize_from_state()
 
     def _create_ui(self):
         """Create the UI components."""
@@ -482,6 +486,34 @@ class PlayerControls(Gtk.Box):
         """Handle seek from UI - publish action event."""
         self._events.publish(EventBus.ACTION_SEEK, {"position": position})
 
+    def _initialize_from_state(self) -> None:
+        """Initialize UI from current app state."""
+        # Initialize playback state (play/pause button)
+        if self._state.playback_state == PlaybackState.PLAYING:
+            self.set_playing(True)
+        elif self._state.playback_state == PlaybackState.PAUSED:
+            self.set_playing(False)
+        else:
+            self.set_playing(False)
+
+        # Initialize progress bar and time labels
+        if self._state.duration > 0:
+            self.update_progress(self._state.position, self._state.duration)
+        else:
+            self.update_progress(0.0, 0.0)
+
+        # Initialize shuffle button
+        if not self._updating_toggle:
+            self._updating_toggle = True
+            self.shuffle_button.set_active(self._state.shuffle_enabled)
+            self._updating_toggle = False
+
+        # Initialize loop mode button
+        self._update_loop_icon()
+
+        # Initialize volume (ensure it's from state, not just system_volume)
+        self.set_volume(self._state.volume)
+
     # ============================================================================
     # Event Handlers (State Updates)
     # ============================================================================
@@ -523,6 +555,10 @@ class PlayerControls(Gtk.Box):
         track = data["track"]
         if self.mpris2:
             self.mpris2.update_metadata(track)
+        self._update_mpris2_nav()
+
+    def _on_playlist_changed(self, data: Optional[dict]) -> None:
+        """Handle playlist changed event - update MPRIS2 navigation capabilities."""
         self._update_mpris2_nav()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:

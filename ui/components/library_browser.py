@@ -106,6 +106,9 @@ class LibraryBrowser(Gtk.Box):
         self.selected_path = None
         self._menu_showing = False  # Flag to prevent multiple menus
 
+        # Music root path (set when populating) for fallback folder path from tree
+        self._music_root: Optional[Path] = None
+
         # Single-click expand/collapse state
         self._click_timeout_id = None
         self._click_in_progress = False
@@ -131,11 +134,13 @@ class LibraryBrowser(Gtk.Box):
         music_root = library.get_music_root()
 
         if not folder_structure or not music_root:
+            self._music_root = None
             return
 
         # Build folder tree structure
+        self._music_root = Path(music_root)
         folder_tree = {}
-        root_path = Path(music_root)
+        root_path = self._music_root
 
         # Sort folder paths to maintain order
         sorted_folders = sorted(folder_structure.keys())
@@ -161,39 +166,41 @@ class LibraryBrowser(Gtk.Box):
                 current["tracks"] = []
             current["tracks"].extend(folder_structure[folder_path])
 
-        # Populate tree view directly from folder_tree contents (skip root folder name)
-        # Start from top-level items in the music directory
-        for key, value in sorted(folder_tree.items()):
-            if key != "tracks":
-                # Build full path for top-level folder
-                folder_path = root_path / key
-                self._populate_tree(None, value, key, folder_path)
+        # Populate tree view recursively from folder_tree (root has no folder row)
+        self._populate_tree(None, folder_tree, None, root_path)
 
-        # Also add root-level tracks if any
-        if "tracks" in folder_tree:
-            for track in folder_tree["tracks"]:
-                track_name = track.title or Path(track.file_path).stem
-                self.store.append(None, [track_name, "track", track])
-
-    def _populate_tree(self, parent_iter, folder_tree, folder_name, folder_path: Path):
+    def _populate_tree(
+        self,
+        parent_iter,
+        folder_tree: dict,
+        folder_name: Optional[str],
+        folder_path: Path,
+    ) -> None:
         """Recursively populate tree view from folder structure."""
-        # Add folder node with full path stored as data
-        folder_iter = self.store.append(
-            parent_iter, [folder_name, "folder", str(folder_path)]
-        )
+        if folder_name is not None:
+            folder_iter = self.store.append(
+                parent_iter, [folder_name, "folder", str(folder_path)]
+            )
+        else:
+            folder_iter = parent_iter  # root: no row, children attach to parent
 
-        # Add tracks in this folder
+        # Tracks in this folder (root-level tracks use parent_iter None)
         if "tracks" in folder_tree:
+            target = folder_iter if folder_iter is not None else parent_iter
             for track in folder_tree["tracks"]:
                 track_name = track.title or Path(track.file_path).stem
-                self.store.append(folder_iter, [track_name, "track", track])
+                self.store.append(target, [track_name, "track", track])
 
-        # Add subfolders
+        # Recurse into subfolders
         for key, value in sorted(folder_tree.items()):
             if key != "tracks":
-                # Build full path for subfolder
                 subfolder_path = folder_path / key
-                self._populate_tree(folder_iter, value, key, subfolder_path)
+                self._populate_tree(
+                    folder_iter if folder_iter is not None else parent_iter,
+                    value,
+                    key,
+                    subfolder_path,
+                )
 
     def _on_click_pressed(self, gesture, n_press, x, y):
         """Handle click press - mark that a click is in progress."""
@@ -220,17 +227,15 @@ class LibraryBrowser(Gtk.Box):
         """Expand or collapse folder after single-click delay."""
         self._click_timeout_id = None
 
-        # Use selection instead of stored click path
-        # GTK handles selection correctly (accounting for scroll offset)
         selection = self.tree_view.get_selection()
-        model, tree_iter = selection.get_selected()
+        _, tree_iter = selection.get_selected()
 
         if tree_iter:
-            name, item_type, data = model.get(tree_iter, 0, 1, 2)
+            name, item_type, data = self.store.get(tree_iter, 0, 1, 2)
 
             # Only handle folders for expand/collapse
             if item_type == "folder":
-                path = model.get_path(tree_iter)
+                path = self.store.get_path(tree_iter)
                 if self.tree_view.row_expanded(path):
                     self.tree_view.collapse_row(path)
                 else:
@@ -239,47 +244,59 @@ class LibraryBrowser(Gtk.Box):
         return False  # Don't repeat
 
     def _on_row_activated(self, tree_view, path, column):
-        """Handle row activation (double-click)."""
+        """Handle row activation (double-click).
+
+        - Track: tree stores TrackMetadata in column 2. We replace playlist with
+          that track and play it via playlist_view, or emit "track-selected" if
+          no playlist_view (e.g. standalone tests).
+        - Folder: tree stores folder path string in column 2. We pass that path
+          to playlist_view.replace_and_play_folder(path), which replaces the
+          playlist with folder contents (from disk) and plays. If there is no
+          playlist_view we collect tracks from the tree and emit "album-selected".
+          If data is not a string (legacy/defensive), we collect tracks from the
+          tree and call replace_and_play_album(tracks) or emit.
+        """
         # Cancel any pending single-click expand/collapse
         if self._click_timeout_id:
             GLib.source_remove(self._click_timeout_id)
             self._click_timeout_id = None
         self._click_in_progress = False
 
-        model = tree_view.get_model()
-        tree_iter = model.get_iter(path)
-        if tree_iter:
-            name, item_type, data = model.get(tree_iter, 0, 1, 2)
+        tree_iter = self.store.get_iter(path)
+        if not tree_iter:
+            return
 
-            if item_type == "track" and isinstance(data, TrackMetadata):
-                if self.playlist_view:
-                    self.playlist_view.replace_and_play_track(data)
-                else:
-                    # Fallback to signal if playlist_view not available
-                    self.emit("track-selected", data)
-            elif item_type == "folder":
-                # Use folder path for MOC native append (data now contains folder path)
-                if data and isinstance(data, str):
-                    # Folder path is stored in data
-                    if self.playlist_view:
-                        self.playlist_view.replace_and_play_folder(data)
-                    else:
-                        # Fallback: collect tracks if playlist_view not available
-                        folder_iter = tree_iter
-                        tracks = []
-                        self._collect_tracks(model, folder_iter, tracks)
-                        if tracks:
-                            self.emit("album-selected", tracks)
-                else:
-                    # Fallback: collect tracks if no path stored
-                    folder_iter = tree_iter
-                    tracks = []
-                    self._collect_tracks(model, folder_iter, tracks)
-                    if tracks:
-                        if self.playlist_view:
-                            self.playlist_view.replace_and_play_album(tracks)
-                        else:
-                            self.emit("album-selected", tracks)
+        name, item_type, data = self.store.get(tree_iter, 0, 1, 2)
+
+        if item_type == "track" and isinstance(data, TrackMetadata):
+            if self.playlist_view:
+                self.playlist_view.replace_and_play_track(data)
+            else:
+                self.emit("track-selected", data)
+            return
+
+        if item_type != "folder":
+            return
+
+        # Folder: we store folder path (str) in data; use it for replace_and_play_folder
+        if data and isinstance(data, str):
+            if self.playlist_view:
+                self.playlist_view.replace_and_play_folder(data)
+            else:
+                tracks = []
+                self._collect_tracks(self.store, tree_iter, tracks)
+                if tracks:
+                    self.emit("album-selected", tracks)
+            return
+
+        # Fallback if data is not a path string: collect tracks from tree
+        tracks = []
+        self._collect_tracks(self.store, tree_iter, tracks)
+        if tracks:
+            if self.playlist_view:
+                self.playlist_view.replace_and_play_album(tracks)
+            else:
+                self.emit("album-selected", tracks)
 
     def _collect_tracks(self, model, parent_iter, tracks):
         """Recursively collect all tracks from a folder."""
@@ -292,6 +309,17 @@ class LibraryBrowser(Gtk.Box):
                 # Recursively collect from subfolders
                 self._collect_tracks(model, child, tracks)
             child = model.iter_next(child)
+
+    def _get_folder_path_from_iter(self, folder_iter) -> Optional[Path]:
+        """Build full folder path from tree row by walking up to root. Returns None if no music root."""
+        if self._music_root is None:
+            return None
+        parent = self.store.iter_parent(folder_iter)
+        name = self.store.get(folder_iter, 0)[0]
+        if parent is None:
+            return self._music_root / name
+        parent_path = self._get_folder_path_from_iter(parent)
+        return (parent_path / name) if parent_path else None
 
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
@@ -306,19 +334,26 @@ class LibraryBrowser(Gtk.Box):
             self._show_context_menu_at_position(x, y)
 
     def _show_context_menu_at_position(self, x, y):
-        """Show context menu at the given position."""
-        # Use selection instead of coordinate-based path lookup
-        # GTK handles selection correctly (accounting for scroll offset),
-        # while get_path_at_pos with gesture coordinates may have offset issues
-        selection = self.tree_view.get_selection()
-        model, tree_iter = selection.get_selected()
+        """Show context menu for the row at the given position.
+
+        Uses the tree view's model (self.store): row at (x,y) via get_path_at_pos,
+        else current selection. Stores selected_path and row data for the menu.
+        """
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        if path_info:
+            path = path_info[0]
+            tree_iter = self.store.get_iter(path)
+        else:
+            tree_iter = None
+        if not tree_iter:
+            selection = self.tree_view.get_selection()
+            _, tree_iter = selection.get_selected()
         if not tree_iter:
             return
 
-        self.selected_path = model.get_path(tree_iter)
-        name, item_type, data = model.get(tree_iter, 0, 1, 2)
+        self.selected_path = self.store.get_path(tree_iter)
+        name, item_type, data = self.store.get(tree_iter, 0, 1, 2)
 
-        # Create context menu
         self._show_context_menu(item_type, data, x, y)
 
     def _show_context_menu(self, item_type: str, data, x: float, y: float):
@@ -375,7 +410,7 @@ class LibraryBrowser(Gtk.Box):
             play_item.connect("clicked", lambda w: self._on_menu_play_track(data))
             menu_box.append(play_item)
 
-            add_item = Gtk.Button(label="Add to Playlist")
+            add_item = Gtk.Button(label="Add Track to Playlist")
             add_item.add_css_class("flat")
             add_item.set_size_request(150, 40)  # Larger for touch
             add_item.connect("clicked", lambda w: self._on_menu_add_track(data))
@@ -405,10 +440,14 @@ class LibraryBrowser(Gtk.Box):
                 )
                 menu_box.append(add_item)
             else:
-                # Fallback: collect tracks if no path available
-                folder_iter = self.tree_view.get_model().get_iter(self.selected_path)
+                # Fallback: folder path not in data; get path from tree so MOC can append by path
+                folder_iter = self.store.get_iter(self.selected_path) if self.selected_path else None
                 tracks = []
-                self._collect_tracks(self.store, folder_iter, tracks)
+                if folder_iter:
+                    self._collect_tracks(self.store, folder_iter, tracks)
+                folder_path_from_tree = (
+                    self._get_folder_path_from_iter(folder_iter) if folder_iter else None
+                )
 
                 if tracks:
                     play_item = Gtk.Button(label="Play Folder")
@@ -422,9 +461,15 @@ class LibraryBrowser(Gtk.Box):
                     add_item = Gtk.Button(label="Add Folder to Playlist")
                     add_item.add_css_class("flat")
                     add_item.set_size_request(150, 40)  # Larger for touch
-                    add_item.connect(
-                        "clicked", lambda w: self._on_menu_add_album(tracks)
-                    )
+                    if folder_path_from_tree:
+                        add_item.connect(
+                            "clicked",
+                            lambda w, p=str(folder_path_from_tree): self._on_menu_add_folder(p),
+                        )
+                    else:
+                        add_item.connect(
+                            "clicked", lambda w: self._on_menu_add_album(tracks)
+                        )
                     menu_box.append(add_item)
 
         # Set child first (must be done before setting parent)

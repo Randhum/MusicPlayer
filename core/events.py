@@ -77,6 +77,9 @@ class EventBus:
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
     ACTION_REFRESH_MOC = "action.refresh_moc"  # Reload playlist from MOC
+    ACTION_SYNC_PLAYLIST_TO_MOC = (
+        "action.sync_playlist_to_moc"  # Push internal playlist to MOC (data: optional start_playback)
+    )
     ACTION_APPEND_FOLDER = (
         "action.append_folder"  # Append folder to playlist (MOC mode)
     )

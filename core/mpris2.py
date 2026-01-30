@@ -15,7 +15,7 @@ Architecture:
 # Standard Library Imports (alphabetical)
 # ============================================================================
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -91,16 +91,16 @@ class MPRIS2Service(dbus.service.Object):
         self._can_control = True
 
         # Callbacks to control playback
-        self.on_play: Optional[callable] = None
-        self.on_pause: Optional[callable] = None
-        self.on_stop: Optional[callable] = None
-        self.on_next: Optional[callable] = None
-        self.on_previous: Optional[callable] = None
-        self.on_seek: Optional[callable] = None
-        self.on_set_position: Optional[callable] = None
-        self.on_set_volume: Optional[callable] = None
-        self.on_quit: Optional[callable] = None
-        self.on_raise: Optional[callable] = None
+        self.on_play: Optional[Callable[[], None]] = None
+        self.on_pause: Optional[Callable[[], None]] = None
+        self.on_stop: Optional[Callable[[], None]] = None
+        self.on_next: Optional[Callable[[], None]] = None
+        self.on_previous: Optional[Callable[[], None]] = None
+        self.on_seek: Optional[Callable[[float], None]] = None
+        self.on_set_position: Optional[Callable[[str, float], None]] = None
+        self.on_set_volume: Optional[Callable[[float], None]] = None
+        self.on_quit: Optional[Callable[[], None]] = None
+        self.on_raise: Optional[Callable[[], None]] = None
 
     @dbus.service.method(MPRIS2_ROOT_INTERFACE, in_signature="", out_signature="")
     def Quit(self):
@@ -683,8 +683,8 @@ class MPRIS2Manager:
         self._initialized = False
 
         # Store callbacks for when service is ready
-        self._playback_callbacks: Dict[str, Optional[callable]] = {}
-        self._window_callbacks: Dict[str, Optional[callable]] = {}
+        self._playback_callbacks: Dict[str, Optional[Callable[..., None]]] = {}
+        self._window_callbacks: Dict[str, Optional[Callable[..., None]]] = {}
 
         # D-Bus connection monitoring
         self._dbus_monitor = DBusConnectionMonitor(self.bus)

@@ -317,11 +317,12 @@ class PipeWireVolume:
     def cleanup(self):
         """Clean up resources."""
         # Remove signal receivers
-        for receiver in self._signal_receivers:
-            try:
-                self._bus.remove_signal_receiver(receiver)
-            except Exception:
-                pass
+        if self._bus:
+            for receiver in self._signal_receivers:
+                try:
+                    self._bus.remove_signal_receiver(receiver)
+                except Exception as e:
+                    logger.debug("PipeWire: Error removing signal receiver: %s", e)
         self._signal_receivers.clear()
 
         # Stop monitoring

@@ -1,10 +1,10 @@
-"""Centralized application state management - single source of truth."""
+"""Centralized application state. Playlist state delegates to PlaylistManager when set."""
 
 # ============================================================================
 # Standard Library Imports (alphabetical)
 # ============================================================================
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 # ============================================================================
 # Third-Party Imports (alphabetical, with version requirements)
@@ -17,6 +17,9 @@ from typing import List, Optional
 from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
+
+if TYPE_CHECKING:
+    from core.playlist_manager import PlaylistManager
 
 logger = get_logger(__name__)
 
@@ -33,31 +36,38 @@ class PlaybackState(Enum):
 
 class AppState:
     """
-    Single source of truth for application state.
-
-    All state changes go through this class, which publishes events
-    via EventBus to notify subscribers of changes.
+    Application state. When playlist_manager is set, playlist state is delegated to it;
+    otherwise internal _playlist/_current_index/_current_track are used.
     """
 
-    def __init__(self, event_bus: EventBus):
+    def __init__(
+        self,
+        event_bus: EventBus,
+        playlist_manager: Optional["PlaylistManager"] = None,
+    ):
         """
         Initialize application state.
 
         Args:
             event_bus: EventBus instance for publishing state changes
+            playlist_manager: When set, playlist reads/writes delegate to it. PlaylistManager publishes playlist events to event_bus, so no republish is needed; all subscribers receive events from the same bus.
         """
         self._event_bus = event_bus
+        self._playlist_manager = playlist_manager
 
-        # Playlist state
+        # When delegating: override for "playing track not in playlist" (index stays -1)
+        self._current_track_override: Optional[TrackMetadata] = None
+
+        # Playlist state (used only when playlist_manager is None)
         self._playlist: List[TrackMetadata] = []
         self._current_index: int = -1
+        self._current_track: Optional[TrackMetadata] = None
 
         # Playback state
         self._playback_state: PlaybackState = PlaybackState.STOPPED
         self._active_backend: str = "none"  # "none", "moc", "internal", "bt_sink"
         self._position: float = 0.0
         self._duration: float = 0.0
-        self._current_track: Optional[TrackMetadata] = None
 
         # Playback options
         self._shuffle_enabled: bool = False
@@ -74,18 +84,24 @@ class AppState:
     @property
     def playlist(self) -> List[TrackMetadata]:
         """Get the current playlist (read-only copy)."""
+        if self._playlist_manager is not None:
+            return self._playlist_manager.get_playlist()
         return self._playlist.copy()
 
     @property
     def current_index(self) -> int:
         """Get the current track index."""
+        if self._playlist_manager is not None:
+            return self._playlist_manager.get_current_index()
         return self._current_index
 
     @property
     def current_track(self) -> Optional[TrackMetadata]:
         """Get the currently playing track."""
-        # Return stored reference to ensure consistency
-        # The stored reference is updated by set_current_index and set_playlist
+        if self._playlist_manager is not None:
+            if self._current_track_override is not None:
+                return self._current_track_override
+            return self._playlist_manager.get_current_track()
         return self._current_track
 
     def set_playlist(
@@ -98,21 +114,23 @@ class AppState:
             tracks: List of tracks
             current_index: Current track index (-1 for none)
         """
-        self._playlist = tracks
-        # Clamp current_index to valid range
+        if self._playlist_manager is not None:
+            self._current_track_override = None
+            self._playlist_manager.set_playlist(
+                tracks,
+                current_index if 0 <= current_index < len(tracks) else -1,
+            )
+            return
+        self._playlist = list(tracks)
         if current_index < -1 or current_index >= len(tracks):
             current_index = -1
         self._current_index = current_index
-
-        # Update current_track if index is valid
-        if 0 <= current_index < len(tracks):
-            self._current_track = tracks[current_index]
-        else:
-            self._current_track = None
-
+        self._current_track = (
+            tracks[current_index] if 0 <= current_index < len(tracks) else None
+        )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": current_index},
+            {"playlist_changed": True, "index": current_index, "content_changed": True},
         )
 
     def set_current_index(self, index: int) -> None:
@@ -122,34 +140,25 @@ class AppState:
         Args:
             index: Track index (-1 for none)
         """
+        if self._playlist_manager is not None:
+            self._current_track_override = None
+            self._playlist_manager.set_current_index(index)
+            return
         if index < -1 or index >= len(self._playlist):
             index = -1
-
         old_index = self._current_index
         old_track = self._current_track
         self._current_index = index
-
-        # Update current_track
-        if 0 <= index < len(self._playlist):
-            new_track = self._playlist[index]
-            self._current_track = new_track
-        else:
-            new_track = None
-            self._current_track = None
-
+        self._current_track = (
+            self._playlist[index] if 0 <= index < len(self._playlist) else None
+        )
         if old_index != index:
             self._event_bus.publish(
                 EventBus.CURRENT_INDEX_CHANGED, {"index": index, "old_index": old_index}
             )
-            # Always publish TRACK_CHANGED when index changes to ensure labels update
-            # Even if the track object reference is the same, the index changed so UI should update
-            if new_track:
-                self._event_bus.publish(
-                    EventBus.TRACK_CHANGED, {"track": new_track}
-                )
-            elif old_track:
-                # Track was cleared
-                self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": None})
+            self._event_bus.publish(
+                EventBus.TRACK_CHANGED, {"track": self._current_track}
+            )
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None) -> None:
         """
@@ -159,24 +168,24 @@ class AppState:
             track: Track to add
             position: Insert position (None appends to end)
         """
+        if self._playlist_manager is not None:
+            self._playlist_manager.add_track(track, position)
+            return
         if position is None:
             self._playlist.append(track)
         else:
             self._playlist.insert(position, track)
-            # Adjust current_index if needed
             if position <= self._current_index:
                 self._current_index += 1
-                # Update current_track reference
                 if 0 <= self._current_index < len(self._playlist):
                     self._current_track = self._playlist[self._current_index]
-
         self._event_bus.publish(
             EventBus.PLAYLIST_TRACK_ADDED,
             {"track": track, "position": position or len(self._playlist) - 1},
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def add_tracks(
@@ -189,29 +198,23 @@ class AppState:
             tracks: List of tracks to add
             position: Insert position (None appends to end)
         """
+        if self._playlist_manager is not None:
+            self._playlist_manager.add_tracks(tracks, position)
+            return
         if not tracks:
             return
-
         if position is None:
-            # Append all tracks
             self._playlist.extend(tracks)
         else:
-            # Insert all tracks at position
             for i, track in enumerate(tracks):
                 self._playlist.insert(position + i, track)
-            # Adjust current_index if needed
             if position <= self._current_index:
                 self._current_index += len(tracks)
-                # Update current_track reference
                 if 0 <= self._current_index < len(self._playlist):
                     self._current_track = self._playlist[self._current_index]
-
-        # Publish events once for the batch operation
-        # Note: We don't publish individual PLAYLIST_TRACK_ADDED events for each track
-        # to avoid flooding the event bus. The PLAYLIST_CHANGED event is sufficient.
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def remove_track(self, index: int) -> None:
@@ -221,27 +224,25 @@ class AppState:
         Args:
             index: Index of track to remove
         """
+        if self._playlist_manager is not None:
+            self._playlist_manager.remove_track(index)
+            return
         if not (0 <= index < len(self._playlist)):
             return
-
         removed_track = self._playlist.pop(index)
-
-        # Adjust current_index if needed
         if index < self._current_index:
             self._current_index -= 1
-            # Update current_track reference
             if 0 <= self._current_index < len(self._playlist):
                 self._current_track = self._playlist[self._current_index]
         elif index == self._current_index:
             self._current_index = -1
             self._current_track = None
-
         self._event_bus.publish(
             EventBus.PLAYLIST_TRACK_REMOVED, {"index": index, "track": removed_track}
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def move_track(self, from_index: int, to_index: int) -> None:
@@ -252,54 +253,63 @@ class AppState:
             from_index: Source position
             to_index: Destination position
         """
+        if self._playlist_manager is not None:
+            self._playlist_manager.move_track(from_index, to_index)
+            return
         if not (
             0 <= from_index < len(self._playlist)
             and 0 <= to_index < len(self._playlist)
         ):
             return
-
         track = self._playlist.pop(from_index)
-        # When moving down (from_index < to_index), adjust insert position
-        # because pop() shifted all elements after from_index down by 1
         if from_index < to_index:
             insert_index = to_index - 1
         else:
             insert_index = to_index
         self._playlist.insert(insert_index, track)
-
-        # Update current_index
         if self._current_index == from_index:
             self._current_index = to_index
-            # Update current_track reference
-            if 0 <= self._current_index < len(self._playlist):
-                self._current_track = self._playlist[self._current_index]
+            self._current_track = (
+                self._playlist[self._current_index]
+                if 0 <= self._current_index < len(self._playlist)
+                else None
+            )
         elif from_index < self._current_index <= to_index:
             self._current_index -= 1
-            # Update current_track reference
-            if 0 <= self._current_index < len(self._playlist):
-                self._current_track = self._playlist[self._current_index]
+            self._current_track = (
+                self._playlist[self._current_index]
+                if 0 <= self._current_index < len(self._playlist)
+                else None
+            )
         elif to_index <= self._current_index < from_index:
             self._current_index += 1
-            # Update current_track reference
-            if 0 <= self._current_index < len(self._playlist):
-                self._current_track = self._playlist[self._current_index]
-
+            self._current_track = (
+                self._playlist[self._current_index]
+                if 0 <= self._current_index < len(self._playlist)
+                else None
+            )
         self._event_bus.publish(
             EventBus.PLAYLIST_TRACK_MOVED,
             {"from_index": from_index, "to_index": to_index},
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"tracks": self._playlist, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def clear_playlist(self) -> None:
         """Clear the playlist."""
+        if self._playlist_manager is not None:
+            self._current_track_override = None
+            self._playlist_manager.clear()
+            return
         self._playlist.clear()
         self._current_index = -1
         self._current_track = None
         self._event_bus.publish(EventBus.PLAYLIST_CLEARED, {})
-        self._event_bus.publish(EventBus.PLAYLIST_CHANGED, {"tracks": [], "index": -1})
+        self._event_bus.publish(
+            EventBus.PLAYLIST_CHANGED, {"playlist_changed": True, "index": -1, "content_changed": True}
+        )
 
     # ============================================================================
     # Playback State Properties
@@ -338,7 +348,7 @@ class AppState:
         # Publish appropriate event based on state change
         if state == PlaybackState.PLAYING and old_state != PlaybackState.PLAYING:
             self._event_bus.publish(
-                EventBus.PLAYBACK_STARTED, {"track": self._current_track}
+                EventBus.PLAYBACK_STARTED, {"track": self.current_track}
             )
         elif state == PlaybackState.PAUSED and old_state == PlaybackState.PLAYING:
             self._event_bus.publish(EventBus.PLAYBACK_PAUSED, {})
@@ -388,6 +398,22 @@ class AppState:
         Args:
             track: Current track or None
         """
+        if self._playlist_manager is not None:
+            if track is None:
+                self._current_track_override = None
+                self._playlist_manager.set_current_index(-1)
+                return
+            pl = self._playlist_manager.get_playlist()
+            for i, t in enumerate(pl):
+                if t.file_path == track.file_path:
+                    self._current_track_override = None
+                    self._playlist_manager.set_current_index(i)
+                    return
+            # Track not in playlist: keep override so current_track returns it
+            self._current_track_override = track
+            self._playlist_manager.set_current_index(-1)
+            self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": track})
+            return
         self._current_track = track
         if track:
             self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": track})

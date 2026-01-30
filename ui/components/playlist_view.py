@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 
 class PlaylistView(Gtk.Box):
-    """Component for displaying the current playlist/queue."""
+    """Playlist UI: subscribes to PLAYLIST_CHANGED / CURRENT_INDEX_CHANGED and updates tree; publishes ACTION_* for playback. PlaylistManager is source of truth; events drive refresh."""
 
     __gsignals__ = {
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -54,11 +54,13 @@ class PlaylistView(Gtk.Box):
             window: Optional Gtk.Window instance for dialog parents
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        self._state = app_state
+        self._state = app_state  # For shuffle, backend, playback state (non-playlist)
         self._events = event_bus
-        self.playlist_manager = playlist_manager  # Only for file persistence
+        self.playlist_manager = playlist_manager  # Source of truth for playlist data
         self.window = window
         self._use_moc: bool = False  # Track MOC mode state
+        self._bulk_update_in_progress: bool = False  # Track if bulk update is in progress
+        self._chunked_update_id: Optional[int] = None  # Track chunked update timeout ID
 
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -236,42 +238,37 @@ class PlaylistView(Gtk.Box):
         self._sync_from_state()
 
     # ============================================================================
-    # Public API - State Reading (Wrapper methods for PlaylistManager)
+    # Public API - State Reading (from PlaylistManager)
     # ============================================================================
 
     def get_playlist(self) -> List[TrackMetadata]:
-        """Get the current playlist from AppState."""
-        return self._state.playlist
+        """Get the current playlist from PlaylistManager."""
+        return self.playlist_manager.get_playlist()
 
     def get_current_index(self) -> int:
-        """Get the current track index from AppState."""
-        return self._state.current_index
+        """Get the current track index from PlaylistManager."""
+        return self.playlist_manager.get_current_index()
 
     def get_current_track(self) -> Optional[TrackMetadata]:
-        """Get the currently playing track from AppState."""
-        return self._state.current_track
+        """Get the currently playing track from PlaylistManager."""
+        return self.playlist_manager.get_current_track()
 
     def get_next_track(self) -> Optional[TrackMetadata]:
         """
-        Get the next track from AppState (sequential only).
-
-        Note: Shuffle logic is handled by PlaybackController, not here.
+        Get the next track (sequential only). Shuffle logic is in PlaybackController.
         """
-        playlist = self._state.playlist
-        current_index = self._state.current_index
+        playlist = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
         if current_index < len(playlist) - 1:
             return playlist[current_index + 1]
         return None
 
     def get_previous_track(self) -> Optional[TrackMetadata]:
         """
-        Get the previous track from AppState.
-
-        Note: In shuffle mode, previous track behavior is not well-defined,
-        so this returns the sequential previous track regardless of shuffle state.
+        Get the previous track (sequential). Shuffle behavior is in PlaybackController.
         """
-        playlist = self._state.playlist
-        current_index = self._state.current_index
+        playlist = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
         if current_index > 0:
             return playlist[current_index - 1]
         return None
@@ -290,29 +287,17 @@ class PlaylistView(Gtk.Box):
     # ============================================================================
 
     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
-        """
-        Set the playlist tracks and update the view.
-
-        This method updates AppState and the visual representation.
-        Note: This is called by event handlers when playlist changes.
-        """
-        # Update state (this will trigger events)
-        self._state.set_playlist(tracks, current_index)
-        # Shuffle queue regeneration is handled by PlaybackController
-        self._update_view()
+        """Replace playlist and index in one go. PlaylistManager publishes; view updates via PLAYLIST_CHANGED."""
+        self.playlist_manager.set_playlist(
+            tracks,
+            current_index if 0 <= current_index < len(tracks) else -1,
+        )
 
     def set_current_index(self, index: int):
-        """
-        Set the currently playing track index.
-
-        Updates AppState and the UI view.
-        In shuffle mode, removes the index from the shuffle queue if present.
-        """
-        old_index = self._state.current_index
-        self._state.set_current_index(index)
-        # Shuffle queue management is handled by PlaybackController
+        """Set the currently playing track index. PlaylistManager publishes; view updates via events."""
+        old_index = self.playlist_manager.get_current_index()
+        self.playlist_manager.set_current_index(index)
         self._update_selection()
-        # Emit signal for external coordination (if needed)
         if old_index != index:
             self.emit("current-index-changed", index)
 
@@ -321,57 +306,34 @@ class PlaylistView(Gtk.Box):
     # ============================================================================
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
-        """Add a track to the playlist (updates AppState and UI)."""
-        self._state.add_track(track, position)
-        # Also update playlist_manager for persistence
+        """Add a track to the playlist. PlaylistManager publishes; view updates via events.
+        When MOC is active, also syncs internal playlist to MOC."""
         self.playlist_manager.add_track(track, position)
-        # Shuffle queue regeneration is handled by PlaybackController
-        self._update_view()
+        if self._use_moc:
+            self._events.publish(
+                EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": False}
+            )
 
     def add_tracks(self, tracks: List[TrackMetadata]):
-        """Add multiple tracks to the playlist (updates AppState and UI)."""
+        """Add multiple tracks. PlaylistManager publishes; view updates via events."""
         if not tracks:
             return
-        
-        # Batch add to AppState (single event publication)
-        self._state.add_tracks(tracks)
-        # Batch add to PlaylistManager (single file sync)
         self.playlist_manager.add_tracks(tracks)
-        # Shuffle queue regeneration is handled by PlaybackController
-        self._update_view()
 
     def remove_track(self, index: int):
-        """Remove a track from the playlist (updates AppState and UI)."""
-        self._state.remove_track(index)
+        """Remove a track. PlaylistManager publishes; view updates via events."""
         self.playlist_manager.remove_track(index)
-        # Shuffle queue regeneration is handled by PlaybackController
-        self._update_view()
 
     def move_track(self, from_index: int, to_index: int):
         """
         Move a track from one position to another.
-        
-        Args:
-            from_index: Current position of the track (0-based)
-            to_index: Final position where track should end up (0-based)
-        
-        Example: Moving track from position 2 to position 5
-        - Before: [A, B, C, D, E, F]  (C is at index 2)
-        - After:  [A, B, D, E, C, F]  (C is now at index 4, but to_index=5 means "after E")
+        from_index/to_index are 0-based. PlaylistManager publishes; view updates via events.
         """
-        # Update AppState - this handles the actual move and publishes PLAYLIST_CHANGED event
-        self._state.move_track(from_index, to_index)
-        
-        # UI will be refreshed automatically by _on_playlist_changed() event handler
-        # Just sync to PlaylistManager file asynchronously (non-blocking)
-        GLib.idle_add(self._sync_playlist_manager_move, from_index, to_index)
+        self.playlist_manager.move_track(from_index, to_index)
 
     def clear(self):
-        """Clear the playlist (updates AppState and UI)."""
-        self._state.clear_playlist()
+        """Clear the playlist. PlaylistManager publishes; view updates via events."""
         self.playlist_manager.clear()
-        # Shuffle queue clearing is handled by PlaybackController
-        self._update_view()
 
     def _handle_clear(self):
         """Handle clear operation."""
@@ -381,18 +343,16 @@ class PlaylistView(Gtk.Box):
         self.clear()
 
     def save_playlist(self, name: str) -> bool:
-        """Save the current playlist."""
+        """Save the current playlist (PlaylistManager is source of truth)."""
         return self.playlist_manager.save_playlist(name)
 
     def load_playlist(self, name: str) -> bool:
-        """Load a saved playlist (updates data and UI)."""
-        result = self.playlist_manager.load_playlist(name)
-        if result:
-            # Sync loaded playlist from PlaylistManager to AppState and UI
-            tracks = self.playlist_manager.get_playlist()
-            current_index = self.playlist_manager.get_current_index()
-            self.set_playlist(tracks, current_index)
-        return result
+        """Load a saved playlist. PlaylistManager publishes; view updates via events."""
+        return self.playlist_manager.load_playlist(name)
+
+    def load_current_playlist(self) -> bool:
+        """Load the current playlist from auto-save file. PlaylistManager publishes; view updates via events."""
+        return self.playlist_manager.load_current_playlist()
 
     def list_playlists(self) -> List[str]:
         """List all saved playlists."""
@@ -404,26 +364,15 @@ class PlaylistView(Gtk.Box):
 
     def play_track_at_index(self, index: int) -> None:
         """Play track at the given index - publishes action event."""
-        # Prevent concurrent calls from gesture + row-activated
         if self._playback_lock:
             return
-
-        playlist = self._state.playlist
+        playlist = self.playlist_manager.get_playlist()
         if not 0 <= index < len(playlist):
             return
-
         self._playback_lock = True
-
-        # Set index first
-        self._state.set_current_index(index)
-
-        # Publish play track action
+        self.playlist_manager.set_current_index(index)
         self._events.publish(EventBus.ACTION_PLAY_TRACK, {"index": index})
-
-        # Emit signal for external coordination
         self.emit("track-activated", index)
-
-        # Release lock after 500ms
         GLib.timeout_add(500, self._release_playback_lock)
 
     def replace_and_play_track(self, track: TrackMetadata) -> None:
@@ -476,27 +425,31 @@ class PlaylistView(Gtk.Box):
         """
         Replace playlist with folder contents and play first track.
 
-        Collects tracks in library order and adds them to maintain the same order
-        as shown in the library view.
+        When MOC is active: syncs playlist to MOC and starts playback there.
+        Otherwise: sets internal playlist and plays via internal player.
 
         Args:
             folder_path: Path to the folder to play.
         """
-        self.clear()
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return
-        
-        # Collect all tracks from the folder recursively
+
         tracks = []
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-        
-        # Sort tracks by file path to match library order (library sorts by file_path)
         tracks.sort(key=lambda t: t.file_path)
-        
-        if tracks:
-            self.add_tracks(tracks)
+
+        if not tracks:
+            return
+
+        self.set_playlist(tracks, 0)
+        if self._use_moc:
+            # Sync to MOC and start playback in one go so MOC has the playlist before playing
+            self._events.publish(
+                EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": True}
+            )
+        else:
             self.play_track_at_index(0)
 
     # ============================================================================
@@ -512,38 +465,17 @@ class PlaylistView(Gtk.Box):
     # Internal Methods
     # ============================================================================
 
-    def _sync_from_state(self):
-        """Sync the view from AppState."""
-        # Shuffle queue is managed by PlaybackController
+    def _sync_from_state(self) -> None:
+        """Refresh tree from PlaylistManager (e.g. on init)."""
         self._update_view()
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
-        """Handle playlist changed event."""
-        # Sync PlaylistManager to match AppState (source of truth)
-        # This ensures the saved playlist file stays in sync
-        # Defer file I/O to avoid blocking UI thread
-        GLib.idle_add(self._sync_playlist_manager_to_state)
-        
-        # Refresh the view from current state
+        """Subscriber: playlist content changed → refresh tree."""
         self._update_view()
-    
-    def _sync_playlist_manager_to_state(self) -> bool:
-        """Sync PlaylistManager to AppState (runs asynchronously, non-blocking)."""
-        try:
-            # Update playlist and current_index in PlaylistManager to match AppState
-            self.playlist_manager.current_playlist = self._state.playlist.copy()
-            self.playlist_manager.current_index = self._state.current_index
-            # Save to file
-            self.playlist_manager._sync_to_file()
-        except Exception as e:
-            logger.warning("Failed to sync PlaylistManager: %s", e)
-        return False  # Don't repeat
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
-        """Handle current index changed event."""
-        if data:
-            index = data.get("index", -1)
-            self._update_selection()
+        """Subscriber: current index changed → update selection."""
+        self._update_selection()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:
         """Handle shuffle changed event."""
@@ -551,38 +483,123 @@ class PlaylistView(Gtk.Box):
             enabled = data.get("enabled", False)
             self.set_shuffle_enabled(enabled)
 
-    def _sync_playlist_manager_move(self, from_index: int, to_index: int):
-        """
-        Sync the move to PlaylistManager file (runs asynchronously, non-blocking).
-        
-        This keeps the saved playlist file in sync with AppState.
-        Also syncs current_index from AppState to ensure it's correct.
-        """
-        try:
-            playlist_len = len(self._state.playlist)
-            if (0 <= from_index < playlist_len and 
-                0 <= to_index < playlist_len and 
-                from_index != to_index):
-                # Update playlist order
-                self.playlist_manager.move_track(from_index, to_index)
-                # Sync current_index from AppState (source of truth)
-                self.playlist_manager.current_index = self._state.current_index
-                self.playlist_manager._sync_to_file()
-        except Exception as e:
-            logger.warning("Failed to sync move to file: %s", e)
-        return False  # Don't repeat
-    
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""
-        has_tracks = len(self._state.playlist) > 0
+        has_tracks = len(self.playlist_manager.get_playlist()) > 0
         self.clear_button.set_sensitive(has_tracks)
         self.save_button.set_sensitive(has_tracks)
 
     def _update_view(self):
-        """Update the tree view with current tracks."""
-        self.store.clear()
-        tracks = self._state.playlist
-        for i, track in enumerate(tracks):
+        """Update the tree view with current tracks from PlaylistManager."""
+        tracks = self.playlist_manager.get_playlist()
+        
+        # Always reset bulk update state before starting a new update
+        # This ensures consistent behavior regardless of previous state
+        if self._chunked_update_id is not None:
+            GLib.source_remove(self._chunked_update_id)
+            self._chunked_update_id = None
+        self._bulk_update_in_progress = False
+        
+        # Save which row was selected so we can restore blink after repopulate (GTK assertion fix)
+        selection = self.tree_view.get_selection()
+        self._saved_selected_index = -1
+        if selection:
+            try:
+                model, tree_iter = selection.get_selected()
+                if tree_iter:
+                    path = model.get_path(tree_iter)
+                    if path and path.get_indices():
+                        self._saved_selected_index = path.get_indices()[0]
+            except (ValueError, AttributeError, RuntimeError):
+                pass
+            try:
+                selection.unselect_all()
+            except (ValueError, AttributeError, RuntimeError):
+                pass
+        self._stop_blinking_highlight()
+        
+        # For large playlists, use chunked updates to avoid blocking UI
+        if len(tracks) >= 100:
+            # Start chunked update
+            self._bulk_update_in_progress = True
+            self.store.clear()
+            # Process first chunk immediately to show something right away
+            # Then schedule remaining chunks asynchronously
+            first_chunk_size = min(100, len(tracks))
+            for i in range(first_chunk_size):
+                track = tracks[i]
+                title = track.title or Path(track.file_path).stem
+                artist = track.artist or "Unknown Artist"
+                duration = (
+                    self._format_duration(track.duration) if track.duration else "--:--"
+                )
+                self.store.append([i + 1, title, artist, duration])
+            
+            # If there are more tracks, schedule remaining chunks
+            if len(tracks) > first_chunk_size:
+                self._chunked_update_id = GLib.idle_add(self._update_view_chunked, first_chunk_size)
+            else:
+                # All tracks processed in first chunk
+                self._bulk_update_in_progress = False
+                self._chunked_update_id = None
+                self._update_selection()
+                self._update_button_states()
+        else:
+            # For small playlists, update synchronously (fast enough)
+            self.store.clear()
+            for i, track in enumerate(tracks):
+                # Use filename as fallback if title is missing
+                title = track.title or Path(track.file_path).stem
+                artist = track.artist or "Unknown Artist"
+                duration = (
+                    self._format_duration(track.duration) if track.duration else "--:--"
+                )
+                self.store.append([i + 1, title, artist, duration])
+            self._update_selection()
+            # Update button states
+            self._update_button_states()
+    
+    def _update_view_chunked(self, start_index: int, chunk_size: int = 100) -> bool:
+        """
+        Update tree view in chunks to avoid blocking UI.
+        
+        Args:
+            start_index: Index to start processing from
+            chunk_size: Number of tracks to process per chunk
+            
+        Returns:
+            False (always) - we schedule next chunks explicitly via GLib.idle_add
+        """
+        # Always read current playlist state (may have changed since callback was scheduled)
+        tracks = self.playlist_manager.get_playlist()
+        total_tracks = len(tracks)
+        
+        # Verify we're still in bulk update mode (might have been cancelled by another _update_view call)
+        if not self._bulk_update_in_progress:
+            # Update was cancelled, clean up and exit
+            self._chunked_update_id = None
+            return False
+        
+        # Safety check: if playlist is empty or start_index is out of bounds, finalize
+        if total_tracks == 0:
+            self._bulk_update_in_progress = False
+            self._chunked_update_id = None
+            self._update_selection()
+            self._update_button_states()
+            return False
+        
+        # If start_index is beyond current playlist, we're done (playlist might have shrunk)
+        if start_index >= total_tracks:
+            self._bulk_update_in_progress = False
+            self._chunked_update_id = None
+            self._update_selection()
+            self._update_button_states()
+            return False
+        
+        # Process one chunk
+        end_index = min(start_index + chunk_size, total_tracks)
+        for i in range(start_index, end_index):
+            track = tracks[i]
             # Use filename as fallback if title is missing
             title = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
@@ -590,9 +607,19 @@ class PlaylistView(Gtk.Box):
                 self._format_duration(track.duration) if track.duration else "--:--"
             )
             self.store.append([i + 1, title, artist, duration])
+        
+        # Check if more chunks to process
+        if end_index < total_tracks:
+            # Schedule next chunk with updated start_index
+            self._chunked_update_id = GLib.idle_add(self._update_view_chunked, end_index)
+            return False  # Don't repeat automatically - we scheduled the next chunk explicitly
+        
+        # All chunks processed - finalize
+        self._bulk_update_in_progress = False
+        self._chunked_update_id = None
         self._update_selection()
-        # Update button states
         self._update_button_states()
+        return False  # Done
 
     def _update_selection(self, skip_scroll: bool = False):
         """Update the selection to highlight current track or show blinking highlight.
@@ -600,19 +627,33 @@ class PlaylistView(Gtk.Box):
         Args:
             skip_scroll: If True, skip scrolling to current track (faster, use during drag operations)
         """
+        # Skip selection updates during bulk updates (will be called after all chunks are done)
+        if self._bulk_update_in_progress:
+            return
         selection = self.tree_view.get_selection()
-        tracks = self._state.playlist
-        current_index = self._state.current_index
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
 
         # Get currently selected row (if any)
+        # Guard against invalid iters after store clear (GTK assertion)
         model, tree_iter = selection.get_selected()
         selected_path = None
         selected_index = -1
         if tree_iter:
-            selected_path = model.get_path(tree_iter)
-            indices = selected_path.get_indices()
-            if indices:
-                selected_index = indices[0]
+            try:
+                selected_path = model.get_path(tree_iter)
+                indices = selected_path.get_indices()
+                if indices:
+                    selected_index = indices[0]
+            except (ValueError, AttributeError, RuntimeError):
+                selected_index = -1
+        # Restore "other row selected" after repopulate so blink continues (used once per _update_view)
+        if selected_index < 0 and getattr(self, "_saved_selected_index", -1) >= 0:
+            saved = self._saved_selected_index
+            self._saved_selected_index = -1
+            if 0 <= saved < len(tracks):
+                selected_index = saved
+                selected_path = Gtk.TreePath.new_from_indices([saved])
 
         # If current playing track is selected, show normal selection
         if selected_index == current_index and current_index >= 0:
@@ -632,8 +673,9 @@ class PlaylistView(Gtk.Box):
             current_path = Gtk.TreePath.new_from_indices([current_index])
             self._start_blinking_highlight(current_path)
 
-            # Keep the user's selection visible
-            if selected_path:
+            # Keep the user's selection visible (selection model + cursor for _cell_data_func / _blink_toggle)
+            if selected_path is not None:
+                selection.select_path(selected_path)
                 self.tree_view.set_cursor(selected_path, None, False)
         elif current_index >= 0 and 0 <= current_index < len(tracks):
             # No other row selected - select current track normally
@@ -653,6 +695,7 @@ class PlaylistView(Gtk.Box):
     def _setup_blinking_highlight(self):
         """Setup blinking highlight system."""
         self._blink_path = None  # Track which path is blinking
+        self._saved_selected_index = -1  # Restore "other row selected" after store repopulate
 
     def _cell_data_func(self, column, cell, model, tree_iter, data):
         """Cell data function to apply background color for current playing track."""
@@ -664,22 +707,25 @@ class PlaylistView(Gtk.Box):
         row_index = indices[0]
 
         # Get current playing index and selected index
-        current_index = self._state.current_index
+        # Guard against invalid iters after store clear (GTK assertion)
+        current_index = self.playlist_manager.get_current_index()
         selection = self.tree_view.get_selection()
         model_sel, tree_iter_sel = selection.get_selected()
         selected_index = -1
         if tree_iter_sel:
-            path_sel = model_sel.get_path(tree_iter_sel)
-            indices_sel = path_sel.get_indices()
-            if indices_sel:
-                selected_index = indices_sel[0]
+            try:
+                path_sel = model_sel.get_path(tree_iter_sel)
+                indices_sel = path_sel.get_indices()
+                if indices_sel:
+                    selected_index = indices_sel[0]
+            except (ValueError, AttributeError, RuntimeError):
+                selected_index = -1
 
         # Apply background color based on state
         # Priority: drop target > current playing (blinking) > normal
-        
-        # Check if this is the drop target during drag
+        # cell-background-set must be True for custom background to be used (GTK 3/4)
         if self._drag_mode and row_index == self._drop_target_index and self._drop_target_index >= 0:
-            # Dark highlight for drop target
+            cell.set_property("cell-background-set", True)
             cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.2, 0.2, 0.7))
         elif (
             row_index == current_index
@@ -687,16 +733,14 @@ class PlaylistView(Gtk.Box):
             and selected_index != current_index
             and selected_index >= 0
         ):
-            # This is the current playing track and another row is selected - apply blinking blue
+            cell.set_property("cell-background-set", True)
             if self._blink_state:
-                # Brighter blue (blink on)
                 cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.6))
             else:
-                # Dimmer blue (blink off)
                 cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.3))
         else:
-            # Clear background
-            cell.set_property("cell-background-rgba", None)
+            cell.set_property("cell-background-set", False)
+            cell.set_property("cell-background-rgba", Gdk.RGBA(0, 0, 0, 0))
 
     def _start_blinking_highlight(self, path: Gtk.TreePath):
         """Start blinking highlight on the given path."""
@@ -707,16 +751,8 @@ class PlaylistView(Gtk.Box):
         self._blink_path = path
         self._blink_state = True
 
-        # Force initial redraw by invalidating the row
-        try:
-            path_index = path.get_indices()[0] if path.get_indices() else -1
-            if 0 <= path_index < len(self._state.playlist) and 0 <= path_index < len(self.store):
-                tree_iter = self.store.get_iter(path)
-                if tree_iter:
-                    self.store.row_changed(path, tree_iter)
-        except (ValueError, AttributeError, RuntimeError):
-            # Fallback: just queue a redraw
-            self.tree_view.queue_draw()
+        # Redraw so _cell_data_func runs with new _blink_state (not in model; queue_draw is required)
+        self.tree_view.queue_draw()
 
         # Start timeout for blinking (1000ms interval - slower blink)
         self._blink_timeout_id = GLib.timeout_add(1000, self._blink_toggle)
@@ -737,37 +773,33 @@ class PlaylistView(Gtk.Box):
     def _blink_toggle(self):
         """Toggle blink state - called by timeout."""
         # Verify that we should still be blinking
-        current_index = self._state.current_index
+        # Guard against invalid iters after store clear (GTK assertion)
+        current_index = self.playlist_manager.get_current_index()
         selection = self.tree_view.get_selection()
         model_sel, tree_iter_sel = selection.get_selected()
         selected_index = -1
         if tree_iter_sel:
-            path_sel = model_sel.get_path(tree_iter_sel)
-            indices_sel = path_sel.get_indices()
-            if indices_sel:
-                selected_index = indices_sel[0]
+            try:
+                path_sel = model_sel.get_path(tree_iter_sel)
+                indices_sel = path_sel.get_indices()
+                if indices_sel:
+                    selected_index = indices_sel[0]
+            except (ValueError, AttributeError, RuntimeError):
+                selected_index = -1
         
         # Check if we should still be blinking (current track exists and another row is selected)
         if (
             current_index >= 0
-            and 0 <= current_index < len(self._state.playlist)
+            and 0 <= current_index < len(self.playlist_manager.get_playlist())
             and selected_index >= 0
             and selected_index != current_index
         ):
             # Update blink_path to current_index (in case it changed due to moves)
             self._blink_path = Gtk.TreePath.new_from_indices([current_index])
             self._blink_state = not self._blink_state
-            
-            # Force cell renderers to update by invalidating the row
-            try:
-                if 0 <= current_index < len(self.store):
-                    tree_iter = self.store.get_iter(self._blink_path)
-                    if tree_iter:
-                        # Invalidate the row to force redraw
-                        self.store.row_changed(self._blink_path, tree_iter)
-            except (ValueError, AttributeError, RuntimeError):
-                # Fallback: just queue a redraw
-                self.tree_view.queue_draw()
+
+            # Redraw so _cell_data_func runs with new _blink_state (not in model; queue_draw required)
+            self.tree_view.queue_draw()
             return True  # Continue timeout
         else:
             # Conditions no longer met - stop blinking
@@ -806,7 +838,7 @@ class PlaylistView(Gtk.Box):
         self._pending_tap_index = -1
 
         if index >= 0 and not self._playback_lock:
-            playlist = self._state.playlist
+            playlist = self.playlist_manager.get_playlist()
             if 0 <= index < len(playlist):
                 self.play_track_at_index(index)
         return False  # Don't repeat
@@ -866,6 +898,9 @@ class PlaylistView(Gtk.Box):
                 selection.select_path(path)
                 # Set cursor to visually select the row
                 self.tree_view.set_cursor(path, None, False)
+                # Defer selection logic to next main-loop iteration so GTK has committed selection;
+                # skip_scroll=True keeps the clicked row in view instead of scrolling to current track
+                GLib.idle_add(lambda: self._update_selection(skip_scroll=True))
                 return
 
         self._click_selected_index = -1
@@ -953,7 +988,7 @@ class PlaylistView(Gtk.Box):
 
             # Get visible range - add error handling
             visible_range = self.tree_view.get_visible_range()
-            playlist = self._state.playlist
+            playlist = self.playlist_manager.get_playlist()
             if not playlist or not visible_range:
                 return
 
@@ -1027,7 +1062,7 @@ class PlaylistView(Gtk.Box):
         movement = abs(offset_x) + abs(offset_y)
 
         # Validate indices before using them
-        playlist_len = len(self._state.playlist)
+        playlist_len = len(self.playlist_manager.get_playlist())
         source_idx = self._drag_source_index if 0 <= self._drag_source_index < playlist_len else -1
         target_idx = self._drag_target_index if 0 <= self._drag_target_index < playlist_len else -1
         was_drag_mode = self._drag_mode
@@ -1069,7 +1104,7 @@ class PlaylistView(Gtk.Box):
                     tap_index = indices[0]
             
             if tap_index >= 0 and not self._playback_lock:
-                playlist = self._state.playlist
+                playlist = self.playlist_manager.get_playlist()
                 if 0 <= tap_index < len(playlist):
                     if self._single_tap_plays:
                         if self._tap_pending and self._pending_tap_index == tap_index:
@@ -1090,7 +1125,7 @@ class PlaylistView(Gtk.Box):
             # source_idx = where the track started
             # target_idx = where the user dropped it (calculated during drag)
             
-            playlist_len = len(self._state.playlist)
+            playlist_len = len(self.playlist_manager.get_playlist())
             if (
                 source_idx >= 0
                 and target_idx >= 0
@@ -1125,7 +1160,7 @@ class PlaylistView(Gtk.Box):
 
     def _highlight_drop_target(self, target_index: int):
         """Highlight the row where the dragged item will be dropped with dark background."""
-        if not (0 <= target_index < len(self._state.playlist)):
+        if not (0 <= target_index < len(self.playlist_manager.get_playlist())):
             return
         
         try:
@@ -1161,7 +1196,7 @@ class PlaylistView(Gtk.Box):
             self._drop_target_index = -1
             
             # Force redraw to clear highlight (only if target is valid)
-            if 0 <= old_target < len(self._state.playlist):
+            if 0 <= old_target < len(self.playlist_manager.get_playlist()):
                 try:
                     path = Gtk.TreePath.new_from_indices([old_target])
                     tree_iter = self.store.get_iter(path)
@@ -1259,7 +1294,7 @@ class PlaylistView(Gtk.Box):
             move_down_item.set_size_request(150, 40)  # Larger for touch
             move_down_item.connect("clicked", self._on_menu_move_down)
             move_down_item.set_sensitive(
-                self.selected_index < len(self._state.playlist) - 1
+                self.selected_index < len(self.playlist_manager.get_playlist()) - 1
             )
             menu_box.append(move_down_item)
 
@@ -1270,14 +1305,14 @@ class PlaylistView(Gtk.Box):
         clear_item.add_css_class("flat")
         clear_item.set_size_request(150, 40)  # Larger for touch
         clear_item.connect("clicked", self._on_menu_clear)
-        clear_item.set_sensitive(len(self._state.playlist) > 0)
+        clear_item.set_sensitive(len(self.playlist_manager.get_playlist()) > 0)
         menu_box.append(clear_item)
 
         save_item = Gtk.Button(label="Save Playlist...")
         save_item.add_css_class("flat")
         save_item.set_size_request(150, 40)  # Larger for touch
         save_item.connect("clicked", self._on_menu_save)
-        save_item.set_sensitive(len(self._state.playlist) > 0)
+        save_item.set_sensitive(len(self.playlist_manager.get_playlist()) > 0)
         menu_box.append(save_item)
 
         # Set child before parent
@@ -1327,8 +1362,14 @@ class PlaylistView(Gtk.Box):
 
     def _on_menu_play(self, button):
         """Handle 'Play' from context menu."""
-        if self.selected_index >= 0:
-            self.play_track_at_index(self.selected_index)
+        if self.selected_index < 0:
+            self._close_menu()
+            return
+        playlist = self.playlist_manager.get_playlist()
+        if not (0 <= self.selected_index < len(playlist)):
+            self._close_menu()
+            return
+        self.play_track_at_index(self.selected_index)
         self._close_menu()
 
     def _on_menu_remove(self, button):
@@ -1347,7 +1388,7 @@ class PlaylistView(Gtk.Box):
 
     def _on_menu_move_down(self, button):
         """Handle 'Move Down' from context menu."""
-        if self.selected_index < len(self._state.playlist) - 1:
+        if self.selected_index < len(self.playlist_manager.get_playlist()) - 1:
             self.move_track(self.selected_index, self.selected_index + 1)
             # Update selected_index after move (track moved down, so index increased)
             self.selected_index += 1
@@ -1496,3 +1537,8 @@ class PlaylistView(Gtk.Box):
         if self._tap_timeout_id is not None:
             GLib.source_remove(self._tap_timeout_id)
             self._tap_timeout_id = None
+        
+        # Cancel any pending chunked update
+        if self._chunked_update_id is not None:
+            GLib.source_remove(self._chunked_update_id)
+            self._chunked_update_id = None
