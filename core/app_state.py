@@ -180,10 +180,6 @@ class AppState:
                 if 0 <= self._current_index < len(self._playlist):
                     self._current_track = self._playlist[self._current_index]
         self._event_bus.publish(
-            EventBus.PLAYLIST_TRACK_ADDED,
-            {"track": track, "position": position or len(self._playlist) - 1},
-        )
-        self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
             {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
@@ -238,9 +234,6 @@ class AppState:
             self._current_index = -1
             self._current_track = None
         self._event_bus.publish(
-            EventBus.PLAYLIST_TRACK_REMOVED, {"index": index, "track": removed_track}
-        )
-        self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
             {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
@@ -289,10 +282,6 @@ class AppState:
                 else None
             )
         self._event_bus.publish(
-            EventBus.PLAYLIST_TRACK_MOVED,
-            {"from_index": from_index, "to_index": to_index},
-        )
-        self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
             {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
@@ -306,7 +295,6 @@ class AppState:
         self._playlist.clear()
         self._current_index = -1
         self._current_track = None
-        self._event_bus.publish(EventBus.PLAYLIST_CLEARED, {})
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED, {"playlist_changed": True, "index": -1, "content_changed": True}
         )
@@ -362,7 +350,11 @@ class AppState:
         Args:
             backend: Backend name ("none", "moc", "internal", "bt_sink")
         """
-        self._active_backend = backend
+        if self._active_backend != backend:
+            self._active_backend = backend
+            self._event_bus.publish(
+                EventBus.ACTIVE_BACKEND_CHANGED, {"backend": self._active_backend}
+            )
 
     def set_position(self, position: float) -> None:
         """

@@ -31,27 +31,21 @@ class EventBus:
     PLAYBACK_STARTED = "playback.started"
     PLAYBACK_PAUSED = "playback.paused"
     PLAYBACK_STOPPED = "playback.stopped"
-    PLAYBACK_RESUMED = "playback.resumed"
 
     # Track events
     TRACK_CHANGED = "track.changed"
-    TRACK_LOADED = "track.loaded"
-    TRACK_FINISHED = "track.finished"
     POSITION_CHANGED = "position.changed"
     DURATION_CHANGED = "duration.changed"
 
     # Playlist events
     PLAYLIST_CHANGED = "playlist.changed"
-    PLAYLIST_CLEARED = "playlist.cleared"
-    PLAYLIST_TRACK_ADDED = "playlist.track_added"
-    PLAYLIST_TRACK_REMOVED = "playlist.track_removed"
-    PLAYLIST_TRACK_MOVED = "playlist.track_moved"
     CURRENT_INDEX_CHANGED = "playlist.current_index_changed"
 
     # Playback control events (shuffle, loop, etc.)
     SHUFFLE_CHANGED = "playback.shuffle_changed"
     LOOP_MODE_CHANGED = "playback.loop_mode_changed"
     AUTONEXT_CHANGED = "playback.autonext_changed"
+    ACTIVE_BACKEND_CHANGED = "playback.active_backend_changed"
 
     # Bluetooth events
     BT_DEVICE_CONNECTED = "bluetooth.device_connected"

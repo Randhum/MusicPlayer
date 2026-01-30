@@ -425,32 +425,38 @@ class PlaylistView(Gtk.Box):
         """
         Replace playlist with folder contents and play first track.
 
+        Defers heavy work (scan + set_playlist + play) to idle so the UI stays
+        responsive and we avoid GTK assertion from updating the tree in the same stack.
+
         When MOC is active: syncs playlist to MOC and starts playback there.
         Otherwise: sets internal playlist and plays via internal player.
-
-        Args:
-            folder_path: Path to the folder to play.
         """
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return
+        # Release any stuck lock so controls work after load
+        self._playback_lock = False
+        GLib.idle_add(self._do_replace_and_play_folder, str(folder.resolve()))
 
+    def _do_replace_and_play_folder(self, folder_path: str) -> bool:
+        """Idle callback: collect tracks, set playlist, trigger playback."""
+        folder = Path(folder_path)
+        if not folder.exists() or not folder.is_dir():
+            return False
         tracks = []
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
         tracks.sort(key=lambda t: t.file_path)
-
         if not tracks:
-            return
-
+            return False
         self.set_playlist(tracks, 0)
         if self._use_moc:
-            # Sync to MOC and start playback in one go so MOC has the playlist before playing
             self._events.publish(
                 EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": True}
             )
         else:
             self.play_track_at_index(0)
+        return False  # one-shot idle
 
     # ============================================================================
     # UI Configuration
@@ -471,7 +477,13 @@ class PlaylistView(Gtk.Box):
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
         """Subscriber: playlist content changed → refresh tree."""
-        self._update_view()
+        tracks = self.playlist_manager.get_playlist()
+        # Defer tree update for large playlists to avoid GTK assertion (gtk_css_node_insert_after:
+        # store updates must run after layout/draw). Use LOW priority so they run when truly idle.
+        if len(tracks) >= 100:
+            GLib.idle_add(self._update_view, priority=GLib.PRIORITY_LOW)
+        else:
+            self._update_view()
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
         """Subscriber: current index changed → update selection."""
@@ -542,6 +554,7 @@ class PlaylistView(Gtk.Box):
                 # All tracks processed in first chunk
                 self._bulk_update_in_progress = False
                 self._chunked_update_id = None
+                self._playback_lock = False
                 self._update_selection()
                 self._update_button_states()
         else:
@@ -576,14 +589,15 @@ class PlaylistView(Gtk.Box):
         
         # Verify we're still in bulk update mode (might have been cancelled by another _update_view call)
         if not self._bulk_update_in_progress:
-            # Update was cancelled, clean up and exit
             self._chunked_update_id = None
+            self._playback_lock = False
             return False
         
         # Safety check: if playlist is empty or start_index is out of bounds, finalize
         if total_tracks == 0:
             self._bulk_update_in_progress = False
             self._chunked_update_id = None
+            self._playback_lock = False
             self._update_selection()
             self._update_button_states()
             return False
@@ -592,6 +606,7 @@ class PlaylistView(Gtk.Box):
         if start_index >= total_tracks:
             self._bulk_update_in_progress = False
             self._chunked_update_id = None
+            self._playback_lock = False
             self._update_selection()
             self._update_button_states()
             return False
@@ -608,15 +623,17 @@ class PlaylistView(Gtk.Box):
             )
             self.store.append([i + 1, title, artist, duration])
         
-        # Check if more chunks to process
+        # Check if more chunks to process (LOW priority to avoid gtk_css_node_insert_after)
         if end_index < total_tracks:
-            # Schedule next chunk with updated start_index
-            self._chunked_update_id = GLib.idle_add(self._update_view_chunked, end_index)
+            self._chunked_update_id = GLib.idle_add(
+                self._update_view_chunked, end_index, priority=GLib.PRIORITY_LOW
+            )
             return False  # Don't repeat automatically - we scheduled the next chunk explicitly
         
         # All chunks processed - finalize
         self._bulk_update_in_progress = False
         self._chunked_update_id = None
+        self._playback_lock = False  # Ensure controls work after large load
         self._update_selection()
         self._update_button_states()
         return False  # Done
@@ -699,12 +716,17 @@ class PlaylistView(Gtk.Box):
 
     def _cell_data_func(self, column, cell, model, tree_iter, data):
         """Cell data function to apply background color for current playing track."""
-        # Get row index from model
-        path = model.get_path(tree_iter)
-        indices = path.get_indices()
-        if not indices:
+        try:
+            path = model.get_path(tree_iter)
+            indices = path.get_indices()
+            if not indices:
+                return
+            row_index = indices[0]
+            # Guard: row may not exist yet during chunked update
+            if row_index < 0 or row_index >= len(self.store):
+                return
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
             return
-        row_index = indices[0]
 
         # Get current playing index and selected index
         # Guard against invalid iters after store clear (GTK assertion)
@@ -1137,25 +1159,16 @@ class PlaylistView(Gtk.Box):
                 self.move_track(source_idx, target_idx)
         elif time_held >= long_press_time and movement < movement_threshold:
             # Long press without significant movement - show context menu
-            # Always use selection model to get the correct row (most reliable)
-            selection = self.tree_view.get_selection()
-            model, tree_iter = selection.get_selected()
-            menu_index = source_idx  # Default to source_idx
-            
-            if tree_iter:
-                path = model.get_path(tree_iter)
-                indices = path.get_indices()
-                if indices:
-                    menu_index = indices[0]
-            
-            if menu_index >= 0 and not self._menu_showing:
-                self.selected_index = menu_index
-                # Get coordinates for menu positioning (use start point from gesture)
-                success, start_x, start_y = gesture.get_start_point()
+            # Use row at gesture start position (same as right-click: row under pointer)
+            success, start_x, start_y = gesture.get_start_point()
+            if success:
+                self.selected_index = self._get_playlist_index_at_position(start_x, start_y)
+            else:
+                self.selected_index = -1
+            if self.selected_index >= 0 and not self._menu_showing:
                 if success:
                     self._show_context_menu(start_x, start_y)
                 else:
-                    # Fallback: use center of selected row
                     self._show_context_menu(0, 0)
 
     def _highlight_drop_target(self, target_index: int):
@@ -1208,26 +1221,23 @@ class PlaylistView(Gtk.Box):
         # Restore selection to current playing track
         self._update_selection()
 
-    def _show_context_menu_at_position(self, x, y):
-        """Show context menu at the given position.
-
-        Note: This method works correctly with GestureClick coordinates.
-        For GestureDrag (long-press), use selection-based lookup instead.
-        """
-        # GestureClick coordinates work correctly with TreeView's get_path_at_pos
+    def _get_playlist_index_at_position(self, x: float, y: float) -> int:
+        """Return playlist row index at widget coordinates, or -1 if none."""
         path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-        if path_info:
-            path = path_info[0]
-            indices = path.get_indices()
-            if indices:
-                self.selected_index = indices[0]
-                # Also select the row visually
-                self.tree_view.set_cursor(path, None, False)
-            else:
-                self.selected_index = -1
-        else:
-            self.selected_index = -1
+        if not path_info:
+            return -1
+        path = path_info[0]
+        indices = path.get_indices()
+        if not indices:
+            return -1
+        return indices[0]
 
+    def _show_context_menu_at_position(self, x, y):
+        """Show context menu at the given position (right-click or long-press)."""
+        self.selected_index = self._get_playlist_index_at_position(x, y)
+        if self.selected_index >= 0:
+            path = Gtk.TreePath.new_from_indices([self.selected_index])
+            self.tree_view.set_cursor(path, None, False)
         self._show_context_menu(x, y)
 
     def _show_context_menu(self, x: float, y: float):

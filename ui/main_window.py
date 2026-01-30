@@ -92,6 +92,7 @@ class MainWindow(Gtk.ApplicationWindow):
             internal_player=self.player,
             moc_controller=self.moc_controller,
             bt_sink=self.bt_sink,
+            system_volume=self.system_volume,
         )
 
         # ---------------------------------------------------------------------
@@ -108,6 +109,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Layer 6: Post-UI init (playlist load, metadata sync, layout, library)
         # ---------------------------------------------------------------------
         self._init_playlist_and_state()
+        # Sync player controls (time labels, play state, volume) from state we just loaded
+        self.player_controls._initialize_from_state()
         current_track = self.app_state.current_track
         if current_track:
             self.metadata_panel.sync_with_state(current_track)

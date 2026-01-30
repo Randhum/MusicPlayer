@@ -87,6 +87,18 @@ class PlaylistManager:
             if track:
                 self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": track})
 
+    def _emit_current_track_changed(self, old_index: int) -> None:
+        """Publish CURRENT_INDEX_CHANGED and TRACK_CHANGED when current index/track changed."""
+        if not self._event_bus or old_index == self.current_index:
+            return
+        self._event_bus.publish(
+            EventBus.CURRENT_INDEX_CHANGED,
+            {"index": self.current_index, "old_index": old_index},
+        )
+        self._event_bus.publish(
+            EventBus.TRACK_CHANGED, {"track": self.get_current_track()}
+        )
+
     def add_track(self, track: TrackMetadata, position: Optional[int] = None) -> None:
         """
         Add a track to the current playlist.
@@ -95,6 +107,7 @@ class PlaylistManager:
             track: Track metadata to add
             position: Insert position (None appends to end)
         """
+        old_index = self.current_index
         if position is None:
             self.current_playlist.append(track)
             position = len(self.current_playlist) - 1
@@ -105,13 +118,10 @@ class PlaylistManager:
                 self.current_index += 1
         if self._event_bus:
             self._event_bus.publish(
-                EventBus.PLAYLIST_TRACK_ADDED,
-                {"track": track, "position": position},
-            )
-            self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {"playlist_changed": True, "index": self.current_index, "content_changed": True},
             )
+            self._emit_current_track_changed(old_index)
         self._sync_to_file()
 
     def add_tracks(
@@ -124,6 +134,7 @@ class PlaylistManager:
             tracks: List of track metadata to add
             position: Insert position (None appends to end)
         """
+        old_index = self.current_index
         if position is None:
             self.current_playlist.extend(tracks)
         else:
@@ -137,6 +148,7 @@ class PlaylistManager:
                 EventBus.PLAYLIST_CHANGED,
                 {"playlist_changed": True, "index": self.current_index, "content_changed": True},
             )
+            self._emit_current_track_changed(old_index)
         self._sync_to_file()
 
     def remove_track(self, index: int) -> None:
@@ -148,6 +160,7 @@ class PlaylistManager:
         """
         if not (0 <= index < len(self.current_playlist)):
             return
+        old_index = self.current_index
         removed_track = self.current_playlist.pop(index)
         if index < self.current_index:
             self.current_index -= 1
@@ -155,13 +168,10 @@ class PlaylistManager:
             self.current_index = -1
         if self._event_bus:
             self._event_bus.publish(
-                EventBus.PLAYLIST_TRACK_REMOVED,
-                {"index": index, "track": removed_track},
-            )
-            self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {"playlist_changed": True, "index": self.current_index, "content_changed": True},
             )
+            self._emit_current_track_changed(old_index)
         self._sync_to_file()
 
     def move_track(self, from_index: int, to_index: int) -> None:
@@ -179,6 +189,7 @@ class PlaylistManager:
             and 0 <= to_index < len(self.current_playlist)
         ):
             return
+        old_index = self.current_index
         track = self.current_playlist.pop(from_index)
         if from_index < to_index:
             insert_index = to_index - 1
@@ -193,25 +204,23 @@ class PlaylistManager:
             self.current_index += 1
         if self._event_bus:
             self._event_bus.publish(
-                EventBus.PLAYLIST_TRACK_MOVED,
-                {"from_index": from_index, "to_index": to_index},
-            )
-            self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {"playlist_changed": True, "index": self.current_index, "content_changed": True},
             )
+            self._emit_current_track_changed(old_index)
         self._sync_to_file()
 
     def clear(self) -> None:
         """Clear the current playlist and reset index."""
+        old_index = self.current_index
         self.current_playlist.clear()
         self.current_index = -1
         if self._event_bus:
-            self._event_bus.publish(EventBus.PLAYLIST_CLEARED, {})
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {"playlist_changed": True, "index": -1, "content_changed": True},
             )
+            self._emit_current_track_changed(old_index)
         self._sync_to_file()
 
     def get_current_track(self) -> Optional[TrackMetadata]:

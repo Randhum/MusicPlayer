@@ -1,3 +1,5 @@
+> Beware I did not write this code, I am rather the more or less lazy reviewer of this generated code - so you might see weird stuff happening. - Bug-Reports welcome :)
+
 # 🎵 Build Your Own Bluetooth Speaker with Python!
 
 > **An IoT Learning Project** — Turn your computer into a Bluetooth speaker and learn real-world programming along the way!
@@ -222,6 +224,8 @@ You should see a window with your music library, playlist, and Bluetooth control
 - **Playback controls** (bottom bar):
   - **Play / Pause / Stop / Previous / Next**: Control the current playlist
   - **Shuffle**: Toggle to play the current playlist in **random order**
+  - **Loop**: Cycle through Forward / Loop Track / Loop Playlist (click to change)
+  - Shuffle and loop buttons are **visually highlighted** when active
   - **Seek & Volume**: Touch-friendly sliders for scrubbing through tracks and adjusting volume
 
 - **Playlist management** (touch-friendly, see [Playlist View Options](#playlist-view-options) for configuration):
@@ -516,30 +520,6 @@ emerge -av media-plugins/gst-plugins-flac      # FLAC audio
 emerge -av media-plugins/gst-plugins-openh264  # H.264 video
 ```
 
-### "MOC error: No files added!"
-
-This error occurs when trying to play a track that has an invalid or missing file path. The app now validates file paths before sending them to MOC.
-
-```bash
-# Check if the track file exists
-ls -l /path/to/your/track.mp3
-
-# If files were moved, reload the playlist
-# The app will automatically skip invalid tracks when syncing to MOC
-```
-
-### "Songs don't automatically advance to the next track!"
-
-If playback stops when a song finishes instead of automatically playing the next song:
-
-**What was fixed:**
-- Improved end-of-track detection in MOC synchronization
-- Automatic next track advancement when a track finishes
-- MOC autonext is disabled - the app handles track navigation to prevent conflicts
-- Better handling of track completion for both sequential and shuffled playback
-- User action guard prevents MOC status polling from interfering with user-initiated track changes
-
-The app now properly detects when a track finishes (by monitoring position vs duration) and automatically advances to the next track. The app is the single source of truth for track navigation, preventing conflicts between MOC's internal state and the app's playlist management.
 
 ---
 
@@ -1208,7 +1188,7 @@ The MOC (Music On Console) integration follows a simple, direct approach:
 - `set_playlist()` - Write playlist to M3U and optionally start playback
 - `toggle_shuffle()` / `disable_autonext()` / `enable_autonext()` - Control MOC features
 
-**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state.
+**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state. When you add many tracks (e.g. "play folder"), the playlist is synced to MOC in chunks; if a "start playback" request arrives while a sync is already in progress, the controller records it and starts playback when that sync completes, so playback is never lost.
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server
@@ -1313,13 +1293,28 @@ Track your learning progress!
 
 ## 📝 Recent Changes
 
-### State Synchronization Fixes (Latest)
+### State–Event Integration (Latest)
+
+Internal state and event management are aligned so every meaningful state change publishes the corresponding event:
+
+- **AppState**: All setters that change playback/UI state publish an event (e.g. PLAYBACK_STARTED, POSITION_CHANGED, SHUFFLE_CHANGED, VOLUME_CHANGED). **ACTIVE_BACKEND_CHANGED** and **AUTONEXT_CHANGED** were added so backend and autonext changes are broadcast.
+- **PlaylistManager**: When add/remove/move/clear change the current index or current track, **CURRENT_INDEX_CHANGED** and **TRACK_CHANGED** are now emitted (via `_emit_current_track_changed`), so metadata and MPRIS stay in sync when the playlist is edited.
+- **Rule**: State is updated only through setters; setters publish the relevant events so subscribers (UI, PlaybackController) stay in sync.
+
+### Event Bus Cleanup
+
+Removed unused and orphan events so every remaining event is either subscribed or reserved for future use: **PLAYBACK_RESUMED** (redundant with PLAYBACK_STARTED), **TRACK_LOADED** and **TRACK_FINISHED** (never published or subscribed), and fine-grained playlist events (**PLAYLIST_TRACK_ADDED**, **PLAYLIST_TRACK_REMOVED**, **PLAYLIST_TRACK_MOVED**, **PLAYLIST_CLEARED**) plus **AUTONEXT_CHANGED** (published but no subscribers; UI and logic rely on PLAYLIST_CHANGED and backend autonext).
+
+### State Synchronization Fixes
 
 Fixed critical synchronization issues between tracks, playlist, playback state, and UI components:
 
-- **PlayerControls Initialization**: Added `_initialize_from_state()` method to properly initialize all UI components (play/pause button, progress bar, shuffle/loop buttons, volume) from `AppState` on startup
+- **PlayerControls state-action flow**: All user actions (play, pause, seek, volume, shuffle, loop) go through EventBus only; legacy GObject signals removed. Volume changes publish `ACTION_SET_VOLUME`; `PlaybackController` updates `AppState` and applies system volume. Seek uses direct handler calls instead of internal signals.
+- **PlayerControls Initialization**: Added `_initialize_from_state()` method to properly initialize all UI components (play/pause button, progress bar, shuffle/loop buttons, volume) from `AppState` on startup. **MainWindow** calls `player_controls._initialize_from_state()` after `_init_playlist_and_state()` so time labels and play state stay in sync with MOC/loaded state.
+- **Label–playback sync**: `_on_position_changed` uses `self._state.duration` when the event payload omits duration so time labels always reflect current state.
+- **Playlist view GTK assertion (gtk_css_node_insert_after)**: Large-playlist and chunked tree updates are scheduled with `GLib.PRIORITY_LOW` so store modifications run after layout/draw; this avoids modifying the widget tree during a CSS/layout pass.
 - **Playlist Loading Events**: `PlaylistManager.load_current_playlist()` now properly publishes `CURRENT_INDEX_CHANGED` and `TRACK_CHANGED` events after loading, ensuring UI components sync correctly on startup
-- **MainWindow Initialization Order**: Layered init (foundation → backends → playback controller → dock manager → UI → post-UI). All playlist operations go through `PlaylistView` (e.g. `load_current_playlist()`); playlist load runs after UI is created via `_init_playlist_and_state()`
+- **MainWindow Initialization Order**: Layered init (foundation → backends → playback controller → dock manager → UI → post-UI). All playlist operations go through `PlaylistView` (e.g. `load_current_playlist()`); playlist load runs after UI is created via `_init_playlist_and_state()`. `PlaybackController` receives `system_volume` and applies volume on `ACTION_SET_VOLUME`.
 - **Event Data Standardization**: All `PLAYLIST_CHANGED` events now consistently include `content_changed` boolean field
 - **MPRIS2 Navigation Updates**: PlayerControls now subscribes to `PLAYLIST_CHANGED` events to update MPRIS2 navigation capabilities when playlist changes
 - **Track Change Flow**: Improved documentation and consistency in `PlaybackController` track change handling
