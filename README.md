@@ -1134,13 +1134,12 @@ The application uses an **event-driven architecture** with clear separation of c
 2. **AppState** (`core/app_state.py`) - Application state
    - Playback state, volume, shuffle, backend; when `PlaylistManager` is set, playlist reads/writes delegate to it
    - State changes publish events
-   - **PlaylistManager** (`core/playlist_manager.py`) - Source of truth for playlist data and file persistence; publishes playlist events when changed
+   - **PlaylistManager** (`core/playlist_manager.py`) - Single source of truth for playlist; publishes PLAYLIST_CHANGED (and index/track when needed). `set_playlist(tracks, index)` replaces in one go and publishes once; load/save and AppState/PlaylistView use it so UI and PlaybackController react via pub/sub
 
-3. **PlaybackController** (`core/playback_controller.py`) - Mediator pattern
-   - Routes playback commands to appropriate backend (MOC, internal player, BT sink)
-   - Manages MOC status polling
-   - Ensures only one backend is active at a time
-   - Handles track changes and playlist synchronization
+3. **PlaybackController** (`core/playback_controller.py`) - Pub/sub driven
+   - Subscribes to ACTION_* and PLAYLIST_CHANGED; updates AppState; UI reacts to state events
+   - Routes playback to MOC, internal player, or BT sink; MOC status polling; one backend active at a time
+   - Single “load from MOC” path: `_reload_playlist_from_moc()` used by refresh, append folder, file-change poll, and track-change reload
 
 **Data Flow:**
 
@@ -1157,9 +1156,8 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
 ```
 
 **Playlist data flow:**
-- **PlaylistManager** is the source of truth for playlist data and persistence (auto-save to `current_playlist.json`, named save/load). It publishes playlist events when changed.
-- **AppState** delegates playlist reads/writes to PlaylistManager when it is set (at startup); UI and playback read via AppState or PlaylistManager.
-- PlaylistView and other UI call PlaylistManager for add/remove/move/clear; events drive view updates. Save reads from PlaylistManager directly.
+- **PlaylistManager** is the single source of truth; `set_playlist(tracks, index)` replaces playlist and index in one go and publishes PLAYLIST_CHANGED (and index/track when needed). Load/save and AppState/PlaylistView use it; PlaybackController subscribes and syncs to MOC.
+- **AppState** and **PlaylistView** call `playlist_manager.set_playlist()` for full replace; add/remove/move/clear still call the fine-grained methods. Events drive view and playback; no duplicate state.
 
 **Benefits:**
 - **No circular dependencies** - Components only depend on EventBus and AppState

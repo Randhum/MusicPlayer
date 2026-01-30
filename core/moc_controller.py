@@ -319,9 +319,10 @@ class MocController:
         except ValueError:
             pass
 
-        # Parse shuffle and autonext state from info
+        # Parse shuffle, autonext, and repeat state from info
         shuffle = info.get("Shuffle", "").strip().upper() == "ON"
         autonext = info.get("Autonext", "").strip().upper() == "ON"
+        repeat = info.get("Repeat", "").strip().upper() == "ON"
 
         status = {
             "state": state,  # PLAY, PAUSE, STOP
@@ -331,6 +332,7 @@ class MocController:
             "volume": volume,
             "shuffle": shuffle,
             "autonext": autonext,
+            "repeat": repeat,
         }
 
         # Update cache
@@ -607,6 +609,37 @@ class MocController:
         status = self.get_status()
         if status:
             return status.get("autonext", False)
+        return None
+
+    def enable_repeat(self):
+        """Enable repeat mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--on=repeat")
+
+    def disable_repeat(self):
+        """Disable repeat mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--off=repeat")
+
+    def toggle_repeat(self):
+        """Toggle repeat mode in MOC."""
+        if not self.is_available():
+            return
+        if not self.ensure_server():
+            return
+        self._run("--toggle=repeat")
+
+    def get_repeat_state(self) -> Optional[bool]:
+        """Get current repeat state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("repeat", False)
         return None
 
     # ------------------------------------------------------------------

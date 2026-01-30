@@ -116,11 +116,9 @@ class AppState:
         """
         if self._playlist_manager is not None:
             self._current_track_override = None
-            self._playlist_manager.clear()
-            if tracks:
-                self._playlist_manager.add_tracks(tracks)
-            self._playlist_manager.set_current_index(
-                current_index if 0 <= current_index < len(tracks) else -1
+            self._playlist_manager.set_playlist(
+                tracks,
+                current_index if 0 <= current_index < len(tracks) else -1,
             )
             return
         self._playlist = list(tracks)

@@ -88,6 +88,7 @@ class PlaybackController:
         self._moc_playlist_mtime: float = 0.0
         self._recent_moc_write: Optional[float] = None
         self._recent_shuffle_write: Optional[float] = None
+        self._recent_repeat_write: Optional[float] = None
         self._loading_from_moc: bool = False
         self._syncing_to_moc: bool = False
         self._user_action_time: float = 0.0
@@ -166,10 +167,19 @@ class PlaybackController:
             self._startup_complete = True
             return False
         if self._moc_controller.ensure_server():
-            self._moc_controller.disable_autonext()
+            # Enable autonext in MOC (required for track advancement)
+            self._moc_controller.enable_autonext()
+            # Sync shuffle state from MOC
             moc_shuffle = self._moc_controller.get_shuffle_state()
             if moc_shuffle is not None:
                 self._state.set_shuffle_enabled(moc_shuffle)
+            # Sync repeat state from MOC to loop mode
+            moc_repeat = self._moc_controller.get_repeat_state()
+            if moc_repeat is not None:
+                # MOC only has repeat on/off, so map to LOOP_PLAYLIST (2) if on, LOOP_FORWARD (0) if off
+                # We can't distinguish between LOOP_TRACK (1) and LOOP_PLAYLIST (2) from MOC
+                loop_mode = 2 if moc_repeat else 0
+                self._state.set_loop_mode(loop_mode)
         self._startup_complete = True
         return False
 
@@ -380,6 +390,17 @@ class PlaybackController:
 
         mode = int(data["mode"])
         self._state.set_loop_mode(mode)
+
+        # Sync loop mode to MOC's repeat option
+        # LOOP_TRACK (1) and LOOP_PLAYLIST (2) both map to repeat=on
+        # LOOP_FORWARD (0) maps to repeat=off
+        if self._use_moc:
+            if mode == 1 or mode == 2:  # LOOP_TRACK or LOOP_PLAYLIST
+                self._moc_controller.enable_repeat()
+            else:  # LOOP_FORWARD (0)
+                self._moc_controller.disable_repeat()
+            # Track when we modified repeat in MOC (prevents circular sync)
+            self._recent_repeat_write = time.time()
 
     def _on_action_set_volume(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle set volume action."""
@@ -866,6 +887,19 @@ class PlaybackController:
             ):
                 # MOC's shuffle state changed externally - update our state
                 self._state.set_shuffle_enabled(moc_shuffle)
+
+        # Sync repeat state from MOC to loop mode (skip if we just changed it)
+        moc_repeat = status.get("repeat", False)
+        # Map MOC repeat to loop mode: on -> LOOP_PLAYLIST (2), off -> LOOP_FORWARD (0)
+        expected_loop_mode = 2 if moc_repeat else 0
+        if self._state.loop_mode != expected_loop_mode:
+            # Check if we wrote it recently (within RECENT_WRITE_WINDOW)
+            if not self._recent_repeat_write or (
+                time.time() - self._recent_repeat_write > RECENT_WRITE_WINDOW
+            ):
+                # MOC's repeat state changed externally - update our loop mode
+                # Note: We can't distinguish LOOP_TRACK (1) from LOOP_PLAYLIST (2) from MOC
+                self._state.set_loop_mode(expected_loop_mode)
 
         # Detect track change - but skip if user just initiated an action (prevent interference)
         if file_path and file_path != self._moc_last_file:

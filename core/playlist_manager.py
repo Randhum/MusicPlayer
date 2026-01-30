@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 
 
 class PlaylistManager:
-    """Manages playlists - in-memory and persistent storage. Publishes events when changed."""
+    """In-memory playlist and persistence. Single source of truth; publishes PLAYLIST_CHANGED (and index/track when needed) so UI and PlaybackController react via pub/sub."""
 
     def __init__(
         self,
@@ -51,9 +51,41 @@ class PlaylistManager:
 
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
-
-        # Auto-save flag to prevent recursive saves during load
         self._auto_save_enabled: bool = True
+
+    def set_playlist(
+        self, tracks: List[TrackMetadata], current_index: int = -1
+    ) -> None:
+        """Replace playlist and index in one go; publish once; sync to file. Used by AppState, view, and load paths."""
+        self.current_playlist = list(tracks)
+        self.current_index = (
+            current_index
+            if 0 <= current_index < len(self.current_playlist)
+            else -1
+        )
+        self._emit_playlist_replaced()
+        self._sync_to_file()
+
+    def _emit_playlist_replaced(self) -> None:
+        """Publish PLAYLIST_CHANGED and, if index valid, CURRENT_INDEX_CHANGED and TRACK_CHANGED."""
+        if not self._event_bus:
+            return
+        self._event_bus.publish(
+            EventBus.PLAYLIST_CHANGED,
+            {
+                "playlist_changed": True,
+                "index": self.current_index,
+                "content_changed": True,
+            },
+        )
+        if self.current_index >= 0:
+            self._event_bus.publish(
+                EventBus.CURRENT_INDEX_CHANGED,
+                {"index": self.current_index, "old_index": -1},
+            )
+            track = self.get_current_track()
+            if track:
+                self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": track})
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None) -> None:
         """
@@ -279,25 +311,14 @@ class PlaylistManager:
 
             with open(playlist_file, "r", encoding="utf-8") as f:
                 playlist_data = json.load(f)
-
-            self._auto_save_enabled = False  # Prevent save during load
-            try:
-                self.current_playlist = [
-                    TrackMetadata.from_dict(track_dict)
-                    for track_dict in playlist_data.get("tracks", [])
-                ]
-                self.current_index = playlist_data.get("current_index", -1)
-                # Clamp index to valid range
-                if self.current_index >= len(self.current_playlist):
-                    self.current_index = -1
-            finally:
-                self._auto_save_enabled = True
-            self._sync_to_file()
-            if self._event_bus:
-                self._event_bus.publish(
-                    EventBus.PLAYLIST_CHANGED,
-                    {"playlist_changed": True, "index": self.current_index, "content_changed": True},
-                )
+            tracks = [
+                TrackMetadata.from_dict(track_dict)
+                for track_dict in playlist_data.get("tracks", [])
+            ]
+            current_index = playlist_data.get("current_index", -1)
+            if current_index >= len(tracks):
+                current_index = -1
+            self.set_playlist(tracks, current_index)
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
             logger.error("Error loading playlist: %s", e, exc_info=True)
@@ -401,45 +422,24 @@ class PlaylistManager:
             logger.warning("Failed to auto-save current playlist in background thread: %s", e)
 
     def load_current_playlist(self) -> bool:
-        """Load the current playlist from auto-save file."""
+        """Load the current playlist from auto-save file. Replaces and publishes once via set_playlist."""
         if not self.current_playlist_file.exists():
             return False
         try:
             with open(self.current_playlist_file, "r", encoding="utf-8") as f:
                 playlist_data = json.load(f)
-
-            self._auto_save_enabled = False  # Prevent save during load
-            try:
-                self.current_playlist = [
-                    TrackMetadata.from_dict(track_dict)
-                    for track_dict in playlist_data.get("tracks", [])
-                ]
-                self.current_index = playlist_data.get("current_index", -1)
-                # Clamp index to valid range
-                if self.current_index >= len(self.current_playlist):
-                    self.current_index = -1
-            finally:
-                self._auto_save_enabled = True
-            if self._event_bus:
-                self._event_bus.publish(
-                    EventBus.PLAYLIST_CHANGED,
-                    {"playlist_changed": True, "index": self.current_index, "content_changed": True},
-                )
-                # Also publish index and track change if there's a current track
-                if self.current_index >= 0:
-                    self._event_bus.publish(
-                        EventBus.CURRENT_INDEX_CHANGED,
-                        {"index": self.current_index, "old_index": -1},
-                    )
-                    current_track = self.get_current_track()
-                    if current_track:
-                        self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": current_track})
+            tracks = [
+                TrackMetadata.from_dict(track_dict)
+                for track_dict in playlist_data.get("tracks", [])
+            ]
+            current_index = playlist_data.get("current_index", -1)
+            if current_index >= len(tracks):
+                current_index = -1
+            self.set_playlist(tracks, current_index)
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
             logger.error("Error loading current playlist: %s", e, exc_info=True)
             return False
         except Exception as e:
-            logger.error(
-                "Unexpected error loading current playlist: %s", e, exc_info=True
-            )
+            logger.error("Unexpected error loading current playlist: %s", e, exc_info=True)
             return False

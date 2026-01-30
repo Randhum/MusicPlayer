@@ -30,7 +30,7 @@ logger = get_logger(__name__)
 
 
 class PlaylistView(Gtk.Box):
-    """Component for displaying the current playlist/queue."""
+    """Playlist UI: subscribes to PLAYLIST_CHANGED / CURRENT_INDEX_CHANGED and updates tree; publishes ACTION_* for playback. PlaylistManager is source of truth; events drive refresh."""
 
     __gsignals__ = {
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -287,14 +287,10 @@ class PlaylistView(Gtk.Box):
     # ============================================================================
 
     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
-        """
-        Set the playlist tracks. PlaylistManager publishes events; view updates via _on_playlist_changed.
-        """
-        self.playlist_manager.clear()
-        if tracks:
-            self.playlist_manager.add_tracks(tracks)
-        self.playlist_manager.set_current_index(
-            current_index if 0 <= current_index < len(tracks) else -1
+        """Replace playlist and index in one go. PlaylistManager publishes; view updates via PLAYLIST_CHANGED."""
+        self.playlist_manager.set_playlist(
+            tracks,
+            current_index if 0 <= current_index < len(tracks) else -1,
         )
 
     def set_current_index(self, index: int):
@@ -310,8 +306,13 @@ class PlaylistView(Gtk.Box):
     # ============================================================================
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
-        """Add a track to the playlist. PlaylistManager publishes; view updates via events."""
+        """Add a track to the playlist. PlaylistManager publishes; view updates via events.
+        When MOC is active, also syncs internal playlist to MOC."""
         self.playlist_manager.add_track(track, position)
+        if self._use_moc:
+            self._events.publish(
+                EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": False}
+            )
 
     def add_tracks(self, tracks: List[TrackMetadata]):
         """Add multiple tracks. PlaylistManager publishes; view updates via events."""
@@ -424,8 +425,8 @@ class PlaylistView(Gtk.Box):
         """
         Replace playlist with folder contents and play first track.
 
-        Collects tracks in library order and adds them to maintain the same order
-        as shown in the library view.
+        When MOC is active: syncs playlist to MOC and starts playback there.
+        Otherwise: sets internal playlist and plays via internal player.
 
         Args:
             folder_path: Path to the folder to play.
@@ -433,20 +434,22 @@ class PlaylistView(Gtk.Box):
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return
-        
-        # Collect all tracks from the folder recursively
+
         tracks = []
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-        
-        # Sort tracks by file path to match library order (library sorts by file_path)
         tracks.sort(key=lambda t: t.file_path)
-        
-        if tracks:
-            # Use set_playlist for atomic update (triggers PLAYLIST_CHANGED event)
-            # This is consistent with replace_and_play_album and avoids double updates
-            self.set_playlist(tracks, 0)
-            # play_track_at_index will set the index and publish action
+
+        if not tracks:
+            return
+
+        self.set_playlist(tracks, 0)
+        if self._use_moc:
+            # Sync to MOC and start playback in one go so MOC has the playlist before playing
+            self._events.publish(
+                EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": True}
+            )
+        else:
             self.play_track_at_index(0)
 
     # ============================================================================
@@ -462,19 +465,17 @@ class PlaylistView(Gtk.Box):
     # Internal Methods
     # ============================================================================
 
-    def _sync_from_state(self):
-        """Refresh the view from current state (playlist from PlaylistManager)."""
+    def _sync_from_state(self) -> None:
+        """Refresh tree from PlaylistManager (e.g. on init)."""
         self._update_view()
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
-        """Handle playlist changed event. PlaylistManager owns persistence; just refresh view."""
+        """Subscriber: playlist content changed → refresh tree."""
         self._update_view()
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
-        """Handle current index changed event."""
-        if data:
-            index = data.get("index", -1)
-            self._update_selection()
+        """Subscriber: current index changed → update selection."""
+        self._update_selection()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:
         """Handle shuffle changed event."""

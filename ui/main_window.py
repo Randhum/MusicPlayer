@@ -125,6 +125,11 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.app_state.set_shuffle_enabled(bool(status["shuffle"]))
                 if status.get("autonext") is not None:
                     self.app_state.set_autonext_enabled(bool(status["autonext"]))
+                # Sync repeat state from MOC to loop mode
+                # MOC only has repeat on/off, so map to LOOP_PLAYLIST (2) if on, LOOP_FORWARD (0) if off
+                if status.get("repeat") is not None:
+                    loop_mode = 2 if status["repeat"] else 0
+                    self.app_state.set_loop_mode(loop_mode)
                 tracks, current_index = self.moc_controller.get_playlist()
                 if tracks:
                     logger.info(
