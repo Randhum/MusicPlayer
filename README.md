@@ -534,7 +534,7 @@ emerge -av media-plugins/gst-plugins-openh264  # H.264 video
 
 ```
         ┌─────────────┐
-        │  THE CLOUD  │
+        │  THE AETHER │
         │   (maybe)   │
         └──────┬──────┘
                │
