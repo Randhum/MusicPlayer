@@ -345,9 +345,8 @@ class PlayerControls(Gtk.Box):
         )
         self._last_value_changed_time = current_time
 
-        # If value-changed fires rapidly (< 100ms between calls), it's likely a drag
-        # If it fires slowly (> 100ms), it's likely a playback update
-        is_rapid_change = time_since_last < 100000  # 100ms in microseconds
+        # If value-changed fires rapidly (< 150ms between calls), it's likely a drag
+        is_rapid_change = time_since_last < 150000  # 150ms in microseconds
 
         # Ignore updates from update_progress() (normal playback updates)
         # These are marked with _updating_progress flag and occur when NOT dragging
@@ -386,30 +385,30 @@ class PlayerControls(Gtk.Box):
     def _on_drag_timeout(self) -> bool:
         """
         Called when value-changed hasn't fired for 200ms - drag has ended.
-        Sync playback to final position (single seek; no seek during drag).
+        Always reflect the drag: update labels and publish seek (controller clamps).
         """
         if self._seek_state == SeekState.DRAGGING:
             self._ensure_duration()
             duration = self._state.duration
+            scale_value = self.progress_scale.get_value()
+            # Position from scale; when duration is 0 use 0 so controller can still update state
+            pos = (
+                (scale_value / 100.0) * duration
+                if duration > 0
+                else 0.0
+            )
+            # Always update labels to reflect the drag
+            self.update_time_labels(pos, duration if duration > 0 else 0.0)
 
-            if duration > 0:
-                # Get current scale value and seek to that position
-                scale_value = self.progress_scale.get_value()
-                pos = (scale_value / 100.0) * duration
+            # Always publish seek so state and (when backend active) playback reflect the drag
+            self._seek_state = SeekState.SEEKING
+            self._updating_progress = True
+            self._on_seek_changed(pos)
+            self._seek_state = SeekState.IDLE
+            self._updating_progress = False
 
-                # Update labels
-                self.update_time_labels(pos, duration)
-
-                # Seek to that position
-                self._seek_state = SeekState.SEEKING
-                self._updating_progress = True
-                self._on_seek_changed(pos)
-                self._seek_state = SeekState.IDLE
-                self._updating_progress = False
-
-                # Reset drag tracking
-                self._value_changed_count = 0
-                self._last_value_changed_time = 0
+            self._value_changed_count = 0
+            self._last_value_changed_time = 0
 
         self._drag_timeout_id = None
         return False  # Don't repeat

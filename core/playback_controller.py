@@ -90,6 +90,7 @@ class PlaybackController:
         # MOC: file mtime, recent-write timestamps, load/sync guards
         self._moc_last_file: Optional[str] = None
         self._internal_last_file: Optional[str] = None  # actually-playing file for same_track check
+        self._pending_seek_position: Optional[float] = None  # desired position when resuming MOC (seek-while-paused)
         self._moc_playlist_mtime: float = 0.0
         self._recent_moc_write: Optional[float] = None
         self._recent_shuffle_write: Optional[float] = None
@@ -282,8 +283,11 @@ class PlaybackController:
         if same_track:
             if self._state.playback_state == PlaybackState.PAUSED:
                 if active_backend == "moc" and self._should_use_moc(track):
+                    # MOC doesn't support seek while paused; apply pending seek after play starts
+                    self._pending_seek_position = self._state.position
                     self._moc_controller.play()
                     self._state.set_playback_state(PlaybackState.PLAYING)
+                    GLib.timeout_add(150, self._apply_moc_seek_after_play)
                     return
                 if active_backend == "internal" and not self._should_use_moc(track):
                     if self._internal_player.play():
@@ -362,32 +366,30 @@ class PlaybackController:
             self._load_and_play_current_track()
 
     def _on_action_seek(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle seek action."""
+        """Handle seek action. Always reflect the drag in state so UI and play-from-here work."""
         if not data or "position" not in data:
             return
 
         position = float(data["position"])
-
         if self._should_use_bt_sink():
-            # BT sink doesn't support seeking
             return
 
-        # Mark user action time to prevent poll interference during seek
+        duration = self._state.duration
+        clamped = (
+            max(0.0, min(position, duration)) if duration > 0 else max(0.0, position)
+        )
+        # Always update state so the drag is reflected (even when no backend or duration=0)
+        self._state.set_position(clamped)
+
         self._user_action_time = time.time()
         self._operation_state = OperationState.SEEKING
-        # Expose seeking state to UI
         self._state.set_playback_state(PlaybackState.SEEKING)
 
         active_backend = self._state.active_backend
         if active_backend == "moc":
-            self._seek_moc(position)
+            self._seek_moc(clamped)
         elif active_backend == "internal":
-            duration = self._state.duration
-            clamped = (
-                max(0.0, min(position, duration)) if duration > 0 else max(0.0, position)
-            )
             self._internal_player.seek(clamped)
-            self._state.set_position(clamped)  # Publishes POSITION_CHANGED
             GLib.timeout_add(100, self._reset_seek_state)
 
     def _on_action_play_track(self, data: Optional[Dict[str, Any]]) -> None:
@@ -553,41 +555,50 @@ class PlaybackController:
         self._state.set_playback_state(PlaybackState.PLAYING)
 
     def _seek_moc(self, position: float) -> None:
-        """Seek in MOC."""
+        """Seek in MOC. Always reflect position in state. MOC cannot seek while paused."""
         if not self._use_moc:
             return
 
-        # Note: _user_action_time and _operation_state are already set by _on_action_seek
-        # This method is only called from _on_action_seek, so we don't need to set them again
-
         try:
-            # Get current position from MOC
             status = self._moc_controller.get_status(force_refresh=True)
             if not status:
                 return
 
-            current_pos = float(status.get("position", 0.0))
             duration = float(status.get("duration", 0.0))
-
-            # Clamp position
             if duration > 0:
                 position = max(0.0, min(position, duration))
             else:
                 position = max(0.0, position)
 
-            # Calculate delta
-            delta = position - current_pos
+            # Always reflect the drag in state
+            self._state.set_position(position)
 
-            # Only seek if delta is significant
+            # MOC does not support seek while paused; only seek when playing (or SEEKING from drag)
+            if self._state.playback_state == PlaybackState.PAUSED:
+                return
+
+            current_pos = float(status.get("position", 0.0))
+            delta = position - current_pos
             if abs(delta) >= 0.5:
                 self._moc_controller.seek_relative(delta)
-                # Set position optimistically - MOC will move to this position
-                self._state.set_position(position)
         finally:
-            # Keep operation state as SEEKING briefly to prevent poll from overwriting
-            # The poll will skip position updates while SEEKING
-            # We'll reset to IDLE after a short delay to allow MOC to catch up
-            GLib.timeout_add(200, self._reset_seek_state)  # 200ms delay
+            GLib.timeout_add(200, self._reset_seek_state)
+
+    def _apply_moc_seek_after_play(self) -> bool:
+        """Apply pending seek after MOC has started (seek-while-paused then play). One-shot."""
+        desired = self._pending_seek_position
+        self._pending_seek_position = None
+        if desired is None or self._state.active_backend != "moc":
+            return False
+        status = self._moc_controller.get_status(force_refresh=True)
+        if not status:
+            return False
+        current = float(status.get("position", 0.0))
+        if abs(desired - current) < 0.5:
+            return False
+        self._moc_controller.seek_relative(desired - current)
+        self._state.set_position(desired)
+        return False
 
     # ============================================================================
     # MOC Synchronization

@@ -539,11 +539,12 @@ class MocController:
         """
         Seek relatively by delta in seconds (positive or negative).
 
-        MOC uses `--seek N` for relative seek in seconds.
+        MOC uses `--seek N` for relative seek in seconds. Uses round() so
+        e.g. 0.5s rounds to 1s and small drags still seek.
         """
         if not self.is_available():
             return
-        seconds = int(delta_seconds)
+        seconds = round(delta_seconds)
         if seconds == 0:
             return
         self.ensure_server()
