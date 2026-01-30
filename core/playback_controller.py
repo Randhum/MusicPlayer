@@ -564,9 +564,11 @@ class PlaybackController:
         self._state.set_active_backend("moc")
         if track_index >= 0:
             # Track is in playlist - use set_current_index to update both index and track atomically
+            # This ensures consistent state: index and track are updated together, and events are published correctly
             self._state.set_current_index(track_index)
         else:
-            # Track not in playlist - set track directly (rare case)
+            # Track not in playlist - set track directly (rare case, e.g., playing external file)
+            # This bypasses playlist index but still publishes TRACK_CHANGED event
             self._state.set_current_track(track)
 
         # Just play the file - MOC's --playit will add it to playlist if needed
@@ -594,9 +596,11 @@ class PlaybackController:
         self._state.set_active_backend("internal")
         if track_index >= 0:
             # Track is in playlist - use set_current_index to update both index and track atomically
+            # This ensures consistent state: index and track are updated together, and events are published correctly
             self._state.set_current_index(track_index)
         else:
-            # Track not in playlist - set track directly (rare case)
+            # Track not in playlist - set track directly (rare case, e.g., playing external file)
+            # This bypasses playlist index but still publishes TRACK_CHANGED event
             self._state.set_current_track(track)
         
         # Update duration from track metadata before setting playback state

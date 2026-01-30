@@ -349,6 +349,10 @@ class PlaylistView(Gtk.Box):
         """Load a saved playlist. PlaylistManager publishes; view updates via events."""
         return self.playlist_manager.load_playlist(name)
 
+    def load_current_playlist(self) -> bool:
+        """Load the current playlist from auto-save file. PlaylistManager publishes; view updates via events."""
+        return self.playlist_manager.load_current_playlist()
+
     def list_playlists(self) -> List[str]:
         """List all saved playlists."""
         return self.playlist_manager.list_playlists()

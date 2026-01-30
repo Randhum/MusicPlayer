@@ -371,6 +371,7 @@ If `mocp` is installed (Gentoo package `media-sound/moc`), the app will:
 - **Read the MOC playlist** from `~/.moc/playlist.m3u` and mirror it in the playlist panel
 - **Write back changes** you make in the GTK playlist into MOC's internal playlist
 - **Sync player controls** with MOC:
+  - **On startup**, if MOC is running, the app syncs full state from MOC: playlist, playback state (playing/paused/stopped), position, duration, volume, shuffle, and autonext
   - **Play / Pause / Stop / Next / Previous** buttons call `mocp` under the hood
   - The **volume slider** controls MOC's volume
   - The **current track / time** display follows whatever MOC is playing
@@ -491,14 +492,7 @@ pactl info
 ```
 
 ### "Bluetooth not working!"
-
-```bash
-# Is Bluetooth service running? (Gentoo uses OpenRC)
-rc-service bluetooth status
-
-# Start it if not running
-rc-service bluetooth start
-
+i
 # Is adapter on?
 bluetoothctl power on
 
@@ -1316,6 +1310,27 @@ Track your learning progress!
 - [ ] 📝 Read through `audio_player.py`
 - [ ] 🛠️ Modified the code (any small change counts!)
 - [ ] 🚀 Created your own IoT project idea
+
+---
+
+## 📝 Recent Changes
+
+### State Synchronization Fixes (Latest)
+
+Fixed critical synchronization issues between tracks, playlist, playback state, and UI components:
+
+- **PlayerControls Initialization**: Added `_initialize_from_state()` method to properly initialize all UI components (play/pause button, progress bar, shuffle/loop buttons, volume) from `AppState` on startup
+- **Playlist Loading Events**: `PlaylistManager.load_current_playlist()` now properly publishes `CURRENT_INDEX_CHANGED` and `TRACK_CHANGED` events after loading, ensuring UI components sync correctly on startup
+- **MainWindow Initialization Order**: Layered init (foundation → backends → playback controller → dock manager → UI → post-UI). All playlist operations go through `PlaylistView` (e.g. `load_current_playlist()`); playlist load runs after UI is created via `_init_playlist_and_state()`
+- **Event Data Standardization**: All `PLAYLIST_CHANGED` events now consistently include `content_changed` boolean field
+- **MPRIS2 Navigation Updates**: PlayerControls now subscribes to `PLAYLIST_CHANGED` events to update MPRIS2 navigation capabilities when playlist changes
+- **Track Change Flow**: Improved documentation and consistency in `PlaybackController` track change handling
+
+These fixes ensure that:
+- UI shows correct state on startup if a track is already playing
+- Playlist view shows correct selection on startup
+- Metadata panel shows correct track on startup
+- All UI components stay in sync during track and playlist changes
 
 ---
 

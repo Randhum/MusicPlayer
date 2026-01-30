@@ -132,7 +132,7 @@ class AppState:
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"playlist_changed": True, "index": current_index},
+            {"playlist_changed": True, "index": current_index, "content_changed": True},
         )
 
     def set_current_index(self, index: int) -> None:
@@ -187,7 +187,7 @@ class AppState:
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"playlist_changed": True, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def add_tracks(
@@ -216,7 +216,7 @@ class AppState:
                     self._current_track = self._playlist[self._current_index]
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"playlist_changed": True, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def remove_track(self, index: int) -> None:
@@ -244,7 +244,7 @@ class AppState:
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"playlist_changed": True, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def move_track(self, from_index: int, to_index: int) -> None:
@@ -296,7 +296,7 @@ class AppState:
         )
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
-            {"playlist_changed": True, "index": self._current_index},
+            {"playlist_changed": True, "index": self._current_index, "content_changed": True},
         )
 
     def clear_playlist(self) -> None:
@@ -310,7 +310,7 @@ class AppState:
         self._current_track = None
         self._event_bus.publish(EventBus.PLAYLIST_CLEARED, {})
         self._event_bus.publish(
-            EventBus.PLAYLIST_CHANGED, {"playlist_changed": True, "index": -1}
+            EventBus.PLAYLIST_CHANGED, {"playlist_changed": True, "index": -1, "content_changed": True}
         )
 
     # ============================================================================

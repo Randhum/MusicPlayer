@@ -425,6 +425,15 @@ class PlaylistManager:
                     EventBus.PLAYLIST_CHANGED,
                     {"playlist_changed": True, "index": self.current_index, "content_changed": True},
                 )
+                # Also publish index and track change if there's a current track
+                if self.current_index >= 0:
+                    self._event_bus.publish(
+                        EventBus.CURRENT_INDEX_CHANGED,
+                        {"index": self.current_index, "old_index": -1},
+                    )
+                    current_track = self.get_current_track()
+                    if current_track:
+                        self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": current_track})
             return True
         except (OSError, IOError, json.JSONDecodeError) as e:
             logger.error("Error loading current playlist: %s", e, exc_info=True)
