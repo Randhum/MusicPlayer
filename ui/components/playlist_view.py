@@ -1,15 +1,9 @@
 """Playlist view component - shows current queue/playlist."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("Gdk", "4.0")
@@ -17,10 +11,6 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, GObject, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
-from core.app_state import AppState
 from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
@@ -30,7 +20,7 @@ logger = get_logger(__name__)
 
 
 class PlaylistView(Gtk.Box):
-    """Playlist UI: subscribes to PLAYLIST_CHANGED / CURRENT_INDEX_CHANGED and updates tree; publishes ACTION_* for playback. PlaylistManager is source of truth; events drive refresh."""
+    """Playlist tree; subscribes to PLAYLIST_CHANGED/CURRENT_INDEX_CHANGED; publishes ACTION_*."""
 
     __gsignals__ = {
         "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
@@ -39,26 +29,16 @@ class PlaylistView(Gtk.Box):
 
     def __init__(
         self,
-        app_state: AppState,
         event_bus: EventBus,
         playlist_manager: PlaylistManager,
         window: Optional[Gtk.Window] = None,
     ):
-        """
-        Initialize playlist view.
-
-        Args:
-            app_state: AppState instance for reading playlist state
-            event_bus: EventBus instance for publishing actions and subscribing to events
-            playlist_manager: PlaylistManager instance for file persistence (save/load)
-            window: Optional Gtk.Window instance for dialog parents
-        """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        self._state = app_state  # For shuffle, backend, playback state (non-playlist)
         self._events = event_bus
-        self.playlist_manager = playlist_manager  # Source of truth for playlist data
+        self.playlist_manager = playlist_manager
         self.window = window
-        self._use_moc: bool = False  # Track MOC mode state
+        self._shuffle_enabled: bool = False
+        self._use_moc: bool = False
         self._bulk_update_in_progress: bool = False  # Track if bulk update is in progress
         self._chunked_update_id: Optional[int] = None  # Track chunked update timeout ID
 
@@ -75,34 +55,19 @@ class PlaylistView(Gtk.Box):
         header_label.set_hexpand(True)
         header_box.append(header_label)
 
-        # Action buttons
-        self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
-        self.refresh_button.set_tooltip_text("Refresh from MOC")
-        self.refresh_button.add_css_class("flat")
-        self.refresh_button.set_size_request(36, 36)  # Touch-friendly size
-        self.refresh_button.connect("clicked", lambda w: self._handle_refresh())
-        header_box.append(self.refresh_button)
+        def _header_btn(box, icon: str, tooltip: str, cb: Callable[[], None]):
+            btn = Gtk.Button.new_from_icon_name(icon)
+            btn.set_tooltip_text(tooltip)
+            btn.add_css_class("flat")
+            btn.set_size_request(36, 36)
+            btn.connect("clicked", lambda w: cb())
+            box.append(btn)
+            return btn
 
-        self.clear_button = Gtk.Button.new_from_icon_name("edit-clear-symbolic")
-        self.clear_button.set_tooltip_text("Clear Playlist")
-        self.clear_button.add_css_class("flat")
-        self.clear_button.set_size_request(36, 36)  # Touch-friendly size
-        self.clear_button.connect("clicked", lambda w: self._handle_clear())
-        header_box.append(self.clear_button)
-
-        self.save_button = Gtk.Button.new_from_icon_name("document-save-symbolic")
-        self.save_button.set_tooltip_text("Save Playlist")
-        self.save_button.add_css_class("flat")
-        self.save_button.set_size_request(36, 36)  # Touch-friendly size
-        self.save_button.connect("clicked", lambda w: self._show_save_dialog())
-        header_box.append(self.save_button)
-
-        self.load_button = Gtk.Button.new_from_icon_name("document-open-symbolic")
-        self.load_button.set_tooltip_text("Load Saved Playlist")
-        self.load_button.add_css_class("flat")
-        self.load_button.set_size_request(36, 36)  # Touch-friendly size
-        self.load_button.connect("clicked", lambda w: self._show_load_dialog())
-        header_box.append(self.load_button)
+        self.refresh_button = _header_btn(header_box, "view-refresh-symbolic", "Refresh from MOC", self._handle_refresh)
+        self.clear_button = _header_btn(header_box, "edit-clear-symbolic", "Clear Playlist", lambda: self.clear(stop_first=True))
+        self.save_button = _header_btn(header_box, "document-save-symbolic", "Save Playlist", self._show_save_dialog)
+        self.load_button = _header_btn(header_box, "document-open-symbolic", "Load Saved Playlist", self._show_load_dialog)
 
         self.append(header_box)
 
@@ -147,9 +112,8 @@ class PlaylistView(Gtk.Box):
         self._playback_in_progress = False  # Guard to prevent concurrent playback
         self._playback_lock = False  # Prevent concurrent play_track_at_index calls
 
-        # Single-tap behavior configuration
-        # True = single tap plays track, False = single tap only selects (double-tap to play)
-        self._single_tap_plays = False
+        # Single-tap behavior: True = single tap plays (after delay) or double-tap plays immediately
+        self._single_tap_plays = True
 
         # Tap/double-tap detection state
         self._tap_pending = False  # True when waiting for potential double-tap
@@ -237,54 +201,14 @@ class PlaylistView(Gtk.Box):
         # Initialize UI from state
         self._sync_from_state()
 
-    # ============================================================================
-    # Public API - State Reading (from PlaylistManager)
-    # ============================================================================
-
-    def get_playlist(self) -> List[TrackMetadata]:
-        """Get the current playlist from PlaylistManager."""
-        return self.playlist_manager.get_playlist()
-
-    def get_current_index(self) -> int:
-        """Get the current track index from PlaylistManager."""
-        return self.playlist_manager.get_current_index()
-
-    def get_current_track(self) -> Optional[TrackMetadata]:
-        """Get the currently playing track from PlaylistManager."""
-        return self.playlist_manager.get_current_track()
-
-    def get_next_track(self) -> Optional[TrackMetadata]:
-        """
-        Get the next track (sequential only). Shuffle logic is in PlaybackController.
-        """
-        playlist = self.playlist_manager.get_playlist()
-        current_index = self.playlist_manager.get_current_index()
-        if current_index < len(playlist) - 1:
-            return playlist[current_index + 1]
-        return None
-
-    def get_previous_track(self) -> Optional[TrackMetadata]:
-        """
-        Get the previous track (sequential). Shuffle behavior is in PlaybackController.
-        """
-        playlist = self.playlist_manager.get_playlist()
-        current_index = self.playlist_manager.get_current_index()
-        if current_index > 0:
-            return playlist[current_index - 1]
-        return None
-
     def set_shuffle_enabled(self, enabled: bool):
-        """Enable or disable shuffle mode."""
-        self._state.set_shuffle_enabled(enabled)
-        # Shuffle queue is managed by PlaybackController
+        """Enable or disable shuffle mode (publish action)."""
+        self._events.publish(EventBus.ACTION_SET_SHUFFLE, {"enabled": enabled})
 
     def get_shuffle_enabled(self) -> bool:
-        """Get current shuffle state."""
-        return self._state.shuffle_enabled
+        """Get current shuffle state (cached from SHUFFLE_CHANGED)."""
+        return self._shuffle_enabled
 
-    # ============================================================================
-    # Public API - State Updates
-    # ============================================================================
 
     def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
         """Replace playlist and index in one go. PlaylistManager publishes; view updates via PLAYLIST_CHANGED."""
@@ -301,46 +225,36 @@ class PlaylistView(Gtk.Box):
         if old_index != index:
             self.emit("current-index-changed", index)
 
-    # ============================================================================
-    # Public API - Playlist Operations (Wrapper methods that update both data and UI)
-    # ============================================================================
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
-        """Add a track to the playlist. PlaylistManager publishes; view updates via events.
-        When MOC is active, also syncs internal playlist to MOC."""
-        self.playlist_manager.add_track(track, position)
-        if self._use_moc:
-            self._events.publish(
-                EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": False}
-            )
+        """Add a track - publish ADD_FOLDER; PlaylistManager subscribes; MOC sync via PLAYLIST_CHANGED."""
+        self._events.publish(
+            EventBus.ADD_FOLDER,
+            {"tracks": [track], **({"position": position} if position is not None else {})},
+        )
 
     def add_tracks(self, tracks: List[TrackMetadata]):
-        """Add multiple tracks. PlaylistManager publishes; view updates via events."""
+        """Add tracks - publish ADD_FOLDER; PlaylistManager subscribes; view updates via PLAYLIST_CHANGED."""
         if not tracks:
             return
-        self.playlist_manager.add_tracks(tracks)
+        self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
 
     def remove_track(self, index: int):
-        """Remove a track. PlaylistManager publishes; view updates via events."""
-        self.playlist_manager.remove_track(index)
+        """Remove a track - publish action; PlaylistManager subscribes; view updates via PLAYLIST_CHANGED."""
+        self._events.publish(EventBus.ACTION_REMOVE, {"index": index})
 
     def move_track(self, from_index: int, to_index: int):
-        """
-        Move a track from one position to another.
-        from_index/to_index are 0-based. PlaylistManager publishes; view updates via events.
-        """
-        self.playlist_manager.move_track(from_index, to_index)
+        """Move a track - publish action; PlaylistManager subscribes; view updates via PLAYLIST_CHANGED."""
+        self._events.publish(
+            EventBus.ACTION_MOVE,
+            {"from_index": from_index, "to_index": to_index},
+        )
 
-    def clear(self):
-        """Clear the playlist. PlaylistManager publishes; view updates via events."""
-        self.playlist_manager.clear()
-
-    def _handle_clear(self):
-        """Handle clear operation."""
-        # Publish stop action
-        self._events.publish(EventBus.ACTION_STOP)
-        # Clear playlist
-        self.clear()
+    def clear(self, stop_first: bool = False):
+        """Clear playlist (publish action). If stop_first, publish ACTION_STOP first."""
+        if stop_first:
+            self._events.publish(EventBus.ACTION_STOP)
+        self._events.publish(EventBus.ACTION_CLEAR_PLAYLIST)
 
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist (PlaylistManager is source of truth)."""
@@ -358,9 +272,6 @@ class PlaylistView(Gtk.Box):
         """List all saved playlists."""
         return self.playlist_manager.list_playlists()
 
-    # ============================================================================
-    # Public API - High-Level Playback Operations
-    # ============================================================================
 
     def play_track_at_index(self, index: int) -> None:
         """Play track at the given index - publishes action event."""
@@ -458,18 +369,12 @@ class PlaylistView(Gtk.Box):
             self.play_track_at_index(0)
         return False  # one-shot idle
 
-    # ============================================================================
-    # UI Configuration
-    # ============================================================================
 
     def set_moc_mode(self, enabled: bool):
         """Show or hide the Refresh button based on whether MOC mode is active."""
         self._use_moc = enabled
         self.refresh_button.set_visible(enabled)
 
-    # ============================================================================
-    # Internal Methods
-    # ============================================================================
 
     def _sync_from_state(self) -> None:
         """Refresh tree from PlaylistManager (e.g. on init)."""
@@ -490,10 +395,9 @@ class PlaylistView(Gtk.Box):
         self._update_selection()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:
-        """Handle shuffle changed event."""
+        """Handle shuffle changed event - cache for get_shuffle_enabled()."""
         if data:
-            enabled = data.get("enabled", False)
-            self.set_shuffle_enabled(enabled)
+            self._shuffle_enabled = data.get("enabled", False)
 
     def _update_button_states(self):
         """Update the state of action buttons based on playlist content."""
@@ -1241,35 +1145,34 @@ class PlaylistView(Gtk.Box):
         self._show_context_menu(x, y)
 
     def _show_context_menu(self, x: float, y: float):
-        """Show context menu."""
-        # Prevent multiple menus
+        """Show context menu. Defer build/show to idle to avoid GTK insert_after assertion."""
         if self._menu_showing:
             return
-
-        # Properly close and remove old menu if exists
+        # Close and unparent old menu so next idle sees a clean state
         if self.context_menu:
             try:
                 self.context_menu.popdown()
             except (AttributeError, RuntimeError):
-                # Widget may have been destroyed
                 pass
             try:
                 if self.context_menu.get_parent():
                     self.context_menu.unparent()
             except (AttributeError, RuntimeError):
-                # Widget may have been destroyed
                 pass
             self.context_menu = None
-
-        # Set flag to prevent multiple menus
         self._menu_showing = True
+        self._context_menu_x = x
+        self._context_menu_y = y
+        GLib.idle_add(self._do_show_context_menu)
 
-        # Create popover
+    def _do_show_context_menu(self):
+        """Idle callback: create and show context menu (avoids gtk_css_node_insert_after assertion)."""
+        if not self._menu_showing or self.context_menu is not None:
+            return False
+        x = getattr(self, "_context_menu_x", 0)
+        y = getattr(self, "_context_menu_y", 0)
         self.context_menu = Gtk.Popover()
-        # Set child first, then parent
         self.context_menu.set_has_arrow(True)
-
-        # Create menu box with touch-friendly spacing
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         menu_box.set_margin_start(10)
         menu_box.set_margin_end(10)
@@ -1342,9 +1245,8 @@ class PlaylistView(Gtk.Box):
         rect.height = 1
         self.context_menu.set_pointing_to(rect)
         self.context_menu.popup()
-
-        # Ensure the popover can receive events
         self.context_menu.set_can_focus(True)
+        return False  # one-shot idle
 
     def _on_popover_closed(self, popover):
         """Handle popover closed signal for cleanup."""
@@ -1406,7 +1308,7 @@ class PlaylistView(Gtk.Box):
 
     def _on_menu_clear(self, button):
         """Handle 'Clear Playlist' from context menu."""
-        self._handle_clear()
+        self.clear(stop_first=True)
         self._close_menu()
 
     def _on_menu_save(self, button):

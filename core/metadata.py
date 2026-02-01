@@ -1,17 +1,11 @@
 """Metadata extraction for audio files using mutagen and GStreamer."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import base64
 import hashlib
 import struct
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 from mutagen import File
 from mutagen.flac import FLAC
 from mutagen.id3 import ID3NoHeaderError
@@ -26,9 +20,6 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstPbutils", "1.0")
 from gi.repository import Gst, GstPbutils
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.config import get_config
 from core.logging import get_logger
 

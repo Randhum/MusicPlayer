@@ -1,20 +1,11 @@
 """D-Bus utility functions for error handling and connection monitoring."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import time
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import dbus
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)

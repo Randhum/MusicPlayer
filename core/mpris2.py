@@ -11,22 +11,13 @@ Architecture:
 - Follows MPRIS2 specification for media player control
 """
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import dbus
 import dbus.service
 from dbus.mainloop.glib import DBusGMainLoop
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.dbus_utils import DBusConnectionMonitor, dbus_safe_call
 from core.logging import get_logger
 from core.metadata import TrackMetadata

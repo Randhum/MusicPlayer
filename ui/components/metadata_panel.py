@@ -1,22 +1,13 @@
 """Metadata panel component - displays now playing information."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from typing import Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("GObject", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import GObject, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
@@ -110,7 +101,7 @@ class MetadataPanel(Gtk.Box):
         if one is already playing.
         
         Args:
-            current_track: Current track from AppState, or None
+            current_track: Current track (e.g. from TRACK_CHANGED event), or None
         """
         if current_track:
             self.set_track(current_track)

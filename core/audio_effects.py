@@ -7,22 +7,13 @@ This module provides audio effects such as:
 - Audio format conversion/transcoding
 """
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from typing import Any, Dict, List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)

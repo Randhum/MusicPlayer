@@ -1,8 +1,5 @@
 """Library browser component - sidebar with artist/album/track tree."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -11,9 +8,6 @@ if TYPE_CHECKING:
     from ui.components.playlist_view import PlaylistView
     from ui.components.player_controls import PlayerControls
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("Gdk", "4.0")
@@ -21,9 +15,6 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, GObject, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 

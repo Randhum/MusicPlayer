@@ -1,8 +1,5 @@
 """Player controls component - play/pause/next/prev/volume/progress."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -11,19 +8,12 @@ if TYPE_CHECKING:
     from ui.components.bluetooth_panel import BluetoothPanel
     from ui.components.playlist_view import PlaylistView
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
-from core.app_state import AppState, PlaybackState
 from core.events import EventBus
 from core.metadata import TrackMetadata
 from core.mpris2 import MPRIS2Manager
@@ -47,7 +37,6 @@ class PlayerControls(Gtk.Box):
 
     def __init__(
         self,
-        app_state: AppState,
         event_bus: EventBus,
         mpris2: Optional[MPRIS2Manager] = None,
         system_volume: Optional[SystemVolume] = None,
@@ -55,24 +44,31 @@ class PlayerControls(Gtk.Box):
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=15)
 
-        self._state = app_state
         self._events = event_bus
         self.mpris2 = mpris2
         self.system_volume = system_volume
         self.window = window
 
+        # Cached state from events (no AppState)
+        self._last_position: float = 0.0
+        self._last_duration: float = 0.0
+        self._shuffle_enabled: bool = False
+        self._loop_mode: int = 0
+        self._playlist_length: int = 0
+        self._current_index: int = -1
+        self._playing: bool = False
+        self._volume: float = 1.0
+
         self._seek_state = SeekState.IDLE
         self._updating_volume = False
         self._updating_toggle = False
-        self._updating_progress = (
-            False  # Flag to prevent update_progress() from interfering during drag
-        )
-        self._value_changed_count: int = 0  # Track value-changed events during drag
-        self._last_value_changed_time: int = 0  # Track when value-changed last fired
-        self._drag_timeout_id: Optional[int] = None  # Timeout to detect drag end
-        self._press_x: float = 0.0  # X coordinate of press for click-to-seek
-        self._press_time: int = 0  # Time of press for click detection
-        self._press_handled: bool = False  # Whether press was handled as drag
+        self._updating_progress = False
+        self._value_changed_count: int = 0
+        self._last_value_changed_time: int = 0
+        self._drag_timeout_id: Optional[int] = None
+        self._press_x: float = 0.0
+        self._press_time: int = 0
+        self._press_handled: bool = False
 
         for margin in ["top", "bottom", "start", "end"]:
             getattr(self, f"set_margin_{margin}")(15)
@@ -91,15 +87,12 @@ class PlayerControls(Gtk.Box):
         self._events.subscribe(EventBus.VOLUME_CHANGED, self._on_volume_changed)
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
 
-        # Initialize UI from state
         if self.system_volume:
-            initial_volume = self.system_volume.get_volume()
-            self._state.set_volume(initial_volume)
-            self.set_volume(initial_volume)
+            self.set_volume(self.system_volume.get_volume())
         if self.mpris2:
             self._setup_mpris2()
 
-        # Initialize UI from current app state (after subscriptions are set up)
+        # UI will sync from events (main_window calls playback_controller.publish_initial_state() after load)
         self._initialize_from_state()
 
     def _create_ui(self):
@@ -196,7 +189,6 @@ class PlayerControls(Gtk.Box):
         cb.append(self.shuffle_button)
 
         self.loop_button = Gtk.ToggleButton()
-        # Loop mode is initialized from AppState via _update_loop_icon()
         self._update_loop_icon()
         self.loop_button.set_size_request(bs, bs)
         self.loop_button.connect("clicked", self._on_loop_clicked)
@@ -281,12 +273,6 @@ class PlayerControls(Gtk.Box):
         """Format time to MM:SS."""
         return f"{int(max(0, seconds) // 60):02d}:{int(max(0, seconds) % 60):02d}"
 
-    def _ensure_duration(self):
-        """Ensure duration is set."""
-        if self._state.duration <= 0:
-            # Duration will be updated via events
-            pass
-
     def _on_scale_button_pressed(self, controller, n_press, x, y):
         """Handle button press on scale - store position for potential click-to-seek."""
         # Store press position and time for click detection
@@ -303,10 +289,8 @@ class PlayerControls(Gtk.Box):
         # 3. The press and release happened quickly (click, not drag)
         if self._seek_state == SeekState.IDLE and not self._press_handled:
             time_since_press = GLib.get_monotonic_time() - self._press_time
-            # If press and release happened within 200ms and no drag was detected, it's a click
             if time_since_press < 200000:  # 200ms in microseconds
-                self._ensure_duration()
-                duration = self._state.duration
+                duration = self._last_duration
                 w = self.progress_scale.get_allocation().width
                 if w > 0:
                     pct = max(0.0, min(100.0, (self._press_x / w) * 100.0))
@@ -372,7 +356,7 @@ class PlayerControls(Gtk.Box):
         if self._seek_state == SeekState.DRAGGING:
             self._value_changed_count += 1
             self._ensure_duration()
-            duration = self._state.duration
+            duration = self._last_duration
             if duration > 0:
                 scale_value = scale.get_value()
                 pos = (scale_value / 100.0) * duration
@@ -388,8 +372,7 @@ class PlayerControls(Gtk.Box):
         Always reflect the drag: update labels and publish seek (controller clamps).
         """
         if self._seek_state == SeekState.DRAGGING:
-            self._ensure_duration()
-            duration = self._state.duration
+            duration = self._last_duration
             scale_value = self.progress_scale.get_value()
             # Position from scale; when duration is 0 use 0 so controller can still update state
             pos = (
@@ -437,8 +420,7 @@ class PlayerControls(Gtk.Box):
         """Handle loop button click - publish action event."""
         if not self._updating_toggle:
             self._updating_toggle = True
-            current_mode = self._state.loop_mode
-            new_mode = (current_mode + 1) % 3
+            new_mode = (self._loop_mode + 1) % 3
             self._events.publish(EventBus.ACTION_SET_LOOP_MODE, {"mode": new_mode})
             self._updating_toggle = False
 
@@ -450,8 +432,8 @@ class PlayerControls(Gtk.Box):
             self.shuffle_button.remove_css_class("suggested-action")
 
     def _update_loop_icon(self) -> None:
-        """Update loop button icon, highlight, and pressed state from app state."""
-        loop_mode = self._state.loop_mode
+        """Update loop button icon from cached loop mode."""
+        loop_mode = self._loop_mode
         icons = {
             0: ("media-playback-start-symbolic", "Loop mode: Forward"),
             1: ("media-playlist-repeat-song-symbolic", "Loop mode: Loop Track"),
@@ -477,33 +459,19 @@ class PlayerControls(Gtk.Box):
         self._events.publish(EventBus.ACTION_SEEK, {"position": position})
 
     def _initialize_from_state(self) -> None:
-        """Initialize UI from current app state."""
-        # Initialize playback state (play/pause button)
-        if self._state.playback_state == PlaybackState.PLAYING:
-            self.set_playing(True)
-        elif self._state.playback_state == PlaybackState.PAUSED:
-            self.set_playing(False)
-        else:
-            self.set_playing(False)
-
-        # Initialize progress bar and time labels
-        if self._state.duration > 0:
-            self.update_progress(self._state.position, self._state.duration)
+        """Initialize UI from cached state (set by events / publish_initial_state)."""
+        self.set_playing(self._playing)
+        if self._last_duration > 0:
+            self.update_progress(self._last_position, self._last_duration)
         else:
             self.update_progress(0.0, 0.0)
-
-        # Initialize shuffle button
         if not self._updating_toggle:
             self._updating_toggle = True
-            self.shuffle_button.set_active(self._state.shuffle_enabled)
+            self.shuffle_button.set_active(self._shuffle_enabled)
             self._update_shuffle_style()
             self._updating_toggle = False
-
-        # Initialize loop mode button
         self._update_loop_icon()
-
-        # Initialize volume (ensure it's from state, not just system_volume)
-        self.set_volume(self._state.volume)
+        self.set_volume(self._volume)
 
     # ============================================================================
     # Event Handlers (State Updates)
@@ -511,24 +479,30 @@ class PlayerControls(Gtk.Box):
 
     def _on_playback_started(self, data: Optional[dict]) -> None:
         """Handle playback started event."""
+        self._playing = True
         self.set_playing(True)
 
     def _on_playback_paused(self, data: Optional[dict]) -> None:
         """Handle playback paused event."""
+        self._playing = False
         self.set_playing(False)
 
     def _on_playback_stopped(self, data: Optional[dict]) -> None:
         """Handle playback stopped event."""
+        self._playing = False
         self.set_playing(False)
         # Reset timeline to 00:00
         self.update_progress(0.0, 0.0)
 
     def _on_position_changed(self, data: Optional[dict]) -> None:
-        """Handle position changed event - keep time labels in sync with playback."""
+        """Handle position changed event - cache and update UI."""
         if not data:
             return
         position = data.get("position", 0.0)
-        duration = data.get("duration", self._state.duration)
+        duration = data.get("duration", self._last_duration)
+        self._last_position = position
+        if "duration" in data:
+            self._last_duration = duration
         self.update_progress(position, duration)
 
     def _on_duration_changed(self, data: Optional[dict]) -> None:
@@ -536,8 +510,8 @@ class PlayerControls(Gtk.Box):
         if not data:
             return
         duration = data.get("duration", 0.0)
-        position = self._state.position
-        self.update_progress(position, duration)
+        self._last_duration = duration
+        self.update_progress(self._last_position, duration)
 
     def _on_track_changed(self, data: Optional[dict]) -> None:
         """Handle track changed event."""
@@ -549,7 +523,12 @@ class PlayerControls(Gtk.Box):
         self._update_mpris2_nav()
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
-        """Handle playlist changed event - update MPRIS2 navigation capabilities."""
+        """Handle playlist changed event - cache and update MPRIS2 nav."""
+        if data is not None:
+            if "playlist_length" in data:
+                self._playlist_length = int(data["playlist_length"])
+            if "index" in data:
+                self._current_index = int(data["index"])
         self._update_mpris2_nav()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:
@@ -557,6 +536,7 @@ class PlayerControls(Gtk.Box):
         if not data:
             return
         enabled = data.get("enabled", False)
+        self._shuffle_enabled = enabled
         if not self._updating_toggle and self.shuffle_button.get_active() != enabled:
             self._updating_toggle = True
             self.shuffle_button.set_active(enabled)
@@ -568,6 +548,7 @@ class PlayerControls(Gtk.Box):
         if not data:
             return
         mode = data.get("mode", 0)
+        self._loop_mode = mode
         self._update_loop_icon()
 
     def _on_volume_changed(self, data: Optional[dict]) -> None:
@@ -575,17 +556,17 @@ class PlayerControls(Gtk.Box):
         if not data:
             return
         volume = data.get("volume", 1.0)
+        self._volume = volume
         self.set_volume(volume)
 
     def _update_mpris2_nav(self) -> None:
-        """Update MPRIS2 navigation capabilities."""
+        """Update MPRIS2 navigation capabilities from cached state."""
         if not self.mpris2:
             return
-        playlist = self._state.playlist
-        idx = self._state.current_index
-        shuffle_enabled = self._state.shuffle_enabled
+        n = self._playlist_length
+        idx = self._current_index
         self.mpris2.update_can_go_next(
-            len(playlist) > 0 and (shuffle_enabled or idx < len(playlist) - 1)
+            n > 0 and (self._shuffle_enabled or idx < n - 1)
         )
         self.mpris2.update_can_go_previous(idx > 0)
 
@@ -595,7 +576,7 @@ class PlayerControls(Gtk.Box):
             return
 
         def on_seek(offset_us: int) -> None:
-            pos = self._state.position
+            pos = self._last_position
             new_pos = max(0.0, pos + (offset_us / 1_000_000.0))
             self._events.publish(EventBus.ACTION_SEEK, {"position": new_pos})
 

@@ -1,13 +1,7 @@
 """BlueZ Agent for handling Bluetooth pairing confirmations and passkeys."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from typing import Callable, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import dbus
 import dbus.service
 from dbus.mainloop.glib import DBusGMainLoop
@@ -17,9 +11,6 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)

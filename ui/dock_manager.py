@@ -1,24 +1,15 @@
 """Dock manager for modular dockable panels."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import json
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.config import get_config
 from core.logging import get_logger
 

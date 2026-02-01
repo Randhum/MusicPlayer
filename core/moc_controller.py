@@ -1,15 +1,5 @@
-"""Integration with MOC (Music On Console) via the `mocp` CLI.
+"""MOC (Music On Console) integration via mocp CLI: playlist, playback, status."""
 
-This module lets us:
-- Read the current MOC playlist from ~/.moc/playlist.m3u
-- Control playback (play/pause/stop/next/prev)
-- Sync volume
-- Query current status (state, track, position, duration, volume)
-"""
-
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from __future__ import annotations
 
 import shutil
@@ -18,14 +8,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
-# None
-
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.config import get_config
 from core.logging import get_logger
 from core.metadata import TrackMetadata
@@ -34,7 +16,7 @@ logger = get_logger(__name__)
 
 
 class MocController:
-    """Minimal wrapper around `mocp` for playlist and playback control."""
+    """Wrapper around mocp for playlist and playback control."""
 
     def __init__(self):
         self._mocp_path: Optional[str] = shutil.which("mocp")
@@ -50,21 +32,12 @@ class MocController:
         self._status_cache_time: float = 0.0
         self._status_cache_ttl: float = 0.2  # Cache for 200ms
 
-    # ------------------------------------------------------------------
-    # Availability / helpers
-    # ------------------------------------------------------------------
     def is_available(self) -> bool:
-        """Return True if `mocp` is available in PATH."""
         return self._mocp_path is not None
 
     def _run(
         self, *args: str, capture_output: bool = False
     ) -> subprocess.CompletedProcess:
-        """
-        Run `mocp` with the given arguments.
-
-        Handles errors gracefully. Silently handles "server not running" errors.
-        """
         if not self._mocp_path:
             return subprocess.CompletedProcess(
                 args=["mocp", *args], returncode=127, stdout="", stderr="mocp not found"
@@ -111,12 +84,6 @@ class MocController:
             )
 
     def ensure_server(self) -> bool:
-        """
-        Start the MOC server if it is not already running.
-
-        Returns:
-            True if server is available, False otherwise
-        """
         if not self.is_available():
             return False
 
@@ -145,9 +112,6 @@ class MocController:
 
         return False
 
-    # ------------------------------------------------------------------
-    # Playlist
-    # ------------------------------------------------------------------
     def get_playlist(
         self, current_file: Optional[str] = None
     ) -> Tuple[List[TrackMetadata], int]:
@@ -235,9 +199,6 @@ class MocController:
 
         return tracks, current_index
 
-    # ------------------------------------------------------------------
-    # Status / info
-    # ------------------------------------------------------------------
     def get_status(self, force_refresh: bool = False) -> Optional[Dict]:
         """
         Get current MOC status (state, file, position, duration, volume).
@@ -341,9 +302,6 @@ class MocController:
 
         return status
 
-    # ------------------------------------------------------------------
-    # Controls
-    # ------------------------------------------------------------------
     def play(self):
         """Start / resume playback.
 
@@ -550,53 +508,23 @@ class MocController:
         self.ensure_server()
         self._run("--seek", str(seconds))
 
-    def enable_autonext(self):
-        """Enable autonext (autoplay) in MOC."""
-        if not self.is_available():
+    def set_autonext(self, enabled: bool) -> None:
+        """Enable or disable autonext (autoplay) in MOC."""
+        if not self.is_available() or not self.ensure_server():
             return
-        if not self.ensure_server():
-            return
-        self._run("--on=autonext")
+        self._run("--on=autonext" if enabled else "--off=autonext")
 
-    def disable_autonext(self):
-        """Disable autonext (autoplay) in MOC."""
-        if not self.is_available():
+    def set_shuffle(self, enabled: bool) -> None:
+        """Enable or disable shuffle in MOC."""
+        if not self.is_available() or not self.ensure_server():
             return
-        if not self.ensure_server():
-            return
-        self._run("--off=autonext")
+        self._run("--on=shuffle" if enabled else "--off=shuffle")
 
-    def toggle_autonext(self):
-        """Toggle autonext (autoplay) in MOC."""
-        if not self.is_available():
+    def set_repeat(self, enabled: bool) -> None:
+        """Enable or disable repeat in MOC."""
+        if not self.is_available() or not self.ensure_server():
             return
-        if not self.ensure_server():
-            return
-        self._run("--toggle=autonext")
-
-    def enable_shuffle(self):
-        """Enable shuffle mode in MOC."""
-        if not self.is_available():
-            return
-        if not self.ensure_server():
-            return
-        self._run("--on=shuffle")
-
-    def disable_shuffle(self):
-        """Disable shuffle mode in MOC."""
-        if not self.is_available():
-            return
-        if not self.ensure_server():
-            return
-        self._run("--off=shuffle")
-
-    def toggle_shuffle(self):
-        """Toggle shuffle mode in MOC."""
-        if not self.is_available():
-            return
-        if not self.ensure_server():
-            return
-        self._run("--toggle=shuffle")
+        self._run("--on=repeat" if enabled else "--off=repeat")
 
     def get_shuffle_state(self) -> Optional[bool]:
         """Get current shuffle state from MOC. Returns None if unavailable."""
@@ -612,30 +540,6 @@ class MocController:
             return status.get("autonext", False)
         return None
 
-    def enable_repeat(self):
-        """Enable repeat mode in MOC."""
-        if not self.is_available():
-            return
-        if not self.ensure_server():
-            return
-        self._run("--on=repeat")
-
-    def disable_repeat(self):
-        """Disable repeat mode in MOC."""
-        if not self.is_available():
-            return
-        if not self.ensure_server():
-            return
-        self._run("--off=repeat")
-
-    def toggle_repeat(self):
-        """Toggle repeat mode in MOC."""
-        if not self.is_available():
-            return
-        if not self.ensure_server():
-            return
-        self._run("--toggle=repeat")
-
     def get_repeat_state(self) -> Optional[bool]:
         """Get current repeat state from MOC. Returns None if unavailable."""
         status = self.get_status()
@@ -643,9 +547,6 @@ class MocController:
             return status.get("repeat", False)
         return None
 
-    # ------------------------------------------------------------------
-    # Playlist write helpers
-    # ------------------------------------------------------------------
     def _parse_m3u_playlist(self) -> List[Tuple[int, Optional[str], str]]:
         """
         Parse M3U playlist file following the standard format.

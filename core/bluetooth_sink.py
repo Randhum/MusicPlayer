@@ -1,16 +1,10 @@
 """Bluetooth A2DP sink management for receiving audio from mobile devices."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import subprocess
 import threading
 import time
 from typing import Callable, Dict, List, Optional, Set
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import dbus
 import gi
 
@@ -18,9 +12,6 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib, Gst
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
 from core.events import EventBus
 from core.logging import get_logger
@@ -39,13 +30,7 @@ MAX_RECONNECTION_ATTEMPTS = 3
 
 
 class BluetoothSink:
-    """
-    Manages Bluetooth A2DP sink functionality.
-
-    When enabled, this allows the computer to act as a Bluetooth speaker,
-    receiving audio from phones and other devices, and playing it through
-    the local audio output (ALSA).
-    """
+    """Manages Bluetooth A2DP sink: computer acts as BT speaker, audio to ALSA."""
 
     MEDIA_CONTROL_INTERFACE = "org.bluez.MediaControl1"
     MEDIA_PLAYER_INTERFACE = "org.bluez.MediaPlayer1"
@@ -56,13 +41,7 @@ class BluetoothSink:
     def __init__(
         self, bt_manager: BluetoothManager, event_bus: Optional[EventBus] = None
     ):
-        """
-        Initialize Bluetooth sink.
-
-        Args:
-            bt_manager: BluetoothManager instance
-            event_bus: EventBus instance for publishing events (optional)
-        """
+        """Initialize sink with bt_manager and optional event_bus."""
         self.bt_manager = bt_manager
         self._event_bus = event_bus
         self.is_sink_enabled = False
@@ -77,9 +56,6 @@ class BluetoothSink:
         # Callback for when audio stream stops (can be set externally)
         self.on_audio_stream_stopped: Optional[Callable[[], None]] = None
 
-        # ====================================================================
-        # Security Settings
-        # ====================================================================
         # Trusted device whitelist (MAC addresses in uppercase, colon-separated)
         # Empty set means all paired devices are allowed
         self._trusted_devices: Set[str] = set()
@@ -88,9 +64,6 @@ class BluetoothSink:
         # Discoverable timeout in seconds (0 = indefinite, not recommended)
         self._discoverable_timeout = DEFAULT_DISCOVERABLE_TIMEOUT
 
-        # ====================================================================
-        # Stability/Reconnection Settings
-        # ====================================================================
         # Track last connected device for reconnection
         self._last_connected_address: Optional[str] = None
         # Reconnection state
@@ -116,20 +89,8 @@ class BluetoothSink:
                 EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected
             )
 
-    # ========================================================================
-    # Security Configuration Methods
-    # ========================================================================
-
     def add_trusted_device(self, address: str) -> bool:
-        """
-        Add a device to the trusted whitelist.
-
-        Args:
-            address: Bluetooth MAC address (e.g., "AA:BB:CC:DD:EE:FF")
-
-        Returns:
-            True if added successfully, False otherwise
-        """
+        """Add a device to the trusted whitelist. Returns True if added."""
         try:
             # Normalize address format
             normalized = address.upper().strip()
@@ -145,15 +106,7 @@ class BluetoothSink:
             return False
 
     def remove_trusted_device(self, address: str) -> bool:
-        """
-        Remove a device from the trusted whitelist.
-
-        Args:
-            address: Bluetooth MAC address
-
-        Returns:
-            True if removed, False if not found
-        """
+        """Remove a device from the trusted whitelist. Returns True if removed."""
         normalized = address.upper().strip()
         if normalized in self._trusted_devices:
             self._trusted_devices.discard(normalized)
@@ -171,12 +124,7 @@ class BluetoothSink:
         logger.info("Cleared trusted device whitelist")
 
     def set_require_authorization(self, require: bool) -> None:
-        """
-        Set whether to require explicit authorization for connections.
-
-        Args:
-            require: If True, user must approve each connection
-        """
+        """Set whether to require explicit authorization for connections."""
         self._require_authorization = require
         logger.info("Connection authorization requirement: %s", require)
 
@@ -198,15 +146,7 @@ class BluetoothSink:
             self._set_discoverable(True, timeout_seconds)
 
     def is_device_authorized(self, device: BluetoothDevice) -> bool:
-        """
-        Check if a device is authorized to connect.
-
-        Args:
-            device: BluetoothDevice to check
-
-        Returns:
-            True if authorized, False otherwise
-        """
+        """Return True if the device is authorized to connect."""
         # If whitelist is empty, all paired devices are authorized
         if not self._trusted_devices:
             return device.paired
@@ -253,16 +193,7 @@ class BluetoothSink:
             self.gst_bluez_available = False
 
     def enable_sink_mode(self) -> bool:
-        """
-        Enable Bluetooth A2DP sink mode.
-        This configures the system to receive audio from Bluetooth devices
-        and makes the computer discoverable as a Bluetooth speaker.
-
-        According to Bluetooth A2DP specification:
-        - Verifies A2DP sink profile is available
-        - Sets adapter to discoverable and pairable
-        - Configures audio routing for A2DP streams
-        """
+        """Enable A2DP sink: verify profile, set discoverable/pairable, configure audio."""
         try:
             # Ensure Bluetooth is powered on
             if not self.bt_manager.is_powered():
@@ -314,16 +245,7 @@ class BluetoothSink:
             return False
 
     def disable_sink_mode(self) -> bool:
-        """
-        Disable Bluetooth A2DP sink mode.
-
-        Properly terminates all A2DP connections and cleans up resources:
-        - Stops health monitoring and reconnection attempts
-        - Disconnects all connected devices
-        - Terminates A2DP transport connections
-        - Stops being discoverable and pairable
-        - Cleans up audio routing
-        """
+        """Disable A2DP sink: stop monitoring, disconnect devices, clean up."""
         try:
             logger.info("Disabling Bluetooth sink mode...")
 
@@ -390,12 +312,7 @@ class BluetoothSink:
             return False
 
     def _verify_a2dp_sink_support(self) -> bool:
-        """
-        Verify that A2DP sink profile is available.
-
-        According to Bluetooth A2DP specification, the sink profile must be
-        registered with BlueZ for the adapter to accept A2DP connections.
-        """
+        """Verify A2DP sink profile is registered with BlueZ."""
         try:
             # Check if A2DP sink profile is registered via D-Bus
             manager = dbus.Interface(
@@ -464,13 +381,7 @@ class BluetoothSink:
     def _set_discoverable(
         self, discoverable: bool, timeout: int = DEFAULT_DISCOVERABLE_TIMEOUT
     ):
-        """
-        Set the Bluetooth adapter's discoverability.
-
-        Args:
-            discoverable: Whether to be discoverable
-            timeout: Timeout in seconds (0 = indefinite, NOT recommended for security)
-        """
+        """Set adapter discoverability; timeout in seconds (0 = indefinite)."""
         try:
             if not self.bt_manager.adapter_path:
                 return
@@ -619,10 +530,6 @@ class BluetoothSink:
             logger.error("Error enabling basic sink: %s", e, exc_info=True)
             return False
 
-    # ========================================================================
-    # Connection Health Monitoring & Reconnection
-    # ========================================================================
-
     def _start_health_monitoring(self) -> None:
         """Start periodic connection health checks."""
         if self._health_check_timer_id:
@@ -641,12 +548,7 @@ class BluetoothSink:
         logger.debug("Stopped connection health monitoring")
 
     def _check_connection_health(self) -> bool:
-        """
-        Periodically check connection health.
-
-        Returns:
-            True to continue polling, False to stop
-        """
+        """Periodically check connection health. True = continue polling."""
         if not self.is_sink_enabled:
             return False
 
@@ -736,12 +638,7 @@ class BluetoothSink:
         )
 
     def _attempt_reconnection(self) -> bool:
-        """
-        Attempt to reconnect to the last connected device.
-
-        Returns:
-            False to remove from timer queue
-        """
+        """Attempt to reconnect to last connected device. Returns False to stop timer."""
         self._reconnection_timer_id = None
 
         if not self.is_sink_enabled or not self._last_connected_address:
@@ -908,11 +805,7 @@ class BluetoothSink:
             return False
 
     def _terminate_a2dp_transport(self, device: BluetoothDevice):
-        """
-        Terminate A2DP transport connection for a device.
-
-        This properly closes the A2DP audio stream before disconnecting the device.
-        """
+        """Terminate A2DP transport for device; close stream before disconnect."""
         try:
             manager = dbus.Interface(
                 self.bt_manager.bus.get_object(self.bt_manager.BLUEZ_SERVICE, "/"),
@@ -1034,15 +927,7 @@ class BluetoothSink:
             logger.error("Error setting up PulseAudio routing: %s", e, exc_info=True)
 
     def control_playback(self, action: str) -> bool:
-        """
-        Control BT playback (AVRCP commands + local control).
-
-        Args:
-            action: 'play', 'pause', 'stop', 'next', 'prev'
-
-        Returns:
-            True if command was sent successfully
-        """
+        """Control BT playback via AVRCP + local. action: play/pause/stop/next/prev."""
         if not self.connected_device:
             return False
 
@@ -1055,20 +940,7 @@ class BluetoothSink:
         return avrcp_success or local_success
 
     def _send_avrcp_command(self, action: str) -> bool:
-        """
-        Send AVRCP command via MediaControl1 or MediaPlayer1 interface.
-
-        According to BlueZ specification:
-        - MediaControl1 is typically at the device path itself
-        - MediaPlayer1 may be at a sub-path under the device
-        - Both interfaces support Play, Pause, Stop, Next, Previous methods
-
-        Args:
-            action: 'play', 'pause', 'stop', 'next', 'prev'
-
-        Returns:
-            True if command was sent successfully, False otherwise
-        """
+        """Send AVRCP command via MediaControl1 or MediaPlayer1. Returns True if sent."""
         try:
             if not self.connected_device:
                 logger.debug("No connected device for AVRCP command")
@@ -1210,20 +1082,7 @@ class BluetoothSink:
             return False
 
     def _control_local_playback(self, action: str) -> bool:
-        """
-        Control local BT audio stream (pause/resume) via MediaTransport1 interface.
-
-        According to BlueZ specification:
-        - MediaTransport1.Suspend() pauses the A2DP stream locally
-        - MediaTransport1.Resume() resumes the A2DP stream locally
-        - This does not affect the source device's playback state
-
-        Args:
-            action: 'play' (resume), 'pause' (suspend), 'stop' (suspend)
-
-        Returns:
-            True if command was executed successfully, False otherwise
-        """
+        """Control local A2DP stream via MediaTransport1 Suspend/Resume."""
         try:
             if not self.connected_device:
                 logger.debug("No connected device for local playback control")
@@ -1358,14 +1217,7 @@ class BluetoothSink:
             self._set_adapter_name(name)
 
     def cleanup(self) -> None:
-        """
-        Clean up Bluetooth sink resources.
-
-        This should be called when the application shuts down to:
-        - Stop health monitoring and reconnection timers
-        - Disable sink mode if enabled
-        - Unsubscribe from events
-        """
+        """Stop timers, disable sink if enabled, unsubscribe from events."""
         try:
             # Stop health monitoring
             self._stop_health_monitoring()

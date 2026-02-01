@@ -1,19 +1,7 @@
-"""Bluetooth device management using D-Bus and BlueZ.
+"""Bluetooth device management via D-Bus/BlueZ: discovery, pairing, agent, codec/battery."""
 
-This module provides:
-- Device discovery, pairing, and connection management
-- Bluetooth agent for handling pairing confirmations
-- Advanced features: codec info, battery monitoring, connection quality
-"""
-
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from typing import Any, Callable, Dict, List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 import gi
@@ -22,9 +10,6 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.bluetooth_agent import BluetoothAgent, BluetoothAgentUI
 from core.dbus_utils import DBusConnectionMonitor, dbus_retry
 from core.events import EventBus
@@ -37,13 +22,7 @@ class BluetoothDevice:
     """Represents a Bluetooth device."""
 
     def __init__(self, path: str, properties: Dict[str, Any]) -> None:
-        """
-        Initialize Bluetooth device.
-
-        Args:
-            path: D-Bus object path of the device
-            properties: Dictionary of device properties from BlueZ
-        """
+        """Initialize from D-Bus path and BlueZ properties dict."""
         self.path: str = path
         self.address = properties.get("Address", "")
         self.name = properties.get("Name", "Unknown Device")
@@ -54,12 +33,6 @@ class BluetoothDevice:
         self.properties = properties
 
     def __repr__(self) -> str:
-        """
-        String representation of the device.
-
-        Returns:
-            Human-readable device description
-        """
         return f"BluetoothDevice(name={self.name}, address={self.address}, connected={self.connected})"
 
 
@@ -77,13 +50,7 @@ class BluetoothManager:
         parent_window: Optional[Gtk.Window] = None,
         event_bus: Optional[EventBus] = None,
     ) -> None:
-        """
-        Initialize Bluetooth Manager.
-
-        Args:
-            parent_window: GTK window for pairing dialogs (optional)
-            event_bus: EventBus instance for publishing events (optional)
-        """
+        """Initialize with optional parent_window and event_bus."""
         # DBusGMainLoop should be set once globally, but calling multiple times is safe
         try:
             DBusGMainLoop(set_as_default=True)
@@ -811,20 +778,8 @@ class BluetoothManager:
             logger.error("Error disconnecting device: %s", e, exc_info=True)
             return False
 
-    # ========================================================================
-    # Advanced Features: Codec, Battery, and Quality Monitoring
-    # ========================================================================
-
     def get_available_codecs(self, device_path: str) -> List[str]:
-        """
-        Get available audio codecs for a device.
-
-        Args:
-            device_path: D-Bus path of the device
-
-        Returns:
-            List of codec names (e.g., ['SBC', 'AAC', 'aptX'])
-        """
+        """Get available audio codecs for a device. Returns list of codec names."""
         codecs = []
         try:
             manager = dbus.Interface(

@@ -1,23 +1,13 @@
 """Main application window with dockable panels."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from typing import List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
-from core.app_state import AppState, PlaybackState
 from core.audio_player import AudioPlayer
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
@@ -57,13 +47,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_resizable(True)
 
         # ---------------------------------------------------------------------
-        # Layer 1: Foundation (event bus, playlist, app state)
+        # Layer 1: Foundation (event bus, playlist - no app state)
         # ---------------------------------------------------------------------
         self.event_bus = EventBus()
         self.playlist_manager = PlaylistManager(event_bus=self.event_bus)
-        self.app_state = AppState(
-            self.event_bus, playlist_manager=self.playlist_manager
-        )
 
         # ---------------------------------------------------------------------
         # Layer 2: Backends (library, players, MOC, BT, volume, MPRIS2)
@@ -84,10 +71,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mpris2 = MPRIS2Manager()
 
         # ---------------------------------------------------------------------
-        # Layer 3: Playback controller (mediator; uses app_state and backends)
+        # Layer 3: Playback controller (playlist_manager + event bus; no app state)
         # ---------------------------------------------------------------------
         self.playback_controller = PlaybackController(
-            app_state=self.app_state,
+            playlist_manager=self.playlist_manager,
             event_bus=self.event_bus,
             internal_player=self.player,
             moc_controller=self.moc_controller,
@@ -109,9 +96,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Layer 6: Post-UI init (playlist load, metadata sync, layout, library)
         # ---------------------------------------------------------------------
         self._init_playlist_and_state()
-        # Sync player controls (time labels, play state, volume) from state we just loaded
+        self.playback_controller._set_volume(self.system_volume.get_volume())
+        self.playback_controller.publish_initial_state()
         self.player_controls._initialize_from_state()
-        current_track = self.app_state.current_track
+        current_track = self.playlist_manager.get_current_track()
         if current_track:
             self.metadata_panel.sync_with_state(current_track)
         GLib.idle_add(self.dock_manager.load_layout)
@@ -123,41 +111,14 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.use_moc:
             status = self.moc_controller.get_status(force_refresh=True)
             if status:
-                self.app_state.set_active_backend("moc")
-                if status.get("shuffle") is not None:
-                    self.app_state.set_shuffle_enabled(bool(status["shuffle"]))
-                if status.get("autonext") is not None:
-                    self.app_state.set_autonext_enabled(bool(status["autonext"]))
-                # Sync repeat state from MOC to loop mode
-                # MOC only has repeat on/off, so map to LOOP_PLAYLIST (2) if on, LOOP_FORWARD (0) if off
-                if status.get("repeat") is not None:
-                    loop_mode = 2 if status["repeat"] else 0
-                    self.app_state.set_loop_mode(loop_mode)
-                tracks, current_index = self.moc_controller.get_playlist()
-                if tracks:
+                if self.playlist_manager.reload_from_moc():
                     logger.info(
                         "Syncing playlist from MOC on startup: %d tracks",
-                        len(tracks),
+                        len(self.playlist_manager.get_playlist()),
                     )
-                    self.app_state.set_playlist(tracks, current_index)
                 else:
                     self.playlist_view.load_current_playlist()
-                moc_state = (status.get("state") or "STOP").upper()
-                if moc_state == "PLAY":
-                    self.app_state.set_playback_state(PlaybackState.PLAYING)
-                elif moc_state == "PAUSE":
-                    self.app_state.set_playback_state(PlaybackState.PAUSED)
-                else:
-                    self.app_state.set_playback_state(PlaybackState.STOPPED)
-                self.app_state.set_position(
-                    float(status.get("position", 0) or 0)
-                )
-                self.app_state.set_duration(
-                    float(status.get("duration", 0) or 0)
-                )
-                vol = status.get("volume")
-                if vol is not None:
-                    self.app_state.set_volume(float(vol))
+                self.playback_controller.set_initial_state_from_moc(status)
             else:
                 self.playlist_view.load_current_playlist()
         else:
@@ -372,7 +333,6 @@ class MainWindow(Gtk.ApplicationWindow):
     def _create_playlist_view(self):
         """Create and configure the playlist view."""
         self.playlist_view = PlaylistView(
-            app_state=self.app_state,
             event_bus=self.event_bus,
             playlist_manager=self.playlist_manager,
             window=self,
@@ -397,7 +357,6 @@ class MainWindow(Gtk.ApplicationWindow):
     def _create_player_controls(self):
         """Create player controls."""
         self.player_controls = PlayerControls(
-            app_state=self.app_state,
             event_bus=self.event_bus,
             mpris2=self.mpris2,
             system_volume=self.system_volume,
@@ -501,5 +460,5 @@ class MainWindow(Gtk.ApplicationWindow):
         self.playlist_view.replace_and_play_album(tracks)
 
     def _on_system_volume_changed(self, volume: float):
-        """Handle system volume change from external source (e.g., volume keys) - update UI."""
-        self.app_state.set_volume(volume)
+        """Handle system volume change from external source (e.g., volume keys) - publish so UI updates."""
+        self.playback_controller._set_volume(volume)

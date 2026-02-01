@@ -1,15 +1,9 @@
 """System volume control using PipeWire, PulseAudio, or ALSA."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import shutil
 import subprocess
 from typing import Callable, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 try:
     import gi
 
@@ -20,9 +14,6 @@ try:
 except ImportError:
     GLIB_AVAILABLE = False
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 # Try to use native PipeWire integration

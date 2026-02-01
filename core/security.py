@@ -1,20 +1,9 @@
 """Security utilities for path validation and input sanitization."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import re
 from pathlib import Path
 from typing import List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
-# None
-
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)

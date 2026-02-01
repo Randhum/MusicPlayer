@@ -10,24 +10,15 @@ The AudioPlayer class handles:
 - Position tracking and seeking for video files
 """
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.audio_effects import AudioEffects
 from core.logging import get_logger
 from core.metadata import TrackMetadata
@@ -36,9 +27,6 @@ from core.workflow_utils import is_video_file
 logger = get_logger(__name__)
 
 
-# ============================================================================
-# Type Definitions
-# ============================================================================
 class PlaybackState(Enum):
     """State machine for playback operations."""
 
@@ -49,9 +37,6 @@ class PlaybackState(Enum):
     SEEKING = "seeking"  # Seek operation in progress
 
 
-# ============================================================================
-# Constants
-# ============================================================================
 # GStreamer playbin flags
 GST_FLAG_VIDEO = 0x01
 GST_FLAG_AUDIO = 0x02
@@ -64,9 +49,6 @@ DURATION_UPDATE_INTERVAL = (
 POSITION_UPDATE_INTERVAL = 500
 
 
-# ============================================================================
-# Classes
-# ============================================================================
 class AudioPlayer:
     """
     GStreamer-based media player for video container formats.

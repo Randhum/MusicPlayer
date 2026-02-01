@@ -4,23 +4,12 @@ This module provides centralized configuration management following Linux
 standards for config, cache, and data directories.
 """
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import configparser
 import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
-# None
-
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)

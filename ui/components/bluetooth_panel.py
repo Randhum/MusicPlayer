@@ -1,22 +1,13 @@
 """Bluetooth panel component - shows BT status and controls."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 from typing import Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 import gi
 
 gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, GObject, Gtk
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.bluetooth_manager import BluetoothDevice, BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.events import EventBus

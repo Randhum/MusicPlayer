@@ -1,8 +1,5 @@
 """Music library scanning and indexing."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import json
 import os
 import threading
@@ -21,14 +18,6 @@ except ImportError:
     Observer = None
     FileSystemEventHandler = object
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
-# None (watchdog is optional)
-
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.config import get_config
 from core.logging import get_logger
 from core.metadata import TrackMetadata

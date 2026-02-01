@@ -4,16 +4,10 @@ This module provides event-based volume control using PipeWire's D-Bus interface
 with fallback to subprocess calls (pactl) if native D-Bus is unavailable.
 """
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import shutil
 import subprocess
 from typing import Any, Callable, Dict, List, Optional
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
 try:
     import dbus
     from dbus.mainloop.glib import DBusGMainLoop
@@ -32,9 +26,6 @@ try:
 except ImportError:
     GLIB_AVAILABLE = False
 
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.logging import get_logger
 
 logger = get_logger(__name__)

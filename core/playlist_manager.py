@@ -1,20 +1,9 @@
 """Playlist management for tracks."""
 
-# ============================================================================
-# Standard Library Imports (alphabetical)
-# ============================================================================
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple
 
-# ============================================================================
-# Third-Party Imports (alphabetical, with version requirements)
-# ============================================================================
-# None
-
-# ============================================================================
-# Local Imports (grouped by package, alphabetical)
-# ============================================================================
 from core.events import EventBus
 from core.exceptions import PlaylistError, SecurityError
 from core.logging import get_logger
@@ -52,11 +41,68 @@ class PlaylistManager:
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
         self._auto_save_enabled: bool = True
+        self._moc_playlist_provider: Optional[
+            Callable[..., Tuple[List[TrackMetadata], int]]
+        ] = None
+
+        if self._event_bus:
+            self._event_bus.subscribe(EventBus.RELOAD_PLAYLIST_FROM_MOC, self._on_reload_from_moc_requested)
+            self._event_bus.subscribe(EventBus.ADD_FOLDER, self._on_add_folder)
+            self._event_bus.subscribe(EventBus.ACTION_MOVE, self._on_action_move)
+            self._event_bus.subscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
+            self._event_bus.subscribe(EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist)
+
+    def set_moc_playlist_provider(
+        self,
+        provider: Optional[Callable[..., Tuple[List[TrackMetadata], int]]],
+    ) -> None:
+        """Set or clear the MOC playlist provider (call with None when MOC unavailable)."""
+        self._moc_playlist_provider = provider
+
+    def _on_reload_from_moc_requested(self, data: Optional[dict]) -> None:
+        """Subscriber: RELOAD_PLAYLIST_FROM_MOC → reload_from_moc(current_file)."""
+        current_file = data.get("current_file") if data else None
+        self.reload_from_moc(current_file=current_file)
+
+    def reload_from_moc(self, current_file: Optional[str] = None) -> bool:
+        """Load playlist from MOC via the injected provider and apply with set_playlist. Returns True if reloaded."""
+        if self._moc_playlist_provider is None:
+            return False
+        tracks, current_index = self._moc_playlist_provider(current_file=current_file)
+        if not tracks:
+            return False
+        self.set_playlist(tracks, current_index)
+        return True
+
+    def _on_add_folder(self, data: Optional[dict]) -> None:
+        """Subscriber: ADD_FOLDER with data['tracks'] (optional 'position') → add_tracks."""
+        if not data or "tracks" not in data:
+            return
+        tracks = data["tracks"]
+        position = data.get("position") if isinstance(data.get("position"), int) else None
+        if isinstance(tracks, list) and tracks:
+            self.add_tracks(tracks, position)
+
+    def _on_action_move(self, data: Optional[dict]) -> None:
+        """Subscriber: ACTION_MOVE with from_index, to_index → move_track."""
+        if not data or "from_index" not in data or "to_index" not in data:
+            return
+        self.move_track(int(data["from_index"]), int(data["to_index"]))
+
+    def _on_action_remove(self, data: Optional[dict]) -> None:
+        """Subscriber: ACTION_REMOVE with index → remove_track."""
+        if not data or "index" not in data:
+            return
+        self.remove_track(int(data["index"]))
+
+    def _on_action_clear_playlist(self, data: Optional[dict]) -> None:
+        """Subscriber: ACTION_CLEAR_PLAYLIST → clear."""
+        self.clear()
 
     def set_playlist(
         self, tracks: List[TrackMetadata], current_index: int = -1
     ) -> None:
-        """Replace playlist and index in one go; publish once; sync to file. Used by AppState, view, and load paths."""
+        """Replace playlist and index in one go; publish once; sync to file. Used by view and load paths."""
         self.current_playlist = list(tracks)
         self.current_index = (
             current_index
@@ -75,6 +121,7 @@ class PlaylistManager:
             {
                 "playlist_changed": True,
                 "index": self.current_index,
+                "playlist_length": len(self.current_playlist),
                 "content_changed": True,
             },
         )
@@ -119,7 +166,12 @@ class PlaylistManager:
         if self._event_bus:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
-                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+                {
+                    "playlist_changed": True,
+                    "index": self.current_index,
+                    "playlist_length": len(self.current_playlist),
+                    "content_changed": True,
+                },
             )
             self._emit_current_track_changed(old_index)
         self._sync_to_file()
@@ -146,7 +198,12 @@ class PlaylistManager:
         if self._event_bus:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
-                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+                {
+                    "playlist_changed": True,
+                    "index": self.current_index,
+                    "playlist_length": len(self.current_playlist),
+                    "content_changed": True,
+                },
             )
             self._emit_current_track_changed(old_index)
         self._sync_to_file()
@@ -169,7 +226,12 @@ class PlaylistManager:
         if self._event_bus:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
-                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+                {
+                    "playlist_changed": True,
+                    "index": self.current_index,
+                    "playlist_length": len(self.current_playlist),
+                    "content_changed": True,
+                },
             )
             self._emit_current_track_changed(old_index)
         self._sync_to_file()
@@ -205,7 +267,12 @@ class PlaylistManager:
         if self._event_bus:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
-                {"playlist_changed": True, "index": self.current_index, "content_changed": True},
+                {
+                    "playlist_changed": True,
+                    "index": self.current_index,
+                    "playlist_length": len(self.current_playlist),
+                    "content_changed": True,
+                },
             )
             self._emit_current_track_changed(old_index)
         self._sync_to_file()
@@ -218,7 +285,12 @@ class PlaylistManager:
         if self._event_bus:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
-                {"playlist_changed": True, "index": -1, "content_changed": True},
+                {
+                    "playlist_changed": True,
+                    "index": -1,
+                    "playlist_length": 0,
+                    "content_changed": True,
+                },
             )
             self._emit_current_track_changed(old_index)
         self._sync_to_file()
@@ -385,50 +457,28 @@ class PlaylistManager:
         return self.playlists_dir / "current_playlist.json"
 
     def _sync_to_file(self) -> None:
-        """Auto-save current playlist to JSON file."""
+        """Auto-save current playlist to JSON file (sync for small, threaded for large)."""
         if not self._auto_save_enabled:
             return
-        
-        # For large playlists, use background thread to avoid blocking
-        if len(self.current_playlist) > 200:
-            # Use background thread for large playlists
-            import threading
-            thread = threading.Thread(target=self._sync_to_file_threaded, daemon=True)
-            thread.start()
-        else:
-            # Synchronous save for small playlists (fast enough)
-            self._sync_to_file_sync()
-    
-    def _sync_to_file_sync(self) -> None:
-        """Synchronously save playlist to file (internal method)."""
         try:
-            playlist_data = {
-                "tracks": [track.to_dict() for track in self.current_playlist],
-                "current_index": self.current_index,
-            }
-            with open(self.current_playlist_file, "w", encoding="utf-8") as f:
-                json.dump(playlist_data, f, indent=2, ensure_ascii=False)
+            if len(self.current_playlist) > 200:
+                import threading
+                playlist_copy = self.current_playlist.copy()
+                index_copy = self.current_index
+                def save():
+                    try:
+                        data = {"tracks": [t.to_dict() for t in playlist_copy], "current_index": index_copy}
+                        with open(self.current_playlist_file, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2, ensure_ascii=False)
+                    except Exception as e:
+                        logger.warning("Failed to auto-save current playlist: %s", e)
+                threading.Thread(target=save, daemon=True).start()
+            else:
+                data = {"tracks": [t.to_dict() for t in self.current_playlist], "current_index": self.current_index}
+                with open(self.current_playlist_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.warning("Failed to auto-save current playlist: %s", e)
-    
-    def _sync_to_file_threaded(self) -> None:
-        """Save playlist to file in background thread (for large playlists)."""
-        try:
-            # Copy playlist data to avoid race conditions
-            playlist_copy = self.current_playlist.copy()
-            index_copy = self.current_index
-            
-            # Serialize in background thread
-            playlist_data = {
-                "tracks": [track.to_dict() for track in playlist_copy],
-                "current_index": index_copy,
-            }
-            
-            # Write file in background thread
-            with open(self.current_playlist_file, "w", encoding="utf-8") as f:
-                json.dump(playlist_data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.warning("Failed to auto-save current playlist in background thread: %s", e)
 
     def load_current_playlist(self) -> bool:
         """Load the current playlist from auto-save file. Replaces and publishes once via set_playlist."""
