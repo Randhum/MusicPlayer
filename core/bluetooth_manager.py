@@ -367,10 +367,6 @@ class BluetoothManager:
                 del self.devices[device_path]
                 if self.connected_device == device:
                     self.connected_device = None
-                if self._event_bus:
-                    self._event_bus.publish(
-                        EventBus.BT_DEVICE_REMOVED, {"device": device}
-                    )
 
     def _convert_dbus_value(self, value):
         """Convert a dbus value to a native Python type."""
