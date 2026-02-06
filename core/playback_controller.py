@@ -1,5 +1,4 @@
 """Playback controller - routes playback to MOC, internal player, BT sink."""
-import random
 import time
 from enum import Enum
 from pathlib import Path
@@ -88,15 +87,11 @@ class PlaybackController:
         self._recent_repeat_write: Optional[float] = None
         self._loading_from_moc: bool = False
         self._syncing_to_moc: bool = False
+        self._pending_start_playback: bool = False
+        self._sync_idle_id: Optional[int] = None  # coalesce PLAYLIST_CHANGED + ACTION_SYNC into one sync
+        self._pending_sync_start_playback: bool = False
         self._user_action_time: float = 0.0
         self._startup_complete: bool = False
-        self._moc_sync_tracks: List[TrackMetadata] = []
-        self._moc_sync_index: int = 0
-        self._moc_sync_current_index: int = -1
-        self._moc_sync_start_playback: bool = False
-        self._moc_sync_chunk_id: Optional[int] = None
-
-        self._shuffle_queue: List[int] = []
 
         if self._use_moc:
             config = get_config()
@@ -131,12 +126,8 @@ class PlaybackController:
         # Subscribe to playlist changes to sync with MOC
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
 
-        # Subscribe to shuffle changes to regenerate shuffle queue
+        # Subscribe to shuffle (PlaylistManager owns shuffle queue; we just sync to MOC)
         self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
-
-        # Initialize shuffle queue if shuffle is enabled
-        if self._shuffle_enabled:
-            self._regenerate_shuffle_queue()
 
         # Subscribe to BT events
         if bt_sink:
@@ -371,32 +362,21 @@ class PlaybackController:
         self._set_duration(0.0)
 
     def _on_action_next(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle next track: set index then load and play (single path)."""
-        if self._should_use_bt_sink():
-            if self._bt_sink:
-                self._bt_sink.control_playback("next")
+        if self._bt_sink and self._should_use_bt_sink():
+            self._bt_sink.control_playback("next")
             return
-        playlist = self._playlist.get_playlist()
-        if not playlist:
-            return
-        if self._shuffle_enabled:
-            next_index = self._get_next_shuffled_index()
-        else:
-            current_index = self._playlist.get_current_index()
-            next_index = current_index + 1 if current_index < len(playlist) - 1 else -1
+        next_index = self._playlist.get_next_index()
         if next_index >= 0:
             self._playlist.set_current_index(next_index)
             self._load_and_play_current_track()
 
     def _on_action_previous(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle previous track: set index then load and play (single path)."""
-        if self._should_use_bt_sink():
-            if self._bt_sink:
-                self._bt_sink.control_playback("prev")
+        if self._bt_sink and self._should_use_bt_sink():
+            self._bt_sink.control_playback("prev")
             return
-        current_index = self._playlist.get_current_index()
-        if current_index > 0:
-            self._playlist.set_current_index(current_index - 1)
+        cur = self._playlist.get_current_index()
+        if cur > 0:
+            self._playlist.set_current_index(cur - 1)
             self._load_and_play_current_track()
 
     def _on_action_seek(self, data: Optional[Dict[str, Any]]) -> None:
@@ -443,10 +423,7 @@ class PlaybackController:
 
         # Sync to MOC if using MOC
         if self._use_moc:
-            if enabled:
-                self._moc_controller.enable_shuffle()
-            else:
-                self._moc_controller.disable_shuffle()
+            self._moc_controller.set_shuffle(enabled)
             self._recent_shuffle_write = time.time()
 
     def _on_action_set_loop_mode(self, data: Optional[Dict[str, Any]]) -> None:
@@ -540,11 +517,10 @@ class PlaybackController:
             self._events.publish(EventBus.TRACK_CHANGED, {"track": track})
 
         # Just play the file - MOC's --playit will add it to playlist if needed
-        # This is fast and doesn't require full playlist sync
+        # Only set PLAYING if MOC actually starts (avoids UI showing play when MOC didn't start)
         if track and track.file_path:
-            self._moc_controller.play_file(track.file_path)
-
-        # Set playback state (optimistic - assume play will succeed)
+            if not self._moc_controller.play_file(track.file_path):
+                return
         self._set_playback_state(PlaybackState.PLAYING)
 
     def _play_with_internal(self, track: TrackMetadata) -> None:
@@ -626,151 +602,62 @@ class PlaybackController:
         self._set_position(desired)
         return False
 
+    def _run_pending_moc_sync(self) -> bool:
+        """Single idle callback: run one sync with coalesced start_playback. Prevents double sync when PLAYLIST_CHANGED and ACTION_SYNC_PLAYLIST_TO_MOC fire together."""
+        self._sync_idle_id = None
+        start = self._pending_sync_start_playback
+        self._pending_sync_start_playback = False
+        self._sync_moc_playlist(start)
+        return False
+
     def _sync_moc_playlist(self, start_playback: bool = False) -> bool:
         if not self._use_moc:
             return False
 
-        # If a sync is already in progress, only update the start_playback flag
-        # so playback is triggered when the in-progress sync completes.
         if self._syncing_to_moc:
             if start_playback:
-                self._moc_sync_start_playback = True
-            logger.debug(
-                "MOC sync already in progress, %s",
-                "will start playback when done" if start_playback else "skipping duplicate sync",
-            )
+                self._pending_start_playback = True
             return False
-
         playlist = self._playlist.get_playlist()
         current_index = self._playlist.get_current_index()
         track = self._playlist.get_current_track()
+        should_start = start_playback and track and not is_video_file(track.file_path)
+        self._syncing_to_moc = True
+        self._recent_moc_write = time.time()  # Suppress reload-from-MOC during and right after sync
 
-        # Only start playback if track is audio (not video)
-        should_start = (
-            start_playback and track is not None and not is_video_file(track.file_path)
-        )
-
-        # For large playlists, use chunked sync to avoid blocking
-        if len(playlist) >= 100:
-            # Store sync state for chunked processing
-            self._moc_sync_tracks = playlist.copy()
-            self._moc_sync_current_index = current_index
-            self._moc_sync_start_playback = should_start
-            self._moc_sync_index = 0
-            self._syncing_to_moc = True
-            
-            # Write M3U file first (fast, single operation)
-            self._moc_controller.write_m3u_playlist(playlist, current_index)
-            
-            # Clear playlist and start chunked append
-            self._moc_controller.clear_playlist()
-            
-            # Start chunked append process
-            self._moc_sync_chunk_id = GLib.idle_add(self._sync_moc_playlist_chunked)
-            
-            # Track when we modified MOC
+        def on_done():
+            self._syncing_to_moc = False
             self._recent_moc_write = time.time()
-            
-            return False
-        else:
-            # For small playlists, sync synchronously (fast enough)
-            self._syncing_to_moc = True
-            try:
-                # Use MOC's native commands to set the playlist
-                self._moc_controller.set_playlist(
-                    playlist, current_index, start_playback=should_start
-                )
-
-                # Track when we modified MOC
-                self._recent_moc_write = time.time()
-
-                # Update playlist mtime (MOC will write to the file after our commands)
-                try:
-                    config = get_config()
-                    moc_playlist_path = config.moc_playlist_path
-                    if moc_playlist_path.exists():
-                        self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
-                except OSError:
-                    pass
-            finally:
-                self._syncing_to_moc = False
-            
-            return False  # Don't repeat
-    
-    def _sync_moc_playlist_chunked(self) -> bool:
-        """
-        Append tracks to MOC playlist in chunks to avoid blocking.
-        
-        Returns:
-            False (always) - we schedule next chunks explicitly via GLib.idle_add
-        """
-        if not self._syncing_to_moc or not self._moc_sync_tracks:
-            # Sync was cancelled or completed
-            self._finalize_moc_sync()
-            return False
-        
-        chunk_size = 50  # Process 50 tracks per chunk
-        end_index = min(self._moc_sync_index + chunk_size, len(self._moc_sync_tracks))
-        
-        # Append tracks in this chunk
-        for i in range(self._moc_sync_index, end_index):
-            track = self._moc_sync_tracks[i]
-            if track and track.file_path:
-                file_path = Path(track.file_path)
-                if file_path.exists() and file_path.is_file():
-                    abs_path = str(file_path.resolve())
-                    self._moc_controller.append_track_file(abs_path)
-        
-        self._moc_sync_index = end_index
-        
-        # Check if more chunks to process
-        if end_index < len(self._moc_sync_tracks):
-            # Schedule next chunk with updated index
-            self._moc_sync_chunk_id = GLib.idle_add(self._sync_moc_playlist_chunked)
-            return False  # Don't repeat automatically - we scheduled next chunk
-        
-        # All chunks processed - finalize
-        self._finalize_moc_sync()
-        return False  # Done
-    
-    def _finalize_moc_sync(self) -> None:
-        """Finalize MOC sync - start playback if requested and update state."""
-        try:
-            # Start playback if requested
-            # Use play_file() which finds the track by path (works even if some tracks were filtered)
-            if self._moc_sync_start_playback and self._moc_sync_current_index >= 0:
-                if 0 <= self._moc_sync_current_index < len(self._moc_sync_tracks):
-                    track = self._moc_sync_tracks[self._moc_sync_current_index]
-                    if (
-                        track
-                        and track.file_path
-                        and not is_video_file(track.file_path)
-                    ):
-                        file_path = Path(track.file_path)
-                        if file_path.exists() and file_path.is_file():
-                            # play_file() uses --playit which finds the file in playlist
-                            self._moc_controller.play_file(track.file_path)
-            
-            # Update playlist mtime
             try:
                 config = get_config()
-                moc_playlist_path = config.moc_playlist_path
-                if moc_playlist_path.exists():
-                    self._moc_playlist_mtime = moc_playlist_path.stat().st_mtime
+                if config.moc_playlist_path.exists():
+                    self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
             except OSError:
                 pass
-        finally:
-            # Clear sync state
-            self._syncing_to_moc = False
-            self._moc_sync_tracks = []
-            self._moc_sync_index = 0
-            self._moc_sync_current_index = -1
-            self._moc_sync_start_playback = False
-            self._moc_sync_chunk_id = None
+            if self._pending_start_playback:
+                self._pending_start_playback = False
+                def start_after_sync():
+                    # Only play if we still have a valid current track (avoids race with MOC load)
+                    t = self._playlist.get_current_track()
+                    if t and t.file_path:
+                        self._load_and_play_current_track()
+                    return False
+                GLib.idle_add(start_after_sync)
+
+        if len(playlist) >= 100:
+            self._moc_controller.set_playlist_large(
+                playlist, current_index, should_start, on_done=on_done
+            )
+        else:
+            self._moc_controller.set_playlist(
+                playlist, current_index, start_playback=should_start
+            )
+            on_done()
+        return False
 
     def _reload_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
-        """Load playlist from MOC into app state. Events (PLAYLIST_CHANGED etc.) drive UI. Used by refresh, append_folder, and file-change polling."""
-        if not self._use_moc:
+        """Load playlist from MOC into app state. Skipped while syncing to avoid overwriting with partial data."""
+        if not self._use_moc or self._syncing_to_moc:
             return
         tracks, current_index = self._moc_controller.get_playlist(
             current_file=current_file
@@ -790,7 +677,7 @@ class PlaybackController:
             pass
 
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        """React to playlist change: sync to MOC when content changed (pub/sub drives UI), regenerate shuffle queue."""
+        """Request sync to MOC. Coalesced with ACTION_SYNC_PLAYLIST_TO_MOC so we run one sync."""
         content_changed = data is None or data.get("content_changed", True)
         if (
             content_changed
@@ -799,76 +686,11 @@ class PlaybackController:
             and not self._loading_from_moc
             and not self._syncing_to_moc
         ):
-            GLib.idle_add(self._sync_moc_playlist, False)
-
-        # Shuffle queue: invalidate and regenerate if shuffle enabled
-        self._shuffle_queue = []
-        if self._shuffle_enabled:
-            playlist_size = len(self._playlist.get_playlist())
-            if playlist_size > 100:
-                GLib.idle_add(self._regenerate_shuffle_queue)
-            else:
-                self._regenerate_shuffle_queue()
+            if self._sync_idle_id is None:
+                self._sync_idle_id = GLib.idle_add(self._run_pending_moc_sync)
 
     def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle shuffle state change - regenerate shuffle queue."""
-        if data and data.get("enabled", False):
-            playlist_size = len(self._playlist.get_playlist())
-            if playlist_size > 100:
-                # Defer shuffle queue regeneration for large playlists
-                GLib.idle_add(self._regenerate_shuffle_queue)
-            else:
-                # Synchronous regeneration for small playlists
-                self._regenerate_shuffle_queue()
-        else:
-            # Clear shuffle queue when shuffle is disabled
-            self._shuffle_queue = []
-
-    def _get_next_shuffled_index(self) -> int:
-        """Get next index from shuffle queue. Skips indices invalid for current playlist."""
-        playlist = self._playlist.get_playlist()
-        if not playlist:
-            return -1
-
-        # If queue is empty, regenerate it
-        if not self._shuffle_queue:
-            self._regenerate_shuffle_queue()
-
-        n = len(playlist)
-        # Pop until we get a valid index or queue is empty (playlist may have changed)
-        while self._shuffle_queue:
-            idx = self._shuffle_queue.pop(0)
-            if 0 <= idx < n:
-                return idx
-        return -1
-
-    def _regenerate_shuffle_queue(self) -> bool:
-        """
-        Regenerate the shuffle queue with all playlist indices in random order.
-        
-        Returns:
-            False to indicate this is a one-time callback (for GLib.idle_add)
-        """
-        playlist = self._playlist.get_playlist()
-        if not playlist:
-            self._shuffle_queue = []
-            return False
-
-        # Create a list of all indices
-        indices = list(range(len(playlist)))
-
-        # Shuffle the list
-        random.shuffle(indices)
-
-        # If there's a current track, remove it from the queue to avoid immediate repeat
-        current_idx = self._playlist.get_current_index()
-        if 0 <= current_idx < len(playlist) and current_idx in indices:
-            indices.remove(current_idx)
-            # Add it at the end so it plays eventually, but not next
-            indices.append(current_idx)
-
-        self._shuffle_queue = indices
-        return False  # Don't repeat
+        pass  # PlaylistManager owns shuffle queue via same event
 
     def _poll_internal_player_status(self) -> bool:
         """Poll internal player status and update state."""
@@ -963,43 +785,22 @@ class PlaybackController:
 
         # Detect track change - but skip if user just initiated an action (prevent interference)
         if file_path and file_path != self._moc_last_file:
-            # Only handle track change if it wasn't user-initiated (within last 1 second)
             if time.time() - self._user_action_time >= 1.0:
                 self._handle_moc_track_change(file_path)
 
-        track_finished = False
-        if file_path == self._moc_last_file and duration > 0:
-            if state == "STOP" and position >= duration - 0.5:
-                # MOC stopped at end
-                track_finished = True
-            elif state == "PLAY" and position >= duration - 1.0:
-                # Position reached end while playing - track finished, advance soon
-                # Use slightly more lenient threshold (1.0s) for playing state
-                track_finished = True
-
+        track_finished = (
+            file_path == self._moc_last_file
+            and duration > 0
+            and (
+                (state == "STOP" and position >= duration - 0.5)
+                or (state == "PLAY" and position >= duration - 1.0)
+            )
+        )
         if track_finished:
-            # Track finished - handle auto-advance
-            # Mark user action time BEFORE handling to prevent poll interference
-            # This ensures the next poll (500ms later) won't interfere
             self._user_action_time = time.time()
-
-            playlist = self._playlist.get_playlist()
-            # Check if there are more tracks available (considering shuffle mode)
-            has_next = False
-            if self._shuffle_enabled:
-                # In shuffle mode, check if queue has tracks or can be regenerated
-                if self._shuffle_queue or len(playlist) > 1:
-                    has_next = True
-            else:
-                # Sequential mode - check if not at end
-                current_index = self._playlist.get_current_index()
-                has_next = current_index < len(playlist) - 1
-
-            if has_next:
-                # There's a next track - advance (timeline will be reset when next track loads)
+            if self._playlist.get_next_index() >= 0:
                 self._handle_track_finished()
             else:
-                # End of playlist - stop and reset timeline
                 self._set_playback_state(PlaybackState.STOPPED)
                 self._set_position(0.0)
                 self._set_duration(0.0)
@@ -1013,85 +814,36 @@ class PlaybackController:
         """Handle MOC track change (auto-advancement)."""
         self._moc_last_file = file_path
 
-        # Find track in playlist
         playlist = self._playlist.get_playlist()
+        resolved = str(Path(file_path).resolve())
         for idx, track in enumerate(playlist):
-            track_path_resolved = str(Path(track.file_path).resolve())
-            file_path_resolved = str(Path(file_path).resolve())
-            if track_path_resolved == file_path_resolved:
-                # Found track - update state
-                # set_current_index will automatically update current_track, so don't call set_current_track separately
+            if track.file_path and str(Path(track.file_path).resolve()) == resolved:
                 self._playlist.set_current_index(idx)
-                # Remove from shuffle queue if present (to avoid playing it again before queue regenerates)
-                if self._shuffle_enabled and idx in self._shuffle_queue:
-                    self._shuffle_queue.remove(idx)
                 return
-
-        # Track not in our playlist - MOC playlist may have changed; reload from MOC
         self._reload_playlist_from_moc(current_file=file_path)
 
     def _handle_track_finished(self) -> None:
-        """Handle track finished - auto-advance based on loop mode and autonext."""
-        # Only auto-advance if autonext is enabled
         if not self._autonext_enabled:
             return
-
-        # Note: _user_action_time is already set by caller to prevent poll interference
-        # The handlers (_on_action_play, _on_action_next) will also set it, ensuring
-        # proper guard window throughout the advancement process
-
         loop_mode = self._loop_mode
         playlist = self._playlist.get_playlist()
-        current_index = self._playlist.get_current_index()
-
-        # Don't reset timeline here - let the next track's playback update it
-        # This prevents showing 0:00 for the current track if advancement fails
-
-        if loop_mode == 1:  # LOOP_TRACK
-            # Loop current track - restart it (will reset timeline when track loads)
+        cur = self._playlist.get_current_index()
+        next_idx = self._playlist.get_next_index()
+        if loop_mode == 1:
             self._on_action_play(None)
-        elif loop_mode == 2:  # LOOP_PLAYLIST
-            # Loop playlist - advance to next or wrap to beginning
-            if self._shuffle_enabled:
-                # In shuffle mode, use shuffle queue (will regenerate when empty)
-                next_index = self._get_next_shuffled_index()
-                if next_index >= 0:
-                    self._playlist.set_current_index(next_index)
-                    self._on_action_play(None)
-                else:
-                    # Queue exhausted - regenerate and play first from new queue
-                    self._regenerate_shuffle_queue()
-                    if self._shuffle_queue:
-                        next_index = self._shuffle_queue.pop(0)
-                        self._playlist.set_current_index(next_index)
-                        self._on_action_play(None)
+        elif loop_mode == 2:
+            if next_idx >= 0:
+                self._playlist.set_current_index(next_idx)
+                self._on_action_play(None)
+            elif playlist:
+                self._playlist.set_current_index(0)
+                self._on_action_play(None)
+        else:
+            if next_idx >= 0:
+                self._playlist.set_current_index(next_idx)
+                self._on_action_play(None)
             else:
-                # Sequential navigation
-                if current_index < len(playlist) - 1:
-                    self._on_action_next(None)
-                else:
-                    # End of playlist - wrap to beginning
-                    if playlist:
-                        self._playlist.set_current_index(0)
-                        self._on_action_play(None)
-        else:  # LOOP_FORWARD (0)
-            # Forward mode - advance to next track or stop at end
-            if self._shuffle_enabled:
-                # Use shuffle queue if shuffle is enabled
-                next_index = self._get_next_shuffled_index()
-                if next_index >= 0:
-                    self._playlist.set_current_index(next_index)
-                    self._on_action_play(None)
-                else:
-                    # Shuffle queue exhausted - stop and reset timeline
-                    self._on_action_stop(None)
-            else:
-                # Sequential navigation
-                if current_index < len(playlist) - 1:
-                    self._on_action_next(None)
-                else:
-                    # End of playlist reached - stop and reset timeline
-                    self._on_action_stop(None)
+                self._on_action_stop(None)
 
     def _check_moc_playlist_changes(self) -> None:
         """Check for MOC playlist file changes."""
@@ -1114,7 +866,7 @@ class PlaybackController:
                 recent_write = self._recent_moc_write and (
                     time.time() - self._recent_moc_write < RECENT_WRITE_WINDOW
                 )
-                if not recent_write and self._startup_complete:
+                if not recent_write and self._startup_complete and not self._syncing_to_moc:
                     self._reload_playlist_from_moc()
                 self._moc_playlist_mtime = mtime
         except OSError:
@@ -1218,13 +970,5 @@ class PlaybackController:
             self._events.publish(EventBus.PLAYBACK_STOPPED, {})
 
     def cleanup(self) -> None:
-        """Clean up resources when controller is destroyed."""
-        # Cancel any pending chunked sync
-        if self._moc_sync_chunk_id is not None:
-            GLib.source_remove(self._moc_sync_chunk_id)
-            self._moc_sync_chunk_id = None
-            self._syncing_to_moc = False
-            self._moc_sync_tracks = []
-        
         if self._use_moc:
             self._moc_controller.shutdown()

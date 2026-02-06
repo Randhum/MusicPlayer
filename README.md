@@ -1141,7 +1141,7 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
 **Event bus flow (outline):**
 - **LibraryBrowser** "Add Folder" → publish ADD_FOLDER (tracks) → PlaylistManager adds, PlaylistView redraws via PLAYLIST_CHANGED, PlaybackController syncs to MOC. "Play Folder" → add folder then ACTION_PLAY.
 - **PlayerControls** publishes Play/Pause/Next/Prev/Seek → PlaybackController subscribes and drives playback; PlayerControls/MetadataPanel/PlaylistView subscribe to playback/position/track events and update UI.
-- **PlaylistView** publishes Play (row double-tap), Move, Remove, Refresh, Clear → PlaylistManager subscribes and updates; MOC sync via PLAYLIST_CHANGED.
+- **PlaylistView** publishes Play (row activation: double-click/Enter), Move, Remove, Refresh, Clear → PlaylistManager subscribes and updates; MOC sync via PLAYLIST_CHANGED. The current playing track blinks (driven by CURRENT_INDEX_CHANGED); selection/blink updates are deferred to idle to avoid GTK assertion.
 
 **Benefits:**
 - **No circular dependencies** - Components depend only on EventBus and script modules (PlaylistManager, PlaybackController)
@@ -1174,7 +1174,7 @@ The codebase follows systematic harmonization to ensure consistency and maintain
 
 **Remaining implementations:** A detailed, actionable list of unfinished features (music library fs monitoring, user error notifications, tests, `data/` service files, harmonization) is in [TODO.md](TODO.md).
 
-**Code size:** Boilerplate was reduced (section headers removed, events/logging/exceptions/workflow_utils/main slimmed). The largest files were slimmed by shortening docstrings, consolidating UI (e.g. playlist header buttons), and reducing the number of functions to the minimum required: PlaylistView delegating getters removed (callers use playlist_manager directly); MOC enable/disable/toggle replaced with set_autonext/set_shuffle/set_repeat; clear and _handle_clear merged into clear(stop_first); _ensure_duration (no-op) removed; playlist_manager _sync_to_file_sync/_sync_to_file_threaded inlined into _sync_to_file. A build under ~2500 lines would require optional stubs for Bluetooth and MPRIS2 and further slimming of playlist_view, playback_controller, and moc_controller.
+**Code size:** Boilerplate was reduced; largest files were slimmed (docstrings, UI consolidation, function count). **PlaybackController** was cut to ~950 lines (from ~1230) and made event-bus driven: MOC chunked sync moved to **MocController** (`set_playlist_large`); shuffle queue and next-index logic moved to **PlaylistManager** (`get_next_index()`, subscribes to `SHUFFLE_CHANGED`). Controller now subscribes to actions, delegates to playlist/MOC, and publishes state only. PlaylistView delegating getters removed; MOC enable/disable/toggle → set_autonext/set_shuffle/set_repeat; clear(stop_first); _ensure_duration removed; playlist_manager _sync_to_file inlined. A build under ~2500 lines would require optional stubs for Bluetooth and MPRIS2 and further slimming of playlist_view and moc_controller.
 
 #### MOC Integration Architecture
 
@@ -1194,7 +1194,7 @@ The MOC (Music On Console) integration follows a simple, direct approach:
 - `set_playlist()` - Write playlist to M3U and optionally start playback
 - `toggle_shuffle()` / `disable_autonext()` / `enable_autonext()` - Control MOC features
 
-**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state. When you add many tracks (e.g. "play folder"), the playlist is synced to MOC in chunks; if a "start playback" request arrives while a sync is already in progress, the controller records it and starts playback when that sync completes, so playback is never lost.
+**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state. When you add many tracks (e.g. "play folder"), PLAYLIST_CHANGED and ACTION_SYNC_PLAYLIST_TO_MOC are coalesced into a single sync so MOC is only updated once. Playback is only started if the current track is still valid after sync (avoids "Cannot play - no valid track" and keeps UI and playback in sync when MOC takes longer to load). The Play button only switches to Pause when MOC actually starts playback (so the UI stays in sync if MOC fails to start).
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server

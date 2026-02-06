@@ -1,6 +1,7 @@
 """Playlist management for tracks."""
 
 import json
+import random
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -41,11 +42,14 @@ class PlaylistManager:
         self.current_playlist: List[TrackMetadata] = []
         self.current_index: int = -1
         self._auto_save_enabled: bool = True
+        self._shuffle_enabled: bool = False
+        self._shuffle_queue: List[int] = []
         self._moc_playlist_provider: Optional[
             Callable[..., Tuple[List[TrackMetadata], int]]
         ] = None
 
         if self._event_bus:
+            self._event_bus.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
             self._event_bus.subscribe(EventBus.RELOAD_PLAYLIST_FROM_MOC, self._on_reload_from_moc_requested)
             self._event_bus.subscribe(EventBus.ADD_FOLDER, self._on_add_folder)
             self._event_bus.subscribe(EventBus.ACTION_MOVE, self._on_action_move)
@@ -58,6 +62,36 @@ class PlaylistManager:
     ) -> None:
         """Set or clear the MOC playlist provider (call with None when MOC unavailable)."""
         self._moc_playlist_provider = provider
+
+    def _on_shuffle_changed(self, data: Optional[dict]) -> None:
+        self._shuffle_enabled = bool(data.get("enabled", False)) if data else False
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
+        else:
+            self._shuffle_queue = []
+
+    def _regenerate_shuffle_queue(self) -> None:
+        n = len(self.current_playlist)
+        indices = list(range(n))
+        random.shuffle(indices)
+        cur = self.current_index
+        if 0 <= cur < n and cur in indices:
+            indices.remove(cur)
+            indices.append(cur)
+        self._shuffle_queue = indices
+
+    def get_next_index(self) -> int:
+        """Next index (sequential or from shuffle queue). Does not mutate current_index."""
+        if not self.current_playlist:
+            return -1
+        if not self._shuffle_enabled:
+            return self.current_index + 1 if self.current_index < len(self.current_playlist) - 1 else -1
+        while self._shuffle_queue:
+            idx = self._shuffle_queue.pop(0)
+            if 0 <= idx < len(self.current_playlist):
+                return idx
+        self._regenerate_shuffle_queue()
+        return self._shuffle_queue.pop(0) if self._shuffle_queue else -1
 
     def _on_reload_from_moc_requested(self, data: Optional[dict]) -> None:
         """Subscriber: RELOAD_PLAYLIST_FROM_MOC → reload_from_moc(current_file)."""
@@ -109,6 +143,8 @@ class PlaylistManager:
             if 0 <= current_index < len(self.current_playlist)
             else -1
         )
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._emit_playlist_replaced()
         self._sync_to_file()
 
@@ -174,6 +210,8 @@ class PlaylistManager:
                 },
             )
             self._emit_current_track_changed(old_index)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._sync_to_file()
 
     def add_tracks(
@@ -206,6 +244,8 @@ class PlaylistManager:
                 },
             )
             self._emit_current_track_changed(old_index)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._sync_to_file()
 
     def remove_track(self, index: int) -> None:
@@ -275,6 +315,8 @@ class PlaylistManager:
                 },
             )
             self._emit_current_track_changed(old_index)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._sync_to_file()
 
     def clear(self) -> None:
@@ -293,6 +335,8 @@ class PlaylistManager:
                 },
             )
             self._emit_current_track_changed(old_index)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._sync_to_file()
 
     def get_current_track(self) -> Optional[TrackMetadata]:
@@ -312,6 +356,8 @@ class PlaylistManager:
             index = -1
         old_index = self.current_index
         self.current_index = index
+        if index >= 0 and index in self._shuffle_queue:
+            self._shuffle_queue.remove(index)
         if self._event_bus and old_index != index:
             self._event_bus.publish(
                 EventBus.CURRENT_INDEX_CHANGED,

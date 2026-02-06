@@ -355,7 +355,6 @@ class PlayerControls(Gtk.Box):
         # During drag: update display (labels) only; do not seek playback until drag ends
         if self._seek_state == SeekState.DRAGGING:
             self._value_changed_count += 1
-            self._ensure_duration()
             duration = self._last_duration
             if duration > 0:
                 scale_value = scale.get_value()

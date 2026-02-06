@@ -109,17 +109,8 @@ class PlaylistView(Gtk.Box):
         self._click_selected_index = -1
 
         # Playback state
-        self._playback_in_progress = False  # Guard to prevent concurrent playback
-        self._playback_lock = False  # Prevent concurrent play_track_at_index calls
-
-        # Single-tap behavior: True = single tap plays (after delay) or double-tap plays immediately
-        self._single_tap_plays = True
-
-        # Tap/double-tap detection state
-        self._tap_pending = False  # True when waiting for potential double-tap
-        self._tap_timeout_id = None  # GLib timeout source ID
-        self._pending_tap_index = -1  # Index of track for pending single-tap
-        self._double_tap_window = 300  # ms to wait for second tap
+        self._playback_in_progress = False
+        self._playback_lock = False
 
         # Drag-to-reorder state
         self._drag_mode = False  # True when long-press activated drag mode
@@ -391,8 +382,8 @@ class PlaylistView(Gtk.Box):
             self._update_view()
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
-        """Subscriber: current index changed → update selection."""
-        self._update_selection()
+        """Subscriber: current index changed → update selection and blinking (deferred to avoid GTK assertion)."""
+        GLib.idle_add(self._update_selection)
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:
         """Handle shuffle changed event - cache for get_shuffle_enabled()."""
@@ -416,22 +407,10 @@ class PlaylistView(Gtk.Box):
             self._chunked_update_id = None
         self._bulk_update_in_progress = False
         
-        # Save which row was selected so we can restore blink after repopulate (GTK assertion fix)
-        selection = self.tree_view.get_selection()
-        self._saved_selected_index = -1
-        if selection:
-            try:
-                model, tree_iter = selection.get_selected()
-                if tree_iter:
-                    path = model.get_path(tree_iter)
-                    if path and path.get_indices():
-                        self._saved_selected_index = path.get_indices()[0]
-            except (ValueError, AttributeError, RuntimeError):
-                pass
-            try:
-                selection.unselect_all()
-            except (ValueError, AttributeError, RuntimeError):
-                pass
+        try:
+            self.tree_view.get_selection().unselect_all()
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
         self._stop_blinking_highlight()
         
         # For large playlists, use chunked updates to avoid blocking UI
@@ -459,8 +438,7 @@ class PlaylistView(Gtk.Box):
                 self._bulk_update_in_progress = False
                 self._chunked_update_id = None
                 self._playback_lock = False
-                self._update_selection()
-                self._update_button_states()
+                GLib.idle_add(self._apply_selection_after_view_update)
         else:
             # For small playlists, update synchronously (fast enough)
             self.store.clear()
@@ -472,10 +450,15 @@ class PlaylistView(Gtk.Box):
                     self._format_duration(track.duration) if track.duration else "--:--"
                 )
                 self.store.append([i + 1, title, artist, duration])
-            self._update_selection()
-            # Update button states
-            self._update_button_states()
-    
+            # Defer selection/blink so we're not in same stack as store updates (avoids GTK assertion)
+            GLib.idle_add(self._apply_selection_after_view_update)
+
+    def _apply_selection_after_view_update(self) -> bool:
+        """Idle callback: update selection and blink after store repopulate (avoids GTK assertion)."""
+        self._update_selection()
+        self._update_button_states()
+        return False
+
     def _update_view_chunked(self, start_index: int, chunk_size: int = 100) -> bool:
         """
         Update tree view in chunks to avoid blocking UI.
@@ -543,130 +526,76 @@ class PlaylistView(Gtk.Box):
         return False  # Done
 
     def _update_selection(self, skip_scroll: bool = False):
-        """Update the selection to highlight current track or show blinking highlight.
-        
-        Args:
-            skip_scroll: If True, skip scrolling to current track (faster, use during drag operations)
+        """Update selection and blinking for current track. Event-driven (CURRENT_INDEX_CHANGED).
+        Current playing track always blinks; selection shows current track. All tree ops wrapped to avoid GTK assertion.
         """
-        # Skip selection updates during bulk updates (will be called after all chunks are done)
         if self._bulk_update_in_progress:
             return
-        selection = self.tree_view.get_selection()
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
+        selection = self.tree_view.get_selection()
 
-        # Get currently selected row (if any)
-        # Guard against invalid iters after store clear (GTK assertion)
-        model, tree_iter = selection.get_selected()
-        selected_path = None
-        selected_index = -1
-        if tree_iter:
+        def safe_select_path(path: Gtk.TreePath) -> None:
             try:
-                selected_path = model.get_path(tree_iter)
-                indices = selected_path.get_indices()
-                if indices:
-                    selected_index = indices[0]
-            except (ValueError, AttributeError, RuntimeError):
-                selected_index = -1
-        # Restore "other row selected" after repopulate so blink continues (used once per _update_view)
-        if selected_index < 0 and getattr(self, "_saved_selected_index", -1) >= 0:
-            saved = self._saved_selected_index
-            self._saved_selected_index = -1
-            if 0 <= saved < len(tracks):
-                selected_index = saved
-                selected_path = Gtk.TreePath.new_from_indices([saved])
+                selection.select_path(path)
+                self.tree_view.set_cursor(path, None, False)
+            except (ValueError, AttributeError, RuntimeError, AssertionError):
+                pass
 
-        # If current playing track is selected, show normal selection
-        if selected_index == current_index and current_index >= 0:
-            # Current track is selected - normal selection, no blinking
-            self._stop_blinking_highlight()
-            # Ensure it's selected in the selection model
-            path = Gtk.TreePath.new_from_indices([current_index])
-            selection.select_path(path)
-            self.tree_view.set_cursor(path, None, False)
-        elif (
-            current_index >= 0
-            and 0 <= current_index < len(tracks)
-            and selected_index >= 0
-            and selected_index != current_index
-        ):
-            # Another row is selected - show blinking blue highlight on current track
-            current_path = Gtk.TreePath.new_from_indices([current_index])
-            self._start_blinking_highlight(current_path)
+        def safe_scroll_to_cell(path: Gtk.TreePath) -> None:
+            try:
+                self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
+            except (ValueError, AttributeError, RuntimeError, AssertionError):
+                pass
 
-            # Keep the user's selection visible (selection model + cursor for _cell_data_func / _blink_toggle)
-            if selected_path is not None:
-                selection.select_path(selected_path)
-                self.tree_view.set_cursor(selected_path, None, False)
-        elif current_index >= 0 and 0 <= current_index < len(tracks):
-            # No other row selected - select current track normally
-            self._stop_blinking_highlight()
+        if current_index >= 0 and 0 <= current_index < len(tracks):
             path = Gtk.TreePath.new_from_indices([current_index])
-            selection.select_path(path)
-            self.tree_view.set_cursor(path, None, False)
+            self._start_blinking_highlight(path)
+            safe_select_path(path)
+            if not skip_scroll:
+                safe_scroll_to_cell(path)
         else:
-            # No current track - stop blinking
             self._stop_blinking_highlight()
-
-        # Scroll to current track if it exists (skip during drag operations for performance)
-        if not skip_scroll and 0 <= current_index < len(tracks):
-            path = Gtk.TreePath.new_from_indices([current_index])
-            self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
+            try:
+                selection.unselect_all()
+            except (ValueError, AttributeError, RuntimeError, AssertionError):
+                pass
 
     def _setup_blinking_highlight(self):
-        """Setup blinking highlight system."""
-        self._blink_path = None  # Track which path is blinking
-        self._saved_selected_index = -1  # Restore "other row selected" after store repopulate
+        """Setup blinking highlight for current playing track (event-driven via CURRENT_INDEX_CHANGED)."""
+        self._blink_path = None
 
     def _cell_data_func(self, column, cell, model, tree_iter, data):
-        """Cell data function to apply background color for current playing track."""
+        """Cell data function: drop target highlight, then current playing track (blinking), else normal."""
         try:
             path = model.get_path(tree_iter)
             indices = path.get_indices()
             if not indices:
                 return
             row_index = indices[0]
-            # Guard: row may not exist yet during chunked update
             if row_index < 0 or row_index >= len(self.store):
                 return
         except (ValueError, AttributeError, RuntimeError, AssertionError):
             return
 
-        # Get current playing index and selected index
-        # Guard against invalid iters after store clear (GTK assertion)
         current_index = self.playlist_manager.get_current_index()
-        selection = self.tree_view.get_selection()
-        model_sel, tree_iter_sel = selection.get_selected()
-        selected_index = -1
-        if tree_iter_sel:
-            try:
-                path_sel = model_sel.get_path(tree_iter_sel)
-                indices_sel = path_sel.get_indices()
-                if indices_sel:
-                    selected_index = indices_sel[0]
-            except (ValueError, AttributeError, RuntimeError):
-                selected_index = -1
 
-        # Apply background color based on state
         # Priority: drop target > current playing (blinking) > normal
-        # cell-background-set must be True for custom background to be used (GTK 3/4)
-        if self._drag_mode and row_index == self._drop_target_index and self._drop_target_index >= 0:
-            cell.set_property("cell-background-set", True)
-            cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.2, 0.2, 0.7))
-        elif (
-            row_index == current_index
-            and current_index >= 0
-            and selected_index != current_index
-            and selected_index >= 0
-        ):
-            cell.set_property("cell-background-set", True)
-            if self._blink_state:
-                cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.6))
+        try:
+            if self._drag_mode and row_index == self._drop_target_index and self._drop_target_index >= 0:
+                cell.set_property("cell-background-set", True)
+                cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.2, 0.2, 0.7))
+            elif row_index == current_index and current_index >= 0:
+                cell.set_property("cell-background-set", True)
+                if self._blink_state:
+                    cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.6))
+                else:
+                    cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.3))
             else:
-                cell.set_property("cell-background-rgba", Gdk.RGBA(0.2, 0.6, 0.9, 0.3))
-        else:
-            cell.set_property("cell-background-set", False)
-            cell.set_property("cell-background-rgba", Gdk.RGBA(0, 0, 0, 0))
+                cell.set_property("cell-background-set", False)
+                cell.set_property("cell-background-rgba", Gdk.RGBA(0, 0, 0, 0))
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
 
     def _start_blinking_highlight(self, path: Gtk.TreePath):
         """Start blinking highlight on the given path."""
@@ -677,10 +606,10 @@ class PlaylistView(Gtk.Box):
         self._blink_path = path
         self._blink_state = True
 
-        # Redraw so _cell_data_func runs with new _blink_state (not in model; queue_draw is required)
-        self.tree_view.queue_draw()
-
-        # Start timeout for blinking (1000ms interval - slower blink)
+        try:
+            self.tree_view.queue_draw()
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
         self._blink_timeout_id = GLib.timeout_add(1000, self._blink_toggle)
 
     def _stop_blinking_highlight(self):
@@ -693,44 +622,25 @@ class PlaylistView(Gtk.Box):
             self._blink_path = None
 
         self._blink_state = False
-        # Trigger redraw to clear highlight
-        self.tree_view.queue_draw()
+        try:
+            self.tree_view.queue_draw()
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
 
     def _blink_toggle(self):
-        """Toggle blink state - called by timeout."""
-        # Verify that we should still be blinking
-        # Guard against invalid iters after store clear (GTK assertion)
+        """Toggle blink state for current playing track (called by timeout)."""
         current_index = self.playlist_manager.get_current_index()
-        selection = self.tree_view.get_selection()
-        model_sel, tree_iter_sel = selection.get_selected()
-        selected_index = -1
-        if tree_iter_sel:
-            try:
-                path_sel = model_sel.get_path(tree_iter_sel)
-                indices_sel = path_sel.get_indices()
-                if indices_sel:
-                    selected_index = indices_sel[0]
-            except (ValueError, AttributeError, RuntimeError):
-                selected_index = -1
-        
-        # Check if we should still be blinking (current track exists and another row is selected)
-        if (
-            current_index >= 0
-            and 0 <= current_index < len(self.playlist_manager.get_playlist())
-            and selected_index >= 0
-            and selected_index != current_index
-        ):
-            # Update blink_path to current_index (in case it changed due to moves)
+        playlist = self.playlist_manager.get_playlist()
+        if current_index >= 0 and 0 <= current_index < len(playlist):
             self._blink_path = Gtk.TreePath.new_from_indices([current_index])
             self._blink_state = not self._blink_state
-
-            # Redraw so _cell_data_func runs with new _blink_state (not in model; queue_draw required)
-            self.tree_view.queue_draw()
-            return True  # Continue timeout
-        else:
-            # Conditions no longer met - stop blinking
-            self._stop_blinking_highlight()
-            return False  # Stop timeout
+            try:
+                self.tree_view.queue_draw()
+            except (ValueError, AttributeError, RuntimeError, AssertionError):
+                pass
+            return True
+        self._stop_blinking_highlight()
+        return False
 
     def _format_duration(self, seconds: float) -> str:
         """Format duration in seconds to MM:SS."""
@@ -748,33 +658,9 @@ class PlaylistView(Gtk.Box):
         self._playback_in_progress = False
         return False  # Don't repeat
 
-    def _cancel_tap_timeout(self):
-        """Cancel any pending single-tap timeout."""
-        if self._tap_timeout_id:
-            GLib.source_remove(self._tap_timeout_id)
-            self._tap_timeout_id = None
-        self._tap_pending = False
-        self._pending_tap_index = -1
-
-    def _on_single_tap_timeout(self):
-        """Execute single-tap playback after timeout (no double-tap detected)."""
-        self._tap_timeout_id = None
-        self._tap_pending = False
-        index = self._pending_tap_index
-        self._pending_tap_index = -1
-
-        if index >= 0 and not self._playback_lock:
-            playlist = self.playlist_manager.get_playlist()
-            if 0 <= index < len(playlist):
-                self.play_track_at_index(index)
-        return False  # Don't repeat
-
     def _on_row_activated(self, tree_view, path, column):
-        """Handle row activation (double-click or Enter key)."""
-        # Cancel any pending single-tap timeout to prevent double-play
-        self._cancel_tap_timeout()
-        
-        # Always use selection model to get the correct row (most reliable)
+        """Handle row activation (double-click or Enter key) - start playback."""
+        # Use selection model to get the correct row
         # First, ensure selection is set to the activated path
         selection = self.tree_view.get_selection()
         selection.select_path(path)
@@ -819,14 +705,12 @@ class PlaylistView(Gtk.Box):
             indices = path.get_indices()
             if indices:
                 self._click_selected_index = indices[0]
-                # Update selection model to match
                 selection = self.tree_view.get_selection()
-                selection.select_path(path)
-                # Set cursor to visually select the row
-                self.tree_view.set_cursor(path, None, False)
-                # Defer selection logic to next main-loop iteration so GTK has committed selection;
-                # skip_scroll=True keeps the clicked row in view instead of scrolling to current track
-                GLib.idle_add(lambda: self._update_selection(skip_scroll=True))
+                try:
+                    selection.select_path(path)
+                    self.tree_view.set_cursor(path, None, False)
+                except (ValueError, AttributeError, RuntimeError, AssertionError):
+                    pass
                 return
 
         self._click_selected_index = -1
@@ -1011,42 +895,11 @@ class PlaylistView(Gtk.Box):
         # Clear drop target highlight (will be cleared by _clear_drop_highlight, but ensure it's reset)
         self._drop_target_index = -1
 
-        # Determine what action to take based on time held and movement
-        tap_threshold = 200000  # 200ms in microseconds - quick tap
-        long_press_time = self._long_press_threshold  # 500ms
-        movement_threshold = 15  # pixels
+        # Determine what action to take: drag (reorder) or long-press (menu). Single-tap only selects (handled in _on_left_click_pressed).
+        long_press_time = self._long_press_threshold
+        movement_threshold = 15
 
-        if time_held < tap_threshold and movement < movement_threshold:
-            # Quick tap with minimal movement
-            # Always use selection model to get the correct row (most reliable)
-            selection = self.tree_view.get_selection()
-            model, tree_iter = selection.get_selected()
-            tap_index = source_idx  # Default to source_idx
-            
-            if tree_iter:
-                path = model.get_path(tree_iter)
-                indices = path.get_indices()
-                if indices:
-                    tap_index = indices[0]
-            
-            if tap_index >= 0 and not self._playback_lock:
-                playlist = self.playlist_manager.get_playlist()
-                if 0 <= tap_index < len(playlist):
-                    if self._single_tap_plays:
-                        if self._tap_pending and self._pending_tap_index == tap_index:
-                            # Second tap on same row - double-tap detected, play immediately
-                            self._cancel_tap_timeout()
-                            self.play_track_at_index(tap_index)
-                        else:
-                            # First tap - wait for potential second tap
-                            self._cancel_tap_timeout()  # Cancel any previous pending tap
-                            self._tap_pending = True
-                            self._pending_tap_index = tap_index
-                            self._tap_timeout_id = GLib.timeout_add(
-                                self._double_tap_window, self._on_single_tap_timeout
-                            )
-                    # else: single tap only selects (already selected by GTK)
-        elif was_drag_mode and movement >= movement_threshold:
+        if was_drag_mode and movement >= movement_threshold:
             # User dragged a track to reorder it
             # source_idx = where the track started
             # target_idx = where the user dropped it (calculated during drag)
@@ -1122,8 +975,7 @@ class PlaylistView(Gtk.Box):
                 except (ValueError, AttributeError, RuntimeError):
                     pass
         
-        # Restore selection to current playing track
-        self._update_selection()
+        GLib.idle_add(self._update_selection)
 
     def _get_playlist_index_at_position(self, x: float, y: float) -> int:
         """Return playlist row index at widget coordinates, or -1 if none."""
@@ -1444,11 +1296,6 @@ class PlaylistView(Gtk.Box):
         if self._blink_timeout_id is not None:
             GLib.source_remove(self._blink_timeout_id)
             self._blink_timeout_id = None
-        
-        # Cancel any pending tap timeout
-        if self._tap_timeout_id is not None:
-            GLib.source_remove(self._tap_timeout_id)
-            self._tap_timeout_id = None
         
         # Cancel any pending chunked update
         if self._chunked_update_id is not None:
