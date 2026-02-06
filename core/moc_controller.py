@@ -820,7 +820,11 @@ class MocController:
         start_playback: bool,
         on_done: Optional[Callable[[], None]] = None,
     ) -> None:
-        """Chunked sync for large playlists (100+). Calls on_done when finished; starts playback if requested."""
+        """Chunked sync for large playlists (100+). Calls on_done when finished; starts playback if requested.
+        
+        Uses a sync_id to prevent race conditions: if a new sync starts while an old one
+        is in progress, the old callbacks are ignored.
+        """
         if not self.is_available() or not tracks:
             if on_done:
                 on_done()
@@ -828,14 +832,25 @@ class MocController:
         self.ensure_server()
         self.write_m3u_playlist(tracks, current_index)
         self.clear_playlist()
+        
+        # Generate new sync ID to invalidate any in-progress syncs
+        sync_id = getattr(self, "_chunk_sync_id", 0) + 1
+        self._chunk_sync_id = sync_id
+        
         self._chunk_tracks = [(t, str(Path(t.file_path).resolve())) for t in tracks if t and t.file_path and Path(t.file_path).exists()]
         self._chunk_index = 0
         self._chunk_current_index = current_index
         self._chunk_start_playback = start_playback
         self._chunk_on_done = on_done
-        GLib.idle_add(self._chunked_append_next)
+        GLib.idle_add(self._chunked_append_next, sync_id)
 
-    def _chunked_append_next(self) -> bool:
+    def _chunked_append_next(self, sync_id: int) -> bool:
+        """Append next chunk of tracks. sync_id ensures stale callbacks are ignored."""
+        # Check if this callback is from an old sync (superseded by a new one)
+        if getattr(self, "_chunk_sync_id", 0) != sync_id:
+            logger.debug("Stale chunked sync callback ignored (sync_id %s != %s)", sync_id, self._chunk_sync_id)
+            return False  # Stale callback, ignore
+        
         CHUNK = 50
         if not getattr(self, "_chunk_tracks", None):
             return False
@@ -845,14 +860,17 @@ class MocController:
             self.append_track_file(abs_path)
         self._chunk_index = end
         if end < len(self._chunk_tracks):
-            GLib.idle_add(self._chunked_append_next)
+            GLib.idle_add(self._chunked_append_next, sync_id)
             return False
+        # All chunks done
         tracks = [t for t, _ in self._chunk_tracks]
         cur = self._chunk_current_index
         start = self._chunk_start_playback
         on_done = getattr(self, "_chunk_on_done", None)
         self._chunk_tracks = []
+        logger.debug("Chunked sync complete: %d tracks, cur=%d, start=%s", len(tracks), cur, start)
         if start and 0 <= cur < len(tracks) and tracks[cur].file_path:
+            logger.debug("Starting playback via play_file: %s", tracks[cur].file_path)
             self.play_file(str(Path(tracks[cur].file_path).resolve()))
         if on_done:
             on_done()

@@ -1136,12 +1136,21 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
 ```
 
 **Playlist data flow:**
-- **PlaylistManager** is the single source of truth for playlist; it subscribes to ADD_FOLDER, ACTION_MOVE, ACTION_REMOVE, ACTION_CLEAR_PLAYLIST, RELOAD_PLAYLIST_FROM_MOC and publishes PLAYLIST_CHANGED. **PlaylistView** publishes those actions (and set_playlist for replace); PlaybackController subscribes to PLAYLIST_CHANGED and syncs to MOC. Events drive view and playback; no central AppState.
+- **PlaylistManager** is the single source of truth for playlist; it subscribes to ADD_FOLDER, ACTION_MOVE, ACTION_REMOVE, ACTION_CLEAR_PLAYLIST, ACTION_REPLACE_PLAYLIST, RELOAD_PLAYLIST_FROM_MOC and publishes PLAYLIST_CHANGED, CURRENT_INDEX_CHANGED, TRACK_CHANGED, and PLAYBACK_STOP_REQUESTED (when current track is removed). Events drive view and playback; no central AppState.
 
 **Event bus flow (outline):**
-- **LibraryBrowser** "Add Folder" → publish ADD_FOLDER (tracks) → PlaylistManager adds, PlaylistView redraws via PLAYLIST_CHANGED, PlaybackController syncs to MOC. "Play Folder" → add folder then ACTION_PLAY.
+- **LibraryBrowser** "Add Folder" → publish ADD_FOLDER (tracks) → PlaylistManager adds, PlaylistView redraws via PLAYLIST_CHANGED, PlaybackController syncs to MOC. "Play Folder" → publish ACTION_REPLACE_PLAYLIST with start_playback=true → PlaylistManager replaces playlist, PlaybackController starts playback.
 - **PlayerControls** publishes Play/Pause/Next/Prev/Seek → PlaybackController subscribes and drives playback; PlayerControls/MetadataPanel/PlaylistView subscribe to playback/position/track events and update UI.
-- **PlaylistView** publishes Play (row activation: double-click/Enter), Move, Remove, Refresh, Clear → PlaylistManager subscribes and updates; MOC sync via PLAYLIST_CHANGED. The current playing track blinks (driven by CURRENT_INDEX_CHANGED); selection/blink updates are deferred to idle to avoid GTK assertion.
+- **PlaylistView** publishes ACTION_PLAY_TRACK (row activation), ACTION_MOVE, ACTION_REMOVE, ACTION_CLEAR_PLAYLIST, ACTION_REPLACE_PLAYLIST → PlaylistManager subscribes and updates; MOC sync via PLAYLIST_CHANGED. The current playing track blinks (driven by CURRENT_INDEX_CHANGED); selection/blink updates are deferred to idle to avoid GTK assertion.
+
+**Event architecture principles:**
+- **UI → Core**: UI components publish ACTION_* events (requests)
+- **Core → UI**: Core managers publish *_CHANGED events (notifications)
+- **Single source of mutation**: PlaybackController handles index changes for playback; PlaylistManager handles playlist content changes
+
+**Detailed event sequences:** See [docs/EVENT_SEQUENCES.md](docs/EVENT_SEQUENCES.md) for step-by-step diagrams of all major event flows including playlist replacement, MOC synchronization, and large playlist handling.
+
+**Race condition analysis:** See [docs/RACE_CONDITION_ANALYSIS.md](docs/RACE_CONDITION_ANALYSIS.md) for detailed analysis of potential race conditions, their mitigations, and recommendations.
 
 **Benefits:**
 - **No circular dependencies** - Components depend only on EventBus and script modules (PlaylistManager, PlaybackController)
@@ -1194,7 +1203,7 @@ The MOC (Music On Console) integration follows a simple, direct approach:
 - `set_playlist()` - Write playlist to M3U and optionally start playback
 - `toggle_shuffle()` / `disable_autonext()` / `enable_autonext()` - Control MOC features
 
-**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state. When you add many tracks (e.g. "play folder"), PLAYLIST_CHANGED and ACTION_SYNC_PLAYLIST_TO_MOC are coalesced into a single sync so MOC is only updated once. Playback is only started if the current track is still valid after sync (avoids "Cannot play - no valid track" and keeps UI and playback in sync when MOC takes longer to load). The Play button only switches to Pause when MOC actually starts playback (so the UI stays in sync if MOC fails to start).
+**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state. When you add many tracks (e.g. "play folder"), the MOC sync is triggered via PLAYLIST_CHANGED event. Playback is only started if the current track is still valid after sync (avoids "Cannot play - no valid track" and keeps UI and playback in sync when MOC takes longer to load). The Play button only switches to Pause when MOC actually starts playback (so the UI stays in sync if MOC fails to start).
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server
@@ -1305,7 +1314,7 @@ Fixed critical synchronization issues that caused the app to stop working when r
 
 - **Shuffle queue invalidation**: When removing tracks, the shuffle queue indices were not regenerated, causing invalid index references. Now `remove_track()` regenerates the shuffle queue.
 - **MOC sync race condition**: When modifying the playlist while a MOC sync was in progress, those changes were lost. Now tracks changes during sync and re-syncs automatically when the current sync completes.
-- **Double MOC sync on folder play**: When double-clicking a folder, both `PLAYLIST_CHANGED` and `ACTION_SYNC_PLAYLIST_TO_MOC` were scheduling separate syncs to MOC. Now both use the same coalescing mechanism (`_sync_idle_id`) to ensure only one sync runs.
+- **Double MOC sync on folder play**: Fixed by using a unified `ACTION_REPLACE_PLAYLIST` event with `start_playback=true`. PlaylistManager handles the playlist update, PlaybackController handles MOC sync via `PLAYLIST_CHANGED` and starts playback via `ACTION_REPLACE_PLAYLIST`.
 - **Playback stopping after start**: Fixed issue where `_pending_start_playback` was set even in the normal sync path, causing `on_done` to schedule a second `_load_and_play_current_track` which would stop the just-started MOC playback. Now `_pending_start_playback` is only set when sync is already in progress (re-sync path).
 - **Active backend not set on sync playback**: When playback was started via `_sync_moc_playlist` (double-click folder), `_active_backend` was never set to "moc". This caused `_poll_moc_status` to skip updating playback state (it checks `if _active_backend != "moc": return`). Now `_set_active_backend("moc")` is called when `should_start` is True.
 - **Removing current track**: When removing the currently playing track, playback now stops cleanly (publishes `ACTION_STOP`) instead of leaving the app in an inconsistent state where MOC plays one track but the UI shows another.
@@ -1345,6 +1354,11 @@ Fixed critical synchronization issues between tracks, playlist, playback state, 
 - **MPRIS2 Navigation Updates**: PlayerControls now subscribes to `PLAYLIST_CHANGED` events to update MPRIS2 navigation capabilities when playlist changes
 - **Track Change Flow**: Improved documentation and consistency in `PlaybackController` track change handling
 - **MOC Sync Race Condition Fix**: Fixed a race condition where `_active_backend` and `_moc_last_file` were set before MOC sync completed, causing polling to interfere with playback. These are now set in `on_done()` after sync completes. Additionally, re-sync logic now preserves the `start_playback` intent from the original sync request, ensuring playback starts correctly even when playlist changes occur during sync.
+- **Double-click folder during sync**: Fixed an issue where double-clicking a new folder while a large folder was syncing to MOC would replace the playlist but not start playback. The problem was that `_start_playback_after_replace` tried to play immediately, but the subsequent MOC sync (triggered by `PLAYLIST_CHANGED`) would clear the playlist and interrupt playback. Now in MOC mode, `ACTION_REPLACE_PLAYLIST` with `start_playback=true` sets `_pending_sync_start_playback` so the MOC sync starts playback when it completes, avoiding the race condition.
+- **Chunked sync superseding**: Added sync ID mechanism to `MocController.set_playlist_large` to prevent stale chunked sync callbacks from interfering when a new sync supersedes an in-progress one. When a re-sync starts, old callbacks are safely ignored based on their sync ID.
+- **MOC polling not updating UI**: Fixed an issue where `_poll_moc_status` would skip updates if `_active_backend` wasn't "moc", even when MOC was actively playing. Now the poll detects when MOC is playing/paused but `_active_backend` is "none" and automatically activates the MOC backend, ensuring UI updates resume.
+- **Poll-sync race condition**: Fixed a race condition where the poll could interfere during the gap between playlist change and MOC sync start. Now `_syncing_to_moc` is set to `True` immediately in `_on_action_replace_playlist` (not deferred), and `_poll_moc_status` checks this flag early and skips all state updates during sync to prevent UI flickering and state corruption.
+- **GTK assertion errors during large playlist load**: Fixed `gtk_tree_view_scroll_to_cell: assertion 'priv->tree != NULL'` and `gtk_css_node_insert_after` errors. The issue was `_update_selection` checking playlist length instead of store row count - during chunked updates the store may have fewer rows than the playlist. Now checks both `current_index < len(tracks)` AND `current_index < len(store)`.
 
 These fixes ensure that:
 - UI shows correct state on startup if a track is already playing

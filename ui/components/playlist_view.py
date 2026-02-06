@@ -200,23 +200,6 @@ class PlaylistView(Gtk.Box):
         """Get current shuffle state (cached from SHUFFLE_CHANGED)."""
         return self._shuffle_enabled
 
-
-    def set_playlist(self, tracks: List[TrackMetadata], current_index: int = -1):
-        """Replace playlist and index in one go. PlaylistManager publishes; view updates via PLAYLIST_CHANGED."""
-        self.playlist_manager.set_playlist(
-            tracks,
-            current_index if 0 <= current_index < len(tracks) else -1,
-        )
-
-    def set_current_index(self, index: int):
-        """Set the currently playing track index. PlaylistManager publishes; view updates via events."""
-        old_index = self.playlist_manager.get_current_index()
-        self.playlist_manager.set_current_index(index)
-        self._update_selection()
-        if old_index != index:
-            self.emit("current-index-changed", index)
-
-
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
         """Add a track - publish ADD_FOLDER; PlaylistManager subscribes; MOC sync via PLAYLIST_CHANGED."""
         self._events.publish(
@@ -265,31 +248,46 @@ class PlaylistView(Gtk.Box):
 
 
     def play_track_at_index(self, index: int) -> None:
-        """Play track at the given index - publishes action event."""
+        """Request playback of track at index - publishes action event only.
+        
+        Note: We do NOT call set_current_index here. PlaybackController is the
+        single source of state mutation - it will set the index when handling
+        ACTION_PLAY_TRACK. View updates via CURRENT_INDEX_CHANGED event.
+        """
         if self._playback_lock:
             return
         playlist = self.playlist_manager.get_playlist()
         if not 0 <= index < len(playlist):
             return
         self._playback_lock = True
-        self.playlist_manager.set_current_index(index)
+        # Don't mutate state - let controller handle it
         self._events.publish(EventBus.ACTION_PLAY_TRACK, {"index": index})
         self.emit("track-activated", index)
         GLib.timeout_add(500, self._release_playback_lock)
 
     def replace_and_play_track(self, track: TrackMetadata) -> None:
-        """Replace playlist with single track and play it."""
-        # Use set_playlist for atomic update (triggers PLAYLIST_CHANGED event)
-        self.set_playlist([track], 0)
-        # play_track_at_index will set the index and publish action
-        self.play_track_at_index(0)
+        """Replace playlist with single track and play it.
+        
+        Publishes ACTION_REPLACE_PLAYLIST with start_playback=True.
+        PlaylistManager handles the playlist update, PlaybackController handles playback.
+        """
+        self._events.publish(EventBus.ACTION_REPLACE_PLAYLIST, {
+            "tracks": [track],
+            "current_index": 0,
+            "start_playback": True,
+        })
 
     def replace_and_play_album(self, tracks: List[TrackMetadata]) -> None:
-        """Replace playlist with album tracks and play first track."""
-        # Use set_playlist for atomic update (triggers PLAYLIST_CHANGED event)
-        self.set_playlist(tracks, 0)
-        # play_track_at_index will set the index and publish action
-        self.play_track_at_index(0)
+        """Replace playlist with album tracks and play first track.
+        
+        Publishes ACTION_REPLACE_PLAYLIST with start_playback=True.
+        PlaylistManager handles the playlist update, PlaybackController handles playback.
+        """
+        self._events.publish(EventBus.ACTION_REPLACE_PLAYLIST, {
+            "tracks": tracks,
+            "current_index": 0,
+            "start_playback": True,
+        })
 
     def add_folder(self, folder_path: str) -> None:
         """
@@ -324,14 +322,11 @@ class PlaylistView(Gtk.Box):
                 self.add_tracks(tracks)
 
     def replace_and_play_folder(self, folder_path: str) -> None:
-        """
-        Replace playlist with folder contents and play first track.
+        """Replace playlist with folder contents and play first track.
 
-        Defers heavy work (scan + set_playlist + play) to idle so the UI stays
-        responsive and we avoid GTK assertion from updating the tree in the same stack.
-
-        When MOC is active: syncs playlist to MOC and starts playback there.
-        Otherwise: sets internal playlist and plays via internal player.
+        Defers track collection to idle to keep UI responsive.
+        Uses ACTION_REPLACE_PLAYLIST event - PlaylistManager handles playlist,
+        PlaybackController handles MOC sync and playback.
         """
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
@@ -341,7 +336,7 @@ class PlaylistView(Gtk.Box):
         GLib.idle_add(self._do_replace_and_play_folder, str(folder.resolve()))
 
     def _do_replace_and_play_folder(self, folder_path: str) -> bool:
-        """Idle callback: collect tracks, set playlist, trigger playback."""
+        """Idle callback: collect tracks and publish ACTION_REPLACE_PLAYLIST."""
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return False
@@ -351,13 +346,12 @@ class PlaylistView(Gtk.Box):
         tracks.sort(key=lambda t: t.file_path)
         if not tracks:
             return False
-        self.set_playlist(tracks, 0)
-        if self._use_moc:
-            self._events.publish(
-                EventBus.ACTION_SYNC_PLAYLIST_TO_MOC, {"start_playback": True}
-            )
-        else:
-            self.play_track_at_index(0)
+        # Use unified event - PlaylistManager updates playlist, PlaybackController handles playback
+        self._events.publish(EventBus.ACTION_REPLACE_PLAYLIST, {
+            "tracks": tracks,
+            "current_index": 0,
+            "start_playback": True,
+        })
         return False  # one-shot idle
 
 
@@ -534,6 +528,9 @@ class PlaylistView(Gtk.Box):
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
         selection = self.tree_view.get_selection()
+        
+        # Get actual store row count - may differ from playlist during chunked updates
+        store_row_count = len(self.store)
 
         def safe_select_path(path: Gtk.TreePath) -> None:
             try:
@@ -548,7 +545,9 @@ class PlaylistView(Gtk.Box):
             except (ValueError, AttributeError, RuntimeError, AssertionError):
                 pass
 
-        if current_index >= 0 and 0 <= current_index < len(tracks):
+        # Check both playlist length AND store row count to avoid GTK assertion
+        # (store may have fewer rows during chunked updates)
+        if current_index >= 0 and current_index < len(tracks) and current_index < store_row_count:
             path = Gtk.TreePath.new_from_indices([current_index])
             self._start_blinking_highlight(path)
             safe_select_path(path)

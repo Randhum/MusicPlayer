@@ -6,21 +6,38 @@ logger = get_logger(__name__)
 
 
 class EventBus:
-    """Publish-subscribe event system. Components publish/subscribe without knowing each other."""
+    """Publish-subscribe event system. Components publish/subscribe without knowing each other.
 
+    Event Flow Architecture:
+    - UI components (PlaylistView, PlayerControls, LibraryBrowser) publish ACTION_* events (requests)
+    - Core managers (PlaylistManager, PlaybackController) publish *_CHANGED events (notifications)
+    - This separation ensures clear data flow: UI -> Core -> UI
+    """
+
+    # =========================================================================
+    # Core -> UI: State Change Notifications
+    # Published by PlaybackController, PlaylistManager, BluetoothManager, etc.
+    # =========================================================================
+
+    # Playback state (published by PlaybackController)
     PLAYBACK_STARTED = "playback.started"
     PLAYBACK_PAUSED = "playback.paused"
     PLAYBACK_STOPPED = "playback.stopped"
-    TRACK_CHANGED = "track.changed"
+    PLAYBACK_STOP_REQUESTED = "playback.stop_requested"  # Request stop (e.g., current track removed)
     POSITION_CHANGED = "position.changed"
     DURATION_CHANGED = "duration.changed"
-    PLAYLIST_CHANGED = "playlist.changed"
-    CURRENT_INDEX_CHANGED = "playlist.current_index_changed"
-    RELOAD_PLAYLIST_FROM_MOC = "playlist.reload_from_moc"
     SHUFFLE_CHANGED = "playback.shuffle_changed"
     LOOP_MODE_CHANGED = "playback.loop_mode_changed"
     AUTONEXT_CHANGED = "playback.autonext_changed"
     ACTIVE_BACKEND_CHANGED = "playback.active_backend_changed"
+    VOLUME_CHANGED = "volume.changed"
+
+    # Playlist state (published by PlaylistManager)
+    PLAYLIST_CHANGED = "playlist.changed"
+    CURRENT_INDEX_CHANGED = "playlist.current_index_changed"
+    TRACK_CHANGED = "track.changed"
+
+    # Bluetooth state (published by BluetoothManager/BluetoothSink)
     BT_DEVICE_CONNECTED = "bluetooth.device_connected"
     BT_DEVICE_DISCONNECTED = "bluetooth.device_disconnected"
     BT_DEVICE_ADDED = "bluetooth.device_added"
@@ -28,7 +45,13 @@ class EventBus:
     BT_SINK_ENABLED = "bluetooth.sink_enabled"
     BT_SINK_DISABLED = "bluetooth.sink_disabled"
     BT_SINK_DEVICE_CONNECTED = "bluetooth.sink_device_connected"
-    VOLUME_CHANGED = "volume.changed"
+
+    # =========================================================================
+    # UI -> Core: Action Requests
+    # Published by PlaylistView, PlayerControls, LibraryBrowser
+    # =========================================================================
+
+    # Playback control actions (handled by PlaybackController)
     ACTION_PLAY = "action.play"
     ACTION_PAUSE = "action.pause"
     ACTION_STOP = "action.stop"
@@ -40,12 +63,20 @@ class EventBus:
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
     ACTION_REFRESH_MOC = "action.refresh_moc"
-    ACTION_SYNC_PLAYLIST_TO_MOC = "action.sync_playlist_to_moc"
     ACTION_APPEND_FOLDER = "action.append_folder"
+
+    # Playlist modification actions (handled by PlaylistManager)
+    ACTION_REPLACE_PLAYLIST = "action.replace_playlist"  # Replace entire playlist
     ADD_FOLDER = "playlist.add_folder"
     ACTION_MOVE = "action.move"
     ACTION_REMOVE = "action.remove"
     ACTION_CLEAR_PLAYLIST = "action.clear_playlist"
+
+    # =========================================================================
+    # Internal: Core -> Core
+    # Used for internal coordination between core components
+    # =========================================================================
+    RELOAD_PLAYLIST_FROM_MOC = "playlist.reload_from_moc"
 
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Any], None]]] = {}

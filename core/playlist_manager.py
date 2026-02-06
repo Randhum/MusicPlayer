@@ -55,6 +55,7 @@ class PlaylistManager:
             self._event_bus.subscribe(EventBus.ACTION_MOVE, self._on_action_move)
             self._event_bus.subscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
             self._event_bus.subscribe(EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist)
+            self._event_bus.subscribe(EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist)
 
     def set_moc_playlist_provider(
         self,
@@ -132,6 +133,29 @@ class PlaylistManager:
     def _on_action_clear_playlist(self, data: Optional[dict]) -> None:
         """Subscriber: ACTION_CLEAR_PLAYLIST → clear."""
         self.clear()
+
+    def _on_action_replace_playlist(self, data: Optional[dict]) -> None:
+        """Subscriber: ACTION_REPLACE_PLAYLIST → replace entire playlist.
+        
+        Data fields:
+            tracks: List of TrackMetadata (or dicts) to set as new playlist
+            current_index: Index to set as current (default 0)
+            start_playback: If True, caller expects playback to start (handled by PlaybackController)
+        """
+        if not data:
+            return
+        tracks = data.get("tracks", [])
+        if not isinstance(tracks, list):
+            return
+        # Convert dicts to TrackMetadata if needed
+        track_list = []
+        for t in tracks:
+            if isinstance(t, TrackMetadata):
+                track_list.append(t)
+            elif isinstance(t, dict):
+                track_list.append(TrackMetadata.from_dict(t))
+        current_index = data.get("current_index", 0) if track_list else -1
+        self.set_playlist(track_list, current_index)
 
     def set_playlist(
         self, tracks: List[TrackMetadata], current_index: int = -1
@@ -266,9 +290,11 @@ class PlaylistManager:
             # When removing the current track, reset index and stop playback
             self.current_index = -1
         if self._event_bus:
-            # If we removed the currently playing track, stop playback first
+            # If we removed the currently playing track, request playback stop
+            # Note: We publish a state event (PLAYBACK_STOP_REQUESTED), not an action event
+            # Managers should not publish ACTION_* events - those flow from UI to Core
             if removed_current:
-                self._event_bus.publish(EventBus.ACTION_STOP)
+                self._event_bus.publish(EventBus.PLAYBACK_STOP_REQUESTED, {"reason": "current_track_removed"})
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
