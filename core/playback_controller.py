@@ -262,7 +262,6 @@ class PlaybackController:
             logger.warning("Cannot play - file does not exist: %s", track.file_path)
             return False
         self._user_action_time = time.time()
-        self._stop_inactive_backends()
         if self._should_use_moc(track):
             self._play_with_moc(track)
         else:
@@ -348,10 +347,14 @@ class PlaybackController:
         elif active_backend == "internal":
             self._internal_player.stop()
 
+        # Reset operation state to prevent stuck SEEKING state
+        self._operation_state = OperationState.IDLE
+        
         # Batch state updates to avoid intermediate inconsistent states
         # Order: backend -> index -> playback state -> timeline
         self._set_active_backend("none")
         self._internal_last_file = None  # clear so same_track check is correct after stop
+        self._moc_last_file = None  # also clear MOC last file
         self._playlist.set_current_index(-1)  # This also clears current_track
         self._set_playback_state(PlaybackState.STOPPED)
         # Reset timeline to 00:00
@@ -401,6 +404,9 @@ class PlaybackController:
             self._seek_moc(clamped)
         elif active_backend == "internal":
             self._internal_player.seek(clamped)
+            GLib.timeout_add(100, self._reset_seek_state)
+        else:
+            # No active backend - still reset seek state to avoid getting stuck
             GLib.timeout_add(100, self._reset_seek_state)
 
     def _on_action_play_track(self, data: Optional[Dict[str, Any]]) -> None:
@@ -518,13 +524,18 @@ class PlaybackController:
         if not self._use_moc:
             return
 
-        # CRITICAL: Set _moc_last_file FIRST so track-end detection works
-        # Without this, file_path == _moc_last_file is always False
+        # Reset operation state to prevent stuck states
+        self._operation_state = OperationState.IDLE
+
+        # Stop internal player if it's playing (prevents dual playback)
+        if self._internal_player.is_playing or self._internal_player.current_track:
+            self._internal_player.stop()
+
+        # Set _moc_last_file for track-end detection
         if track and track.file_path:
             self._moc_last_file = str(Path(track.file_path).resolve())
 
-        # Set state before playing - set_current_index will update current_track automatically
-        # Find track index in playlist to avoid duplicate track updates
+        # Find track index in playlist
         playlist = self._playlist.get_playlist()
         track_index = -1
         for idx, t in enumerate(playlist):
@@ -532,32 +543,37 @@ class PlaybackController:
                 track_index = idx
                 break
         
-        # Set backend first, then index (which updates track), then playback state
+        # Set backend and index
         self._set_active_backend("moc")
         if track_index >= 0:
-            # Track is in playlist - use set_current_index to update both index and track atomically
-            # This ensures consistent state: index and track are updated together, and events are published correctly
             self._playlist.set_current_index(track_index)
         else:
-            # Track not in playlist - set index to -1 (rare case, e.g., playing external file)
-            # Note: TRACK_CHANGED not published here - PlaylistManager is the sole publisher
-            # Track info is still available via PLAYBACK_STATE_CHANGED event
             self._playlist.set_current_index(-1)
 
-        # Just play the file - MOC's --playit will add it to playlist if needed
-        # Only set PLAYING if MOC actually starts (avoids UI showing play when MOC didn't start)
+        # Play the file
         if track and track.file_path:
             if not self._moc_controller.play_file(track.file_path):
                 return
+        
+        # Reset progress immediately so UI doesn't show stale values
+        self._set_position(0.0)
+        if track.duration:
+            self._set_duration(track.duration)
         self._set_playback_state(PlaybackState.PLAYING)
 
     def _play_with_internal(self, track: TrackMetadata) -> None:
         """Play track using internal player."""
+        # Reset operation state to prevent stuck states
+        self._operation_state = OperationState.IDLE
+
+        # Stop MOC if it was the active backend (prevents dual playback)
+        if self._use_moc and self._active_backend == "moc":
+            self._moc_controller.stop()
+        
         self._internal_player.load_track(track)
         self._internal_player.play()
 
-        # Set state in proper order: backend -> track/index -> playback state -> duration
-        # Find track index in playlist to avoid duplicate track updates
+        # Find track index in playlist
         playlist = self._playlist.get_playlist()
         track_index = -1
         for idx, t in enumerate(playlist):
@@ -569,16 +585,12 @@ class PlaybackController:
         if track and track.file_path:
             self._internal_last_file = str(Path(track.file_path).resolve())
         if track_index >= 0:
-            # Track is in playlist - use set_current_index to update both index and track atomically
-            # This ensures consistent state: index and track are updated together, and events are published correctly
             self._playlist.set_current_index(track_index)
         else:
-            # Track not in playlist - set index to -1 (rare case, e.g., playing external file)
-            # Note: TRACK_CHANGED not published here - PlaylistManager is the sole publisher
-            # Track info is still available via PLAYBACK_STATE_CHANGED event
             self._playlist.set_current_index(-1)
 
-        # Update duration from track metadata before setting playback state
+        # Reset progress immediately so UI doesn't show stale values
+        self._set_position(0.0)
         if track.duration:
             self._set_duration(track.duration)
         
@@ -652,15 +664,16 @@ class PlaybackController:
         playlist = self._playlist.get_playlist()
         current_index = self._playlist.get_current_index()
         track = self._playlist.get_current_track()
-        # Only start via MOC if track is audio (not video)
-        should_start = start_playback and track and not is_video_file(track.file_path)
+        # Only tell MOC to start if track is audio (not video)
+        # But preserve the original start_playback intent for on_done handling
+        moc_should_start = start_playback and track and not is_video_file(track.file_path)
         
         self._syncing_to_moc = True
         self._recent_moc_write = time.time()
 
         def on_done():
-            logger.debug("MOC sync on_done: playlist_changed=%s, should_start=%s, pending_start=%s",
-                         self._playlist_changed_during_sync, should_start, self._pending_start_playback)
+            logger.debug("MOC sync on_done: playlist_changed=%s, moc_should_start=%s, start_playback=%s, pending_start=%s",
+                         self._playlist_changed_during_sync, moc_should_start, start_playback, self._pending_start_playback)
             self._syncing_to_moc = False
             self._recent_moc_write = time.time()
             
@@ -675,28 +688,30 @@ class PlaybackController:
             # Check if re-sync needed (playlist changed during sync)
             if self._playlist_changed_during_sync:
                 self._playlist_changed_during_sync = False
-                re_sync_start = should_start or self._pending_start_playback
+                # Use original start_playback intent, not moc_should_start
+                re_sync_start = start_playback or self._pending_start_playback
                 self._pending_start_playback = False
                 logger.debug("Re-syncing after playlist changed during sync, start=%s", re_sync_start)
                 GLib.idle_add(self._sync_moc_playlist, re_sync_start)
                 return
             
-            # Handle playback start
-            effective_start = should_start or self._pending_start_playback
+            # Handle playback start - use original start_playback intent
+            # This ensures video files also get played via internal player
+            effective_start = start_playback or self._pending_start_playback
             self._pending_start_playback = False
             
             if effective_start:
                 t = self._playlist.get_current_track()
                 if t and t.file_path:
                     logger.debug("MOC sync complete, starting playback: %s", t.file_path)
-                    self._set_active_backend("moc")
-                    self._moc_last_file = str(Path(t.file_path).resolve())
-                    # If track is video, use internal player instead
+                    # If track is video, use internal player; otherwise MOC already started
                     if not self._should_use_moc(t):
                         self._play_with_internal(t)
                     else:
                         # MOC already started playback - set state immediately so UI updates
                         # without waiting for next poll cycle
+                        self._set_active_backend("moc")
+                        self._moc_last_file = str(Path(t.file_path).resolve())
                         self._set_playback_state(PlaybackState.PLAYING)
                         self._set_position(0.0)
                         if t.duration:
@@ -705,11 +720,11 @@ class PlaybackController:
         try:
             if len(playlist) >= 100:
                 self._moc_controller.set_playlist_large(
-                    playlist, current_index, should_start, on_done=on_done
+                    playlist, current_index, moc_should_start, on_done=on_done
                 )
             else:
                 self._moc_controller.set_playlist(
-                    playlist, current_index, start_playback=should_start
+                    playlist, current_index, start_playback=moc_should_start
                 )
                 on_done()
         except Exception as e:

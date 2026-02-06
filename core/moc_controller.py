@@ -851,29 +851,37 @@ class MocController:
             logger.debug("Stale chunked sync callback ignored (sync_id %s != %s)", sync_id, self._chunk_sync_id)
             return False  # Stale callback, ignore
         
-        CHUNK = 50
-        if not getattr(self, "_chunk_tracks", None):
-            return False
-        end = min(self._chunk_index + CHUNK, len(self._chunk_tracks))
-        for i in range(self._chunk_index, end):
-            _, abs_path = self._chunk_tracks[i]
-            self.append_track_file(abs_path)
-        self._chunk_index = end
-        if end < len(self._chunk_tracks):
-            GLib.idle_add(self._chunked_append_next, sync_id)
-            return False
-        # All chunks done
-        tracks = [t for t, _ in self._chunk_tracks]
-        cur = self._chunk_current_index
-        start = self._chunk_start_playback
-        on_done = getattr(self, "_chunk_on_done", None)
-        self._chunk_tracks = []
-        logger.debug("Chunked sync complete: %d tracks, cur=%d, start=%s", len(tracks), cur, start)
-        if start and 0 <= cur < len(tracks) and tracks[cur].file_path:
-            logger.debug("Starting playback via play_file: %s", tracks[cur].file_path)
-            self.play_file(str(Path(tracks[cur].file_path).resolve()))
-        if on_done:
-            on_done()
+        try:
+            CHUNK = 50
+            if not getattr(self, "_chunk_tracks", None):
+                return False
+            end = min(self._chunk_index + CHUNK, len(self._chunk_tracks))
+            for i in range(self._chunk_index, end):
+                _, abs_path = self._chunk_tracks[i]
+                self.append_track_file(abs_path)
+            self._chunk_index = end
+            if end < len(self._chunk_tracks):
+                GLib.idle_add(self._chunked_append_next, sync_id)
+                return False
+            # All chunks done
+            tracks = [t for t, _ in self._chunk_tracks]
+            cur = self._chunk_current_index
+            start = self._chunk_start_playback
+            on_done = getattr(self, "_chunk_on_done", None)
+            self._chunk_tracks = []
+            logger.debug("Chunked sync complete: %d tracks, cur=%d, start=%s", len(tracks), cur, start)
+            if start and 0 <= cur < len(tracks) and tracks[cur].file_path:
+                logger.debug("Starting playback via play_file: %s", tracks[cur].file_path)
+                self.play_file(str(Path(tracks[cur].file_path).resolve()))
+            if on_done:
+                on_done()
+        except Exception as e:
+            logger.error("Chunked sync error: %s", e)
+            # Always call on_done to avoid leaving sync state stuck
+            on_done = getattr(self, "_chunk_on_done", None)
+            self._chunk_tracks = []
+            if on_done:
+                on_done()
         return False
 
     def play_file(self, file_path: str) -> bool:
