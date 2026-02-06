@@ -1,0 +1,935 @@
+"""MOC (Music On Console) integration via mocp CLI: playlist, playback, status."""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import gi
+
+gi.require_version("GLib", "2.0")
+from gi.repository import GLib
+from core.config import get_config
+from core.logging import get_logger
+from core.metadata import TrackMetadata
+
+logger = get_logger(__name__)
+
+
+class MocController:
+    """Wrapper around mocp for playlist and playback control."""
+
+    def __init__(self):
+        self._mocp_path: Optional[str] = shutil.which("mocp")
+        # Get playlist path from config
+        config = get_config()
+        self._playlist_path: Path = config.moc_playlist_path
+
+        # Simple server state tracking
+        self._server_connected: bool = False
+
+        # Simple status caching to reduce MOC server load
+        self._status_cache: Optional[Dict] = None
+        self._status_cache_time: float = 0.0
+        self._status_cache_ttl: float = 0.2  # Cache for 200ms
+
+    def is_available(self) -> bool:
+        return self._mocp_path is not None
+
+    def _run(
+        self, *args: str, capture_output: bool = False
+    ) -> subprocess.CompletedProcess:
+        if not self._mocp_path:
+            return subprocess.CompletedProcess(
+                args=["mocp", *args], returncode=127, stdout="", stderr="mocp not found"
+            )
+
+        cmd = [self._mocp_path, *args]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=capture_output,
+                text=True,
+                check=False,
+                timeout=5.0,
+            )
+
+            # Handle server connection errors gracefully
+            if result.returncode != 0 and result.stderr:
+                stderr_lower = result.stderr.lower()
+                if any(
+                    msg in stderr_lower
+                    for msg in [
+                        "server is not running",
+                        "can't receive value",
+                        "can't connect",
+                    ]
+                ):
+                    self._server_connected = False
+                    self._status_cache = None
+                    return subprocess.CompletedProcess(
+                        args=cmd, returncode=125, stdout="", stderr=""
+                    )
+
+            # Clear cache on commands that change state
+            if "--info" not in args and "--server" not in args:
+                self._status_cache = None
+            return result
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=124, stdout="", stderr="Command timed out"
+            )
+        except Exception as e:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr=str(e)
+            )
+
+    def ensure_server(self) -> bool:
+        if not self.is_available():
+            return False
+
+        if self._server_connected:
+            return True
+
+        # Attempt to start server
+        result = self._run("--server", capture_output=True)
+        if result.returncode == 0:
+            # Wait for server to be fully ready by polling --info
+            # This ensures we don't send commands before server is accepting them
+            for _ in range(10):  # Try up to 10 times (1 second total)
+                time.sleep(0.1)
+                test_result = subprocess.run(
+                    [self._mocp_path, "--info"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+                if test_result.returncode == 0:
+                    self._server_connected = True
+                    return True
+            # Server started but not responding - consider it failed
+            logger.warning("MOC server started but not responding to --info")
+            return False
+
+        return False
+
+    def get_playlist(
+        self, current_file: Optional[str] = None
+    ) -> Tuple[List[TrackMetadata], int]:
+        """
+        Read MOC's current playlist from M3U file and return (tracks, current_index).
+
+        current_index is -1 if there is no active track.
+
+        Args:
+            current_file: Optional file path of current track. If not provided,
+                         will be fetched from status. Pass this to avoid redundant status call.
+        """
+        tracks: List[TrackMetadata] = []
+        current_index = -1
+
+        # Parse M3U file using the standard parser
+        parsed_tracks = self._parse_m3u_playlist()
+
+        # Convert to TrackMetadata objects, using EXTINF metadata if available
+        for _, extinf_line, file_path in parsed_tracks:
+            # Resolve path (handle both absolute and relative paths)
+            path_obj = Path(file_path)
+            resolved_path = None
+
+            if path_obj.is_absolute():
+                # Try as-is first
+                if path_obj.exists():
+                    resolved_path = path_obj
+                else:
+                    # Try resolving (handles symlinks, ~, etc.)
+                    try:
+                        resolved = path_obj.resolve()
+                        if resolved.exists():
+                            resolved_path = resolved
+                    except (OSError, RuntimeError):
+                        pass
+            else:
+                # Relative path - try relative to playlist file directory
+                playlist_dir = self._playlist_path.parent
+                potential_path = playlist_dir / path_obj
+                if potential_path.exists():
+                    resolved_path = potential_path
+                else:
+                    # Try relative to current working directory
+                    try:
+                        potential_path = Path.cwd() / path_obj
+                        if potential_path.exists():
+                            resolved_path = potential_path
+                    except OSError:
+                        pass
+
+                    # Last resort: try resolving (might expand ~, etc.)
+                    if resolved_path is None:
+                        try:
+                            resolved = path_obj.resolve()
+                            if resolved.exists():
+                                resolved_path = resolved
+                        except (OSError, RuntimeError):
+                            pass
+
+            # Only include files that actually exist
+            if resolved_path and resolved_path.exists():
+                # Create TrackMetadata from resolved path
+                # This extracts metadata directly from the file (same as internal tracks)
+                # We don't override with EXTINF metadata to match internal behavior
+                metadata = TrackMetadata(str(resolved_path))
+                tracks.append(metadata)
+            else:
+                # Log when we skip a track due to missing file (debug level to avoid spam)
+                logger.debug(
+                    "Skipping track in M3U - file does not exist: %s", file_path
+                )
+
+        # Find current track index
+        if current_file is None:
+            status = self.get_status()
+            current_file = status.get("file_path") if status else None
+
+        if current_file:
+            # Normalize paths for comparison
+            current_file_resolved = str(Path(current_file).resolve())
+            for idx, track in enumerate(tracks):
+                track_path_resolved = str(Path(track.file_path).resolve())
+                if track_path_resolved == current_file_resolved:
+                    current_index = idx
+                    break
+
+        return tracks, current_index
+
+    def get_status(self, force_refresh: bool = False) -> Optional[Dict]:
+        """
+        Get current MOC status (state, file, position, duration, volume).
+
+        Uses caching to reduce server load. Set force_refresh=True to bypass cache.
+
+        Returns None if status can't be read.
+        """
+        if not self.is_available():
+            return None
+
+        # Check cache first (unless forced refresh)
+        current_time = time.time()
+        if not force_refresh and self._status_cache is not None:
+            if current_time - self._status_cache_time < self._status_cache_ttl:
+                return self._status_cache
+
+        if not self.ensure_server():
+            self._status_cache = None
+            return None
+
+        result = self._run("--info", capture_output=True)
+        if result.returncode != 0 or not result.stdout:
+            self._status_cache = None
+            return None
+
+        info: Dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            info[key.strip()] = value.strip()
+
+        state = info.get("State", "").upper() or "STOP"
+        file_path = info.get("File")
+
+        def _parse_float(value: Optional[str]) -> float:
+            if not value:
+                return 0.0
+            try:
+                return float(value)
+            except ValueError:
+                return 0.0
+
+        # MOC outputs position and duration in seconds
+        # Try both "CurrentSec" and "CurrentTime" (in case format varies)
+        position = _parse_float(info.get("CurrentSec"))
+        if position == 0.0:
+            # Fallback: try parsing from "CurrentTime" format (MM:SS)
+            current_time_str = info.get("CurrentTime", "")
+            if current_time_str and ":" in current_time_str:
+                try:
+                    parts = current_time_str.split(":")
+                    if len(parts) == 2:
+                        position = float(parts[0]) * 60 + float(parts[1])
+                except (ValueError, IndexError):
+                    pass
+
+        duration = _parse_float(info.get("TotalSec"))
+        if duration == 0.0:
+            # Fallback: try parsing from "TotalTime" format (MM:SS)
+            total_time_str = info.get("TotalTime", "")
+            if total_time_str and ":" in total_time_str:
+                try:
+                    parts = total_time_str.split(":")
+                    if len(parts) == 2:
+                        duration = float(parts[0]) * 60 + float(parts[1])
+                except (ValueError, IndexError):
+                    pass
+
+        # Volume comes as e.g. "75%"
+        vol_str = info.get("Volume", "").strip()
+        volume = 1.0
+        if vol_str.endswith("%"):
+            vol_str = vol_str[:-1].strip()
+        try:
+            vol_percent = int(vol_str)
+            volume = max(0.0, min(1.0, vol_percent / 100.0))
+        except ValueError:
+            pass
+
+        # Parse shuffle, autonext, and repeat state from info
+        shuffle = info.get("Shuffle", "").strip().upper() == "ON"
+        autonext = info.get("Autonext", "").strip().upper() == "ON"
+        repeat = info.get("Repeat", "").strip().upper() == "ON"
+
+        status = {
+            "state": state,  # PLAY, PAUSE, STOP
+            "file_path": file_path,
+            "position": position,
+            "duration": duration,
+            "volume": volume,
+            "shuffle": shuffle,
+            "autonext": autonext,
+            "repeat": repeat,
+        }
+
+        # Update cache
+        self._status_cache = status
+        self._status_cache_time = current_time
+
+        return status
+
+    def play(self):
+        """Start / resume playback.
+
+        Uses --toggle-pause for simplicity - this handles both paused and stopped states.
+        - If paused: resumes from current position
+        - If stopped: starts playing from current playlist position
+        - If playing: does nothing harmful (toggles to pause then back)
+
+        For starting from the first track, use play_first() instead.
+        """
+        if not self.is_available():
+            return
+        self.ensure_server()
+        # Use --toggle-pause which handles both resume and play scenarios
+        # This is simpler than checking state first
+        status = self.get_status(force_refresh=False)
+        if status:
+            state = status.get("state", "STOP")
+            if state == "PAUSE":
+                # Resume from pause position
+                self._run("--unpause", capture_output=False)
+            elif state == "STOP":
+                # Start playing from first item (or current position if set)
+                self._run("--play", capture_output=False)
+            # If already playing, do nothing
+
+    def play_first(self):
+        """Start playing from the first item on the playlist."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--play", capture_output=False)
+
+    def pause(self):
+        """Pause playback."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--pause")
+
+    def toggle_pause(self):
+        """Toggle between playing and paused states."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--toggle-pause")
+
+    def stop(self):
+        """Stop playback."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--stop")
+
+    def shutdown(self):
+        """Completely stop the MOC server (equivalent to `mocp --exit`)."""
+        if not self.is_available():
+            return
+        # Don't call ensure_server() - if server isn't running, nothing to shut down
+        self._run("--exit")
+        self._server_connected = False
+        self._status_cache = None
+
+    def next(self):
+        """Skip to next track."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--next")
+
+    def previous(self):
+        """Go back to previous track."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--previous")
+
+    def sync_playlist(self) -> bool:
+        """
+        Trigger MOC to sync its playlist to disk.
+
+        This briefly connects to MOC with --sync and immediately sends 'q' to detach.
+        The connection triggers MOC to write its in-memory playlist to the M3U file.
+        Playback is not interrupted.
+
+        Waits for the file to actually be written before returning.
+
+        Returns:
+            True if sync was successful, False otherwise.
+        """
+        if not self.is_available():
+            return False
+        if not self.ensure_server():
+            return False
+
+        try:
+            # Run mocp --sync and immediately send 'q' to detach
+            # This triggers playlist sync without stopping playback
+            proc = subprocess.Popen(
+                [self._mocp_path, "--sync"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            proc.communicate(input="q\n", timeout=3.0)
+            if proc.returncode != 0:
+                return False
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning("Failed to sync MOC playlist: %s", e)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+
+        # Wait for file to be written (MOC writes asynchronously)
+        if self._playlist_path.exists():
+            initial_mtime = self._playlist_path.stat().st_mtime
+        else:
+            initial_mtime = 0
+
+        # Poll for file update (up to 1 second)
+        for _ in range(10):
+            time.sleep(0.1)
+            if self._playlist_path.exists():
+                current_mtime = self._playlist_path.stat().st_mtime
+                if current_mtime > initial_mtime:
+                    return True  # File was updated
+
+        # If file doesn't exist yet, wait for it to be created
+        if not self._playlist_path.exists():
+            for _ in range(10):
+                time.sleep(0.1)
+                if self._playlist_path.exists():
+                    return True
+
+        # Assume success even if we can't detect change (file might already be up to date)
+        return True
+
+    def jump_to_index(self, index: int, start_playback: bool = False):
+        """
+        Jump to a specific track index in MOC's playlist.
+
+        Note: MOC doesn't have a direct "jump to index" command, so this reads
+        the playlist and uses play_file() on the track at that index.
+        Prefer using play_file() directly when you have the file path.
+
+        Args:
+            index: Index of track to jump to (0-based)
+            start_playback: If True, start playback after jumping
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_available():
+            return False
+
+        # Read playlist and get track at index
+        tracks, _ = self.get_playlist()
+        if not (0 <= index < len(tracks)):
+            logger.warning(
+                "Index %d out of range (playlist has %d tracks)", index, len(tracks)
+            )
+            return False
+
+        track = tracks[index]
+        if not track or not track.file_path:
+            logger.warning("Track at index %d has no file path", index)
+            return False
+
+        # Use play_file() which uses --playit
+        if start_playback:
+            self.play_file(track.file_path)
+            return True
+        else:
+            # If not starting playback, we can't really "jump" without playing
+            # Just return True as there's nothing to do
+            logger.debug(
+                "jump_to_index called with start_playback=False - no action taken"
+            )
+            return True
+
+    def set_volume(self, volume: float):
+        """Set volume as a float 0.0–1.0."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        vol_percent = int(max(0.0, min(1.0, volume)) * 100)
+        self._run("--volume", str(vol_percent))
+
+    def seek_relative(self, delta_seconds: float):
+        """
+        Seek relatively by delta in seconds (positive or negative).
+
+        MOC uses `--seek N` for relative seek in seconds. Uses round() so
+        e.g. 0.5s rounds to 1s and small drags still seek.
+        """
+        if not self.is_available():
+            return
+        seconds = round(delta_seconds)
+        if seconds == 0:
+            return
+        self.ensure_server()
+        self._run("--seek", str(seconds))
+
+    def set_autonext(self, enabled: bool) -> None:
+        """Enable or disable autonext (autoplay) in MOC."""
+        if not self.is_available() or not self.ensure_server():
+            return
+        self._run("--on=autonext" if enabled else "--off=autonext")
+
+    def set_shuffle(self, enabled: bool) -> None:
+        """Enable or disable shuffle in MOC."""
+        if not self.is_available() or not self.ensure_server():
+            return
+        self._run("--on=shuffle" if enabled else "--off=shuffle")
+
+    def set_repeat(self, enabled: bool) -> None:
+        """Enable or disable repeat in MOC."""
+        if not self.is_available() or not self.ensure_server():
+            return
+        self._run("--on=repeat" if enabled else "--off=repeat")
+
+    def get_shuffle_state(self) -> Optional[bool]:
+        """Get current shuffle state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("shuffle", False)
+        return None
+
+    def get_autonext_state(self) -> Optional[bool]:
+        """Get current autonext state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("autonext", False)
+        return None
+
+    def get_repeat_state(self) -> Optional[bool]:
+        """Get current repeat state from MOC. Returns None if unavailable."""
+        status = self.get_status()
+        if status:
+            return status.get("repeat", False)
+        return None
+
+    def _parse_m3u_playlist(self) -> List[Tuple[int, Optional[str], str]]:
+        """
+        Parse M3U playlist file following the standard format.
+
+        M3U format uses pairs:
+        - #EXTINF:duration,title (metadata line)
+        - /path/to/file (file path line)
+
+        Returns:
+            List of tuples: (track_index, extinf_line, file_path)
+            - track_index: 0-based index of the track
+            - extinf_line: The EXTINF metadata line (without newline), or None if missing
+            - file_path: The file path line (without newline)
+        """
+        tracks = []
+        if not self._playlist_path.exists():
+            return tracks
+
+        try:
+            with self._playlist_path.open("r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+
+            i = 0
+            track_index = 0
+            while i < len(lines):
+                line = lines[i].rstrip("\n\r")
+                stripped = line.strip()
+
+                # Skip empty lines and header
+                if not stripped or stripped == "#EXTM3U":
+                    i += 1
+                    continue
+
+                # Check if this is an EXTINF line
+                if stripped.startswith("#EXTINF:"):
+                    extinf_line = stripped
+                    # Next line should be the file path
+                    if i + 1 < len(lines):
+                        file_path = lines[i + 1].rstrip("\n\r").strip()
+                        if file_path and not file_path.startswith("#"):
+                            tracks.append((track_index, extinf_line, file_path))
+                            track_index += 1
+                            i += 2  # Skip both EXTINF and file path lines
+                            continue
+
+                # If no EXTINF, treat as plain file path
+                if not stripped.startswith("#"):
+                    tracks.append((track_index, None, stripped))
+                    track_index += 1
+
+                i += 1
+        except Exception as e:
+            logger.error("Error parsing M3U file: %s", e, exc_info=True)
+
+        return tracks
+
+    def _extinf_to_metadata(self, extinf_line: str) -> Dict[str, Any]:
+        """Parse EXTINF line to extract metadata.
+
+        Format: #EXTINF:duration,title - artist
+        Returns dict with duration, title, artist (or None if parsing fails)
+        """
+        try:
+            # Remove #EXTINF: prefix
+            if not extinf_line.startswith("#EXTINF:"):
+                return {}
+            content = extinf_line[8:].strip()  # Remove "#EXTINF:"
+
+            # Find comma separator
+            if "," not in content:
+                return {}
+
+            duration_str, rest = content.split(",", 1)
+            duration = (
+                int(duration_str) if duration_str and duration_str != "-1" else None
+            )
+
+            # Parse "title - artist" format
+            title = rest
+            artist = None
+            if " - " in rest:
+                parts = rest.split(" - ", 1)
+                title = parts[0].strip()
+                artist = parts[1].strip() if len(parts) > 1 else None
+
+            result = {}
+            if duration is not None:
+                result["duration"] = float(duration)
+            if title:
+                result["title"] = title
+            if artist:
+                result["artist"] = artist
+            return result
+        except Exception:
+            return {}
+
+    def write_m3u_playlist(
+        self, tracks: List[TrackMetadata], current_index: int = -1
+    ) -> bool:
+        """
+        Write M3U playlist file directly with all tracks.
+
+        This is much faster than sequential --append commands for large playlists.
+
+        Args:
+            tracks: List of tracks to write to the playlist file
+            current_index: Current track index (for future use)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_available():
+            return False
+
+        try:
+            # Ensure playlist directory exists
+            self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Build list of valid tracks with absolute paths
+            valid_tracks = []
+            for track in tracks:
+                if not track or not track.file_path:
+                    continue
+                file_path = Path(track.file_path)
+                if not file_path.exists() or not file_path.is_file():
+                    logger.warning("Track file does not exist: %s", track.file_path)
+                    continue
+                abs_path = str(file_path.resolve())
+                valid_tracks.append((track, abs_path))
+
+            # Write M3U file
+            with self._playlist_path.open("w", encoding="utf-8") as f:
+                # Write header
+                f.write("#EXTM3U\n")
+
+                # Write each track
+                for track, abs_path in valid_tracks:
+                    # Format EXTINF line: #EXTINF:duration,title - artist
+                    duration = int(track.duration) if track.duration else -1
+                    title = track.title or Path(track.file_path).stem
+                    artist = track.artist or "Unknown Artist"
+                    extinf_line = f"#EXTINF:{duration},{title} - {artist}\n"
+
+                    f.write(extinf_line)
+                    f.write(f"{abs_path}\n")
+
+            logger.debug("Wrote M3U playlist file with %d tracks", len(valid_tracks))
+            return True
+
+        except Exception as e:
+            logger.error("Failed to write M3U playlist file: %s", e, exc_info=True)
+            return False
+
+    def clear_playlist(self):
+        """Clear MOC's playlist using native command."""
+        if not self.is_available():
+            return
+        self.ensure_server()
+        self._run("--clear")
+
+    def append_to_playlist(self, path: str) -> bool:
+        """
+        Append a file or directory to MOC's playlist using native command.
+        MOC will recursively add all tracks if a directory is given.
+
+        Args:
+            path: Path to the file or directory to add.
+
+        Returns:
+            True if successful.
+        """
+        if not self.is_available():
+            return False
+        if not path:
+            return False
+
+        p = Path(path)
+        if not p.exists():
+            logger.warning("Cannot append - path does not exist: %s", path)
+            return False
+
+        self.ensure_server()
+        abs_path = str(p.resolve())
+        result = self._run("--append", abs_path, capture_output=True)
+        return result.returncode == 0
+
+    def append_track_file(self, file_path: str) -> bool:
+        """
+        Append a single track file to MOC's playlist.
+
+        Args:
+            file_path: Absolute path to the track file.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if not self.is_available():
+            return False
+        if not file_path:
+            return False
+
+        self.ensure_server()
+        result = self._run("--append", file_path, capture_output=True)
+        return result.returncode == 0
+
+    def set_playlist(
+        self,
+        tracks: List[TrackMetadata],
+        current_index: int = -1,
+        start_playback: bool = False,
+    ):
+        """
+        Replace MOC's playlist with the given tracks using native MOC commands.
+
+        Note: For large playlists (100+ tracks), PlaybackController uses chunked sync
+        instead of calling this method directly. This method is used for small playlists.
+
+        Args:
+            tracks: List of tracks to become the new playlist.
+            current_index: Index of the track that should start playing (if start_playback is True).
+            start_playback: If True and current_index is valid, start playback of that track.
+        """
+        if not self.is_available():
+            return
+
+        self.ensure_server()
+
+        # Build list of valid tracks
+        valid_tracks = []
+        original_to_valid_index = {}
+
+        for orig_idx, track in enumerate(tracks):
+            if not track or not track.file_path:
+                continue
+            file_path = Path(track.file_path)
+            if not file_path.exists() or not file_path.is_file():
+                logger.warning("Track file does not exist: %s", track.file_path)
+                continue
+            abs_path = str(file_path.resolve())
+            original_to_valid_index[orig_idx] = len(valid_tracks)
+            valid_tracks.append((track, abs_path))
+
+        # Clear current playlist
+        self.clear_playlist()
+
+        # Append all tracks using native MOC command
+        # Note: For large playlists, chunked sync in PlaybackController handles this
+        # more efficiently. This method is used for small playlists (<100 tracks).
+        for track, abs_path in valid_tracks:
+            self._run("--append", abs_path)
+
+        # Start playback if requested
+        if start_playback:
+            valid_index = (
+                original_to_valid_index.get(current_index, -1)
+                if 0 <= current_index < len(tracks)
+                else -1
+            )
+            if 0 <= valid_index < len(valid_tracks):
+                track, abs_path = valid_tracks[valid_index]
+                if abs_path:
+                    self.play_file(abs_path)
+
+    def set_playlist_large(
+        self,
+        tracks: List[TrackMetadata],
+        current_index: int,
+        start_playback: bool,
+        on_done: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Chunked sync for large playlists (100+). Calls on_done when finished; starts playback if requested.
+
+        Uses a sync_id to prevent race conditions: if a new sync starts while an old one
+        is in progress, the old callbacks are ignored.
+        """
+        if not self.is_available() or not tracks:
+            if on_done:
+                on_done()
+            return
+        self.ensure_server()
+        self.write_m3u_playlist(tracks, current_index)
+        self.clear_playlist()
+
+        # Generate new sync ID to invalidate any in-progress syncs
+        sync_id = getattr(self, "_chunk_sync_id", 0) + 1
+        self._chunk_sync_id = sync_id
+
+        self._chunk_tracks = [
+            (t, str(Path(t.file_path).resolve()))
+            for t in tracks
+            if t and t.file_path and Path(t.file_path).exists()
+        ]
+        self._chunk_index = 0
+        self._chunk_current_index = current_index
+        self._chunk_start_playback = start_playback
+        self._chunk_on_done = on_done
+        GLib.idle_add(self._chunked_append_next, sync_id)
+
+    def _chunked_append_next(self, sync_id: int) -> bool:
+        """Append next chunk of tracks. sync_id ensures stale callbacks are ignored."""
+        # Check if this callback is from an old sync (superseded by a new one)
+        if getattr(self, "_chunk_sync_id", 0) != sync_id:
+            logger.debug(
+                "Stale chunked sync callback ignored (sync_id %s != %s)",
+                sync_id,
+                self._chunk_sync_id,
+            )
+            return False  # Stale callback, ignore
+
+        try:
+            CHUNK = 50
+            if not getattr(self, "_chunk_tracks", None):
+                return False
+            end = min(self._chunk_index + CHUNK, len(self._chunk_tracks))
+            for i in range(self._chunk_index, end):
+                _, abs_path = self._chunk_tracks[i]
+                self.append_track_file(abs_path)
+            self._chunk_index = end
+            if end < len(self._chunk_tracks):
+                GLib.idle_add(self._chunked_append_next, sync_id)
+                return False
+            # All chunks done
+            tracks = [t for t, _ in self._chunk_tracks]
+            cur = self._chunk_current_index
+            start = self._chunk_start_playback
+            on_done = getattr(self, "_chunk_on_done", None)
+            self._chunk_tracks = []
+            logger.debug(
+                "Chunked sync complete: %d tracks, cur=%d, start=%s",
+                len(tracks),
+                cur,
+                start,
+            )
+            if start and 0 <= cur < len(tracks) and tracks[cur].file_path:
+                logger.debug(
+                    "Starting playback via play_file: %s", tracks[cur].file_path
+                )
+                self.play_file(str(Path(tracks[cur].file_path).resolve()))
+            if on_done:
+                on_done()
+        except Exception as e:
+            logger.error("Chunked sync error: %s", e)
+            # Always call on_done to avoid leaving sync state stuck
+            on_done = getattr(self, "_chunk_on_done", None)
+            self._chunk_tracks = []
+            if on_done:
+                on_done()
+        return False
+
+    def play_file(self, file_path: str) -> bool:
+        """
+        Play a specific file via MOC, keeping the playlist intact.
+
+        Returns:
+            True if playback was successfully initiated, False otherwise.
+        """
+        if not self.is_available():
+            return False
+        if not file_path:
+            logger.error("Cannot play file - file path is empty")
+            return False
+
+        # Validate file exists
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            logger.error("Cannot play file - file does not exist: %s", file_path)
+            return False
+
+        if not self.ensure_server():
+            return False
+
+        abs_path = str(path.resolve())
+        result = self._run("--playit", abs_path, capture_output=True)
+        if result.returncode != 0:
+            logger.error("Failed to play file: %s", abs_path)
+            if result.stderr:
+                logger.debug("MOC error: %s", result.stderr)
+            return False
+
+        return True
