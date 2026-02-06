@@ -1,11 +1,14 @@
 """Playback controller - routes playback to MOC, internal player, BT sink."""
+
 import time
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Any
+
 if TYPE_CHECKING:
     from core.playlist_manager import PlaylistManager
 import gi
+
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib
 from core.audio_player import AudioPlayer
@@ -88,8 +91,12 @@ class PlaybackController:
         self._loading_from_moc: bool = False
         # MOC sync state - simplified: only track if syncing and if re-sync needed
         self._syncing_to_moc: bool = False
-        self._pending_start_playback: bool = False  # Start playback after current sync completes
-        self._playlist_changed_during_sync: bool = False  # Re-sync needed after current sync
+        self._pending_start_playback: bool = (
+            False  # Start playback after current sync completes
+        )
+        self._playlist_changed_during_sync: bool = (
+            False  # Re-sync needed after current sync
+        )
         self._user_action_time: float = 0.0
         self._startup_complete: bool = False
 
@@ -142,16 +149,18 @@ class PlaybackController:
         # Start internal player polling
         GLib.timeout_add(500, self._poll_internal_player_status)  # 500ms interval
 
-
     def _set_playback_state(self, state: PlaybackState) -> None:
         old = self._playback_state
         self._playback_state = state
         # Publish unified state change event (replaces PLAYBACK_STARTED, PLAYBACK_PAUSED, PLAYBACK_STOPPED)
         if state == PlaybackState.PLAYING and old != PlaybackState.PLAYING:
-            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {
-                "state": "playing",
-                "track": self._playlist.get_current_track(),
-            })
+            self._events.publish(
+                EventBus.PLAYBACK_STATE_CHANGED,
+                {
+                    "state": "playing",
+                    "track": self._playlist.get_current_track(),
+                },
+            )
         elif state == PlaybackState.PAUSED and old == PlaybackState.PLAYING:
             self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "paused"})
         elif state == PlaybackState.STOPPED and old != PlaybackState.STOPPED:
@@ -296,9 +305,8 @@ class PlaybackController:
             if active_backend == "moc"
             else (self._internal_last_file if active_backend == "internal" else None)
         )
-        same_track = (
+        same_track = playing_file and normalize_path(track.file_path) == normalize_path(
             playing_file
-            and normalize_path(track.file_path) == normalize_path(playing_file)
         )
         # Resume
         if same_track:
@@ -349,11 +357,13 @@ class PlaybackController:
 
         # Reset operation state to prevent stuck SEEKING state
         self._operation_state = OperationState.IDLE
-        
+
         # Batch state updates to avoid intermediate inconsistent states
         # Order: backend -> index -> playback state -> timeline
         self._set_active_backend("none")
-        self._internal_last_file = None  # clear so same_track check is correct after stop
+        self._internal_last_file = (
+            None  # clear so same_track check is correct after stop
+        )
         self._moc_last_file = None  # also clear MOC last file
         self._playlist.set_current_index(-1)  # This also clears current_track
         self._set_playback_state(PlaybackState.STOPPED)
@@ -411,7 +421,7 @@ class PlaybackController:
 
     def _on_action_play_track(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle play specific track: set index and load/play.
-        
+
         Note: PlaylistView publishes this event but does NOT set the index.
         Controller is the single source of state mutation via PlaylistManager.
         """
@@ -429,7 +439,7 @@ class PlaybackController:
 
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle playlist changes - sync to MOC and optionally start playback.
-        
+
         This is the single handler for all playlist modifications. The event data
         contains all needed information including start_playback intent.
         """
@@ -441,11 +451,15 @@ class PlaybackController:
         # Skip if we're loading from MOC (avoid sync loop)
         if self._loading_from_moc:
             return
-        
+
         start_playback = data.get("start_playback", False)
-        logger.debug("PLAYLIST_CHANGED: start_playback=%s, use_moc=%s, syncing=%s",
-                     start_playback, self._use_moc, self._syncing_to_moc)
-        
+        logger.debug(
+            "PLAYLIST_CHANGED: start_playback=%s, use_moc=%s, syncing=%s",
+            start_playback,
+            self._use_moc,
+            self._syncing_to_moc,
+        )
+
         if self._use_moc:
             if self._syncing_to_moc:
                 # Sync in progress - mark for re-sync and preserve playback intent
@@ -491,7 +505,9 @@ class PlaybackController:
         # LOOP_TRACK (1) and LOOP_PLAYLIST (2) both map to repeat=on
         # LOOP_FORWARD (0) maps to repeat=off
         if self._use_moc:
-            self._moc_controller.set_repeat(mode in (1, 2))  # LOOP_TRACK or LOOP_PLAYLIST
+            self._moc_controller.set_repeat(
+                mode in (1, 2)
+            )  # LOOP_TRACK or LOOP_PLAYLIST
             self._recent_repeat_write = time.time()
 
     def _on_action_set_volume(self, data: Optional[Dict[str, Any]]) -> None:
@@ -542,7 +558,7 @@ class PlaybackController:
             if t.file_path == track.file_path:
                 track_index = idx
                 break
-        
+
         # Set backend and index
         self._set_active_backend("moc")
         if track_index >= 0:
@@ -554,7 +570,7 @@ class PlaybackController:
         if track and track.file_path:
             if not self._moc_controller.play_file(track.file_path):
                 return
-        
+
         # Reset progress immediately so UI doesn't show stale values
         self._set_position(0.0)
         if track.duration:
@@ -569,7 +585,7 @@ class PlaybackController:
         # Stop MOC if it was the active backend (prevents dual playback)
         if self._use_moc and self._active_backend == "moc":
             self._moc_controller.stop()
-        
+
         self._internal_player.load_track(track)
         self._internal_player.play()
 
@@ -580,7 +596,7 @@ class PlaybackController:
             if t.file_path == track.file_path:
                 track_index = idx
                 break
-        
+
         self._set_active_backend("internal")
         if track and track.file_path:
             self._internal_last_file = str(Path(track.file_path).resolve())
@@ -593,7 +609,7 @@ class PlaybackController:
         self._set_position(0.0)
         if track.duration:
             self._set_duration(track.duration)
-        
+
         self._set_playback_state(PlaybackState.PLAYING)
 
     def _seek_moc(self, position: float) -> None:
@@ -644,10 +660,10 @@ class PlaybackController:
 
     def _sync_moc_playlist(self, start_playback: bool = False) -> bool:
         """Sync current playlist to MOC and optionally start playback.
-        
+
         Args:
             start_playback: If True, start playing the current track after sync.
-        
+
         If called while already syncing, marks for re-sync after current sync completes.
         """
         if not self._use_moc:
@@ -660,23 +676,30 @@ class PlaybackController:
             if start_playback:
                 self._pending_start_playback = True
             return False
-        
+
         playlist = self._playlist.get_playlist()
         current_index = self._playlist.get_current_index()
         track = self._playlist.get_current_track()
         # Only tell MOC to start if track is audio (not video)
         # But preserve the original start_playback intent for on_done handling
-        moc_should_start = start_playback and track and not is_video_file(track.file_path)
-        
+        moc_should_start = (
+            start_playback and track and not is_video_file(track.file_path)
+        )
+
         self._syncing_to_moc = True
         self._recent_moc_write = time.time()
 
         def on_done():
-            logger.debug("MOC sync on_done: playlist_changed=%s, moc_should_start=%s, start_playback=%s, pending_start=%s",
-                         self._playlist_changed_during_sync, moc_should_start, start_playback, self._pending_start_playback)
+            logger.debug(
+                "MOC sync on_done: playlist_changed=%s, moc_should_start=%s, start_playback=%s, pending_start=%s",
+                self._playlist_changed_during_sync,
+                moc_should_start,
+                start_playback,
+                self._pending_start_playback,
+            )
             self._syncing_to_moc = False
             self._recent_moc_write = time.time()
-            
+
             # Update mtime
             try:
                 config = get_config()
@@ -684,26 +707,31 @@ class PlaybackController:
                     self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
             except OSError:
                 pass
-            
+
             # Check if re-sync needed (playlist changed during sync)
             if self._playlist_changed_during_sync:
                 self._playlist_changed_during_sync = False
                 # Use original start_playback intent, not moc_should_start
                 re_sync_start = start_playback or self._pending_start_playback
                 self._pending_start_playback = False
-                logger.debug("Re-syncing after playlist changed during sync, start=%s", re_sync_start)
+                logger.debug(
+                    "Re-syncing after playlist changed during sync, start=%s",
+                    re_sync_start,
+                )
                 GLib.idle_add(self._sync_moc_playlist, re_sync_start)
                 return
-            
+
             # Handle playback start - use original start_playback intent
             # This ensures video files also get played via internal player
             effective_start = start_playback or self._pending_start_playback
             self._pending_start_playback = False
-            
+
             if effective_start:
                 t = self._playlist.get_current_track()
                 if t and t.file_path:
-                    logger.debug("MOC sync complete, starting playback: %s", t.file_path)
+                    logger.debug(
+                        "MOC sync complete, starting playback: %s", t.file_path
+                    )
                     # If track is video, use internal player; otherwise MOC already started
                     if not self._should_use_moc(t):
                         self._play_with_internal(t)
@@ -814,7 +842,9 @@ class PlaybackController:
         # If MOC is playing/paused but backend is "none", activate MOC as backend
         # This handles: MOC started externally, or sync completed without start_playback
         if self._active_backend == "none" and moc_state in ("PLAY", "PAUSE"):
-            logger.debug("MOC is %s but backend is 'none', activating MOC backend", moc_state)
+            logger.debug(
+                "MOC is %s but backend is 'none', activating MOC backend", moc_state
+            )
             self._set_active_backend("moc")
             file_path = status.get("file_path")
             if file_path:
@@ -948,12 +978,15 @@ class PlaybackController:
                 recent_write = self._recent_moc_write and (
                     time.time() - self._recent_moc_write < RECENT_WRITE_WINDOW
                 )
-                if not recent_write and self._startup_complete and not self._syncing_to_moc:
+                if (
+                    not recent_write
+                    and self._startup_complete
+                    and not self._syncing_to_moc
+                ):
                     self._reload_playlist_from_moc()
                 self._moc_playlist_mtime = mtime
         except OSError:
             pass
-
 
     def _on_bt_sink_enabled(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle BT sink enabled."""
@@ -1032,16 +1065,21 @@ class PlaybackController:
             EventBus.PLAYBACK_PROGRESS,
             {"position": self._position, "duration": self._duration},
         )
-        self._events.publish(EventBus.SHUFFLE_CHANGED, {"enabled": self._shuffle_enabled})
+        self._events.publish(
+            EventBus.SHUFFLE_CHANGED, {"enabled": self._shuffle_enabled}
+        )
         self._events.publish(EventBus.LOOP_MODE_CHANGED, {"mode": self._loop_mode})
         self._events.publish(EventBus.VOLUME_CHANGED, {"volume": self._volume})
         # Note: ACTIVE_BACKEND_CHANGED publish removed (no subscribers)
         # Unified playback state event
         if self._playback_state == PlaybackState.PLAYING:
-            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {
-                "state": "playing",
-                "track": self._playlist.get_current_track(),
-            })
+            self._events.publish(
+                EventBus.PLAYBACK_STATE_CHANGED,
+                {
+                    "state": "playing",
+                    "track": self._playlist.get_current_track(),
+                },
+            )
         elif self._playback_state == PlaybackState.PAUSED:
             self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "paused"})
         else:

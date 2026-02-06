@@ -71,7 +71,9 @@ class PlayerControls(Gtk.Box):
         self._create_ui()
 
         # Subscribe to state events (unified playback state and progress events)
-        self._events.subscribe(EventBus.PLAYBACK_STATE_CHANGED, self._on_playback_state_changed)
+        self._events.subscribe(
+            EventBus.PLAYBACK_STATE_CHANGED, self._on_playback_state_changed
+        )
         self._events.subscribe(EventBus.PLAYBACK_PROGRESS, self._on_playback_progress)
         self._events.subscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
         self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
@@ -366,11 +368,7 @@ class PlayerControls(Gtk.Box):
             duration = self._last_duration
             scale_value = self.progress_scale.get_value()
             # Position from scale; when duration is 0 use 0 so controller can still update state
-            pos = (
-                (scale_value / 100.0) * duration
-                if duration > 0
-                else 0.0
-            )
+            pos = (scale_value / 100.0) * duration if duration > 0 else 0.0
             # Always update labels to reflect the drag
             self.update_time_labels(pos, duration if duration > 0 else 0.0)
 
@@ -470,7 +468,7 @@ class PlayerControls(Gtk.Box):
 
     def _on_playback_state_changed(self, data: Optional[dict]) -> None:
         """Handle unified playback state change event.
-        
+
         Data: {"state": "playing"|"paused"|"stopped", "track": TrackMetadata?}
         """
         if not data:
@@ -490,7 +488,7 @@ class PlayerControls(Gtk.Box):
 
     def _on_playback_progress(self, data: Optional[dict]) -> None:
         """Handle unified playback progress event - position and duration.
-        
+
         Data: {"position": float, "duration": float}
         """
         if not data:
@@ -553,9 +551,7 @@ class PlayerControls(Gtk.Box):
             return
         n = self._playlist_length
         idx = self._current_index
-        self.mpris2.update_can_go_next(
-            n > 0 and (self._shuffle_enabled or idx < n - 1)
-        )
+        self.mpris2.update_can_go_next(n > 0 and (self._shuffle_enabled or idx < n - 1))
         self.mpris2.update_can_go_previous(idx > 0)
 
     def _setup_mpris2(self) -> None:
@@ -596,7 +592,7 @@ class PlayerControls(Gtk.Box):
         if self._drag_timeout_id is not None:
             GLib.source_remove(self._drag_timeout_id)
             self._drag_timeout_id = None
-        
+
         if self.system_volume:
             self.system_volume.cleanup()
         if self.mpris2:

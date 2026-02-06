@@ -1,4 +1,5 @@
 """Linux-native logging: file + stderr, XDG data dir, MUSICPLAYER_DEBUG for level."""
+
 import logging
 import logging.handlers
 import os
@@ -15,10 +16,15 @@ class LinuxLogger:
         if LinuxLogger._initialized:
             return
         self.logger = logging.getLogger("musicplayer")
-        self.logger.setLevel(logging.DEBUG if os.getenv("MUSICPLAYER_DEBUG") else logging.INFO)
+        self.logger.setLevel(
+            logging.DEBUG if os.getenv("MUSICPLAYER_DEBUG") else logging.INFO
+        )
         if self.logger.handlers:
             return
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        fmt = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
         console = logging.StreamHandler(sys.stderr)
         console.setLevel(logging.WARNING)
         console.setFormatter(fmt)
@@ -27,7 +33,9 @@ class LinuxLogger:
             xdg = os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share")
             log_dir = Path(xdg) / "musicplayer" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.handlers.RotatingFileHandler(log_dir / "musicplayer.log", maxBytes=10 * 1024 * 1024, backupCount=5)
+        fh = logging.handlers.RotatingFileHandler(
+            log_dir / "musicplayer.log", maxBytes=10 * 1024 * 1024, backupCount=5
+        )
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         self.logger.addHandler(fh)
@@ -37,7 +45,11 @@ class LinuxLogger:
     def get_logger(cls, name: str = "musicplayer") -> logging.Logger:
         if cls._instance is None:
             cls._instance = cls()
-        return cls._instance.logger if name == "musicplayer" else cls._instance.logger.getChild(name)
+        return (
+            cls._instance.logger
+            if name == "musicplayer"
+            else cls._instance.logger.getChild(name)
+        )
 
     @classmethod
     def set_level(cls, level: int) -> None:

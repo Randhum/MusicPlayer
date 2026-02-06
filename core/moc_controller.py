@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gi
+
 gi.require_version("GLib", "2.0")
 from gi.repository import GLib
 from core.config import get_config
@@ -184,7 +185,9 @@ class MocController:
                 tracks.append(metadata)
             else:
                 # Log when we skip a track due to missing file (debug level to avoid spam)
-                logger.debug("Skipping track in M3U - file does not exist: %s", file_path)
+                logger.debug(
+                    "Skipping track in M3U - file does not exist: %s", file_path
+                )
 
         # Find current track index
         if current_file is None:
@@ -389,7 +392,7 @@ class MocController:
         This briefly connects to MOC with --sync and immediately sends 'q' to detach.
         The connection triggers MOC to write its in-memory playlist to the M3U file.
         Playback is not interrupted.
-        
+
         Waits for the file to actually be written before returning.
 
         Returns:
@@ -651,23 +654,23 @@ class MocController:
     ) -> bool:
         """
         Write M3U playlist file directly with all tracks.
-        
+
         This is much faster than sequential --append commands for large playlists.
-        
+
         Args:
             tracks: List of tracks to write to the playlist file
             current_index: Current track index (for future use)
-            
+
         Returns:
             True if successful, False otherwise
         """
         if not self.is_available():
             return False
-        
+
         try:
             # Ensure playlist directory exists
             self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Build list of valid tracks with absolute paths
             valid_tracks = []
             for track in tracks:
@@ -679,12 +682,12 @@ class MocController:
                     continue
                 abs_path = str(file_path.resolve())
                 valid_tracks.append((track, abs_path))
-            
+
             # Write M3U file
             with self._playlist_path.open("w", encoding="utf-8") as f:
                 # Write header
                 f.write("#EXTM3U\n")
-                
+
                 # Write each track
                 for track, abs_path in valid_tracks:
                     # Format EXTINF line: #EXTINF:duration,title - artist
@@ -692,13 +695,13 @@ class MocController:
                     title = track.title or Path(track.file_path).stem
                     artist = track.artist or "Unknown Artist"
                     extinf_line = f"#EXTINF:{duration},{title} - {artist}\n"
-                    
+
                     f.write(extinf_line)
                     f.write(f"{abs_path}\n")
-            
+
             logger.debug("Wrote M3U playlist file with %d tracks", len(valid_tracks))
             return True
-            
+
         except Exception as e:
             logger.error("Failed to write M3U playlist file: %s", e, exc_info=True)
             return False
@@ -735,14 +738,14 @@ class MocController:
         abs_path = str(p.resolve())
         result = self._run("--append", abs_path, capture_output=True)
         return result.returncode == 0
-    
+
     def append_track_file(self, file_path: str) -> bool:
         """
         Append a single track file to MOC's playlist.
-        
+
         Args:
             file_path: Absolute path to the track file.
-            
+
         Returns:
             True if successful, False otherwise.
         """
@@ -750,7 +753,7 @@ class MocController:
             return False
         if not file_path:
             return False
-        
+
         self.ensure_server()
         result = self._run("--append", file_path, capture_output=True)
         return result.returncode == 0
@@ -794,7 +797,7 @@ class MocController:
 
         # Clear current playlist
         self.clear_playlist()
-        
+
         # Append all tracks using native MOC command
         # Note: For large playlists, chunked sync in PlaybackController handles this
         # more efficiently. This method is used for small playlists (<100 tracks).
@@ -821,7 +824,7 @@ class MocController:
         on_done: Optional[Callable[[], None]] = None,
     ) -> None:
         """Chunked sync for large playlists (100+). Calls on_done when finished; starts playback if requested.
-        
+
         Uses a sync_id to prevent race conditions: if a new sync starts while an old one
         is in progress, the old callbacks are ignored.
         """
@@ -832,12 +835,16 @@ class MocController:
         self.ensure_server()
         self.write_m3u_playlist(tracks, current_index)
         self.clear_playlist()
-        
+
         # Generate new sync ID to invalidate any in-progress syncs
         sync_id = getattr(self, "_chunk_sync_id", 0) + 1
         self._chunk_sync_id = sync_id
-        
-        self._chunk_tracks = [(t, str(Path(t.file_path).resolve())) for t in tracks if t and t.file_path and Path(t.file_path).exists()]
+
+        self._chunk_tracks = [
+            (t, str(Path(t.file_path).resolve()))
+            for t in tracks
+            if t and t.file_path and Path(t.file_path).exists()
+        ]
         self._chunk_index = 0
         self._chunk_current_index = current_index
         self._chunk_start_playback = start_playback
@@ -848,9 +855,13 @@ class MocController:
         """Append next chunk of tracks. sync_id ensures stale callbacks are ignored."""
         # Check if this callback is from an old sync (superseded by a new one)
         if getattr(self, "_chunk_sync_id", 0) != sync_id:
-            logger.debug("Stale chunked sync callback ignored (sync_id %s != %s)", sync_id, self._chunk_sync_id)
+            logger.debug(
+                "Stale chunked sync callback ignored (sync_id %s != %s)",
+                sync_id,
+                self._chunk_sync_id,
+            )
             return False  # Stale callback, ignore
-        
+
         try:
             CHUNK = 50
             if not getattr(self, "_chunk_tracks", None):
@@ -869,9 +880,16 @@ class MocController:
             start = self._chunk_start_playback
             on_done = getattr(self, "_chunk_on_done", None)
             self._chunk_tracks = []
-            logger.debug("Chunked sync complete: %d tracks, cur=%d, start=%s", len(tracks), cur, start)
+            logger.debug(
+                "Chunked sync complete: %d tracks, cur=%d, start=%s",
+                len(tracks),
+                cur,
+                start,
+            )
             if start and 0 <= cur < len(tracks) and tracks[cur].file_path:
-                logger.debug("Starting playback via play_file: %s", tracks[cur].file_path)
+                logger.debug(
+                    "Starting playback via play_file: %s", tracks[cur].file_path
+                )
                 self.play_file(str(Path(tracks[cur].file_path).resolve()))
             if on_done:
                 on_done()
@@ -887,7 +905,7 @@ class MocController:
     def play_file(self, file_path: str) -> bool:
         """
         Play a specific file via MOC, keeping the playlist intact.
-        
+
         Returns:
             True if playback was successfully initiated, False otherwise.
         """
@@ -905,7 +923,7 @@ class MocController:
 
         if not self.ensure_server():
             return False
-            
+
         abs_path = str(path.resolve())
         result = self._run("--playit", abs_path, capture_output=True)
         if result.returncode != 0:
@@ -913,5 +931,5 @@ class MocController:
             if result.stderr:
                 logger.debug("MOC error: %s", result.stderr)
             return False
-        
+
         return True

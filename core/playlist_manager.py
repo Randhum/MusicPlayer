@@ -48,13 +48,19 @@ class PlaylistManager:
         ] = None
 
         if self._event_bus:
-            self._event_bus.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
+            self._event_bus.subscribe(
+                EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed
+            )
             # Note: RELOAD_PLAYLIST_FROM_MOC subscription removed (event was never published)
             self._event_bus.subscribe(EventBus.ADD_FOLDER, self._on_add_folder)
             self._event_bus.subscribe(EventBus.ACTION_MOVE, self._on_action_move)
             self._event_bus.subscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
-            self._event_bus.subscribe(EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist)
-            self._event_bus.subscribe(EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist)
+            self._event_bus.subscribe(
+                EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist
+            )
+            self._event_bus.subscribe(
+                EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist
+            )
 
     def set_moc_playlist_provider(
         self,
@@ -91,14 +97,18 @@ class PlaylistManager:
 
     def advance_to_next(self) -> int:
         """Get next index and consume from shuffle queue if shuffled.
-        
+
         Returns the next index (-1 if none). For shuffle mode, this pops from the queue.
         Does NOT mutate current_index - caller should use set_current_index() to apply.
         """
         if not self.current_playlist:
             return -1
         if not self._shuffle_enabled:
-            return self.current_index + 1 if self.current_index < len(self.current_playlist) - 1 else -1
+            return (
+                self.current_index + 1
+                if self.current_index < len(self.current_playlist) - 1
+                else -1
+            )
         while self._shuffle_queue:
             idx = self._shuffle_queue.pop(0)
             if 0 <= idx < len(self.current_playlist):
@@ -123,7 +133,9 @@ class PlaylistManager:
         if not data or "tracks" not in data:
             return
         tracks = data["tracks"]
-        position = data.get("position") if isinstance(data.get("position"), int) else None
+        position = (
+            data.get("position") if isinstance(data.get("position"), int) else None
+        )
         if isinstance(tracks, list) and tracks:
             self.add_tracks(tracks, position)
 
@@ -145,7 +157,7 @@ class PlaylistManager:
 
     def _on_action_replace_playlist(self, data: Optional[dict]) -> None:
         """Subscriber: ACTION_REPLACE_PLAYLIST → replace entire playlist.
-        
+
         Data fields:
             tracks: List of TrackMetadata (or dicts) to set as new playlist
             current_index: Index to set as current (default 0)
@@ -168,14 +180,15 @@ class PlaylistManager:
         self.set_playlist(track_list, current_index, start_playback=start_playback)
 
     def set_playlist(
-        self, tracks: List[TrackMetadata], current_index: int = -1, start_playback: bool = False
+        self,
+        tracks: List[TrackMetadata],
+        current_index: int = -1,
+        start_playback: bool = False,
     ) -> None:
         """Replace playlist and index in one go; publish once; sync to file. Used by view and load paths."""
         self.current_playlist = list(tracks)
         self.current_index = (
-            current_index
-            if 0 <= current_index < len(self.current_playlist)
-            else -1
+            current_index if 0 <= current_index < len(self.current_playlist) else -1
         )
         if self._shuffle_enabled:
             self._regenerate_shuffle_queue()
@@ -304,7 +317,9 @@ class PlaylistManager:
             # If we removed the currently playing track, request playback stop
             # ACTION_STOP with reason="track_removed" indicates system-initiated stop
             if removed_current:
-                self._event_bus.publish(EventBus.ACTION_STOP, {"reason": "track_removed"})
+                self._event_bus.publish(
+                    EventBus.ACTION_STOP, {"reason": "track_removed"}
+                )
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
@@ -547,18 +562,29 @@ class PlaylistManager:
         try:
             if len(self.current_playlist) > 200:
                 import threading
+
                 playlist_copy = self.current_playlist.copy()
                 index_copy = self.current_index
+
                 def save():
                     try:
-                        data = {"tracks": [t.to_dict() for t in playlist_copy], "current_index": index_copy}
-                        with open(self.current_playlist_file, "w", encoding="utf-8") as f:
+                        data = {
+                            "tracks": [t.to_dict() for t in playlist_copy],
+                            "current_index": index_copy,
+                        }
+                        with open(
+                            self.current_playlist_file, "w", encoding="utf-8"
+                        ) as f:
                             json.dump(data, f, indent=2, ensure_ascii=False)
                     except Exception as e:
                         logger.warning("Failed to auto-save current playlist: %s", e)
+
                 threading.Thread(target=save, daemon=True).start()
             else:
-                data = {"tracks": [t.to_dict() for t in self.current_playlist], "current_index": self.current_index}
+                data = {
+                    "tracks": [t.to_dict() for t in self.current_playlist],
+                    "current_index": self.current_index,
+                }
                 with open(self.current_playlist_file, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -584,5 +610,7 @@ class PlaylistManager:
             logger.error("Error loading current playlist: %s", e, exc_info=True)
             return False
         except Exception as e:
-            logger.error("Unexpected error loading current playlist: %s", e, exc_info=True)
+            logger.error(
+                "Unexpected error loading current playlist: %s", e, exc_info=True
+            )
             return False

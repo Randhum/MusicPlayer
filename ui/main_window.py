@@ -57,12 +57,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # ---------------------------------------------------------------------
         self.library = MusicLibrary()
         self.player = AudioPlayer()
-        self.bt_manager = BluetoothManager(
-            parent_window=self, event_bus=self.event_bus
-        )
-        self.bt_sink = BluetoothSink(
-            self.bt_manager, event_bus=self.event_bus
-        )
+        self.bt_manager = BluetoothManager(parent_window=self, event_bus=self.event_bus)
+        self.bt_sink = BluetoothSink(self.bt_manager, event_bus=self.event_bus)
         self.system_volume = SystemVolume(
             on_volume_changed=self._on_system_volume_changed
         )
@@ -222,8 +218,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _apply_css(self):
         """Apply custom CSS styling."""
         css_provider = Gtk.CssProvider()
-        css_provider.load_from_string(
-            """
+        css_provider.load_from_string("""
             .dock-header {
                 background: alpha(@theme_bg_color, 0.8);
                 border-bottom: 1px solid @borders;
@@ -286,8 +281,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 background: @theme_selected_bg_color;
                 color: @theme_selected_fg_color;
             }
-        """
-        )
+        """)
 
         display = self.get_display()
         Gtk.StyleContext.add_provider_for_display(

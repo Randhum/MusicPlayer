@@ -1,4 +1,5 @@
 """Centralized event bus for decoupled component communication."""
+
 from typing import Any, Callable, Dict, List
 from core.logging import get_logger
 
@@ -97,7 +98,9 @@ class EventBus:
             try:
                 callback(data)
             except Exception as e:
-                logger.error("Error in event callback for %s: %s", event, e, exc_info=True)
+                logger.error(
+                    "Error in event callback for %s: %s", event, e, exc_info=True
+                )
 
     def set_debug(self, enabled: bool) -> None:
         self._debug_enabled = enabled

@@ -49,7 +49,7 @@ class MetadataPanel(Gtk.Box):
 
         # Track pending art path for lazy loading
         self._pending_art_path: Optional[str] = None
-        
+
         # Track current track to detect changes
         self._current_track: Optional[TrackMetadata] = None
 
@@ -92,14 +92,14 @@ class MetadataPanel(Gtk.Box):
         info_box.append(details_box)
 
         self.append(info_box)
-    
+
     def sync_with_state(self, current_track: Optional[TrackMetadata]) -> None:
         """
         Sync metadata panel with current track state.
-        
+
         Call this after initialization to ensure panel shows current track
         if one is already playing.
-        
+
         Args:
             current_track: Current track (e.g. from TRACK_CHANGED event), or None
         """
@@ -134,16 +134,16 @@ class MetadataPanel(Gtk.Box):
         old_track = self._current_track
         track_changed = (
             not old_track
-            or not hasattr(old_track, 'file_path')
-            or not hasattr(track, 'file_path')
+            or not hasattr(old_track, "file_path")
+            or not hasattr(track, "file_path")
             or (old_track.file_path != track.file_path)
         )
-        
+
         # Check if album art path changed (before we update _current_track)
-        old_art_path = getattr(old_track, 'album_art_path', None) if old_track else None
-        new_art_path = getattr(track, 'album_art_path', None)
+        old_art_path = getattr(old_track, "album_art_path", None) if old_track else None
+        new_art_path = getattr(track, "album_art_path", None)
         art_path_changed = track_changed or (old_art_path != new_art_path)
-        
+
         # Store current track (after checking for changes)
         self._current_track = track
 
@@ -155,7 +155,7 @@ class MetadataPanel(Gtk.Box):
             title = track.title or "Unknown Track"
         else:
             title = track.title or Path(track.file_path).stem
-        
+
         self.title_label.set_text(title)
         self.artist_label.set_text(track.artist or "Unknown Artist")
         self.album_label.set_text(track.album or "Unknown Album")

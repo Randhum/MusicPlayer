@@ -264,7 +264,9 @@ class BluetoothSink:
                         connected_devices.append(device)
 
             for device in connected_devices:
-                logger.info("Disconnecting device: %s (%s)", device.name, device.address)
+                logger.info(
+                    "Disconnecting device: %s (%s)", device.name, device.address
+                )
 
                 if self.on_audio_stream_stopped is not None:
                     try:
@@ -759,7 +761,9 @@ class BluetoothSink:
     def _configure_audio_routing(self, device: BluetoothDevice):
         """Configure audio routing for the connected device."""
         try:
-            logger.info("Configuring audio routing for %s (%s)", device.name, device.address)
+            logger.info(
+                "Configuring audio routing for %s (%s)", device.name, device.address
+            )
 
             if not self._check_a2dp_transport(device):
                 logger.debug("A2DP transport not yet available, retrying in 1s")
@@ -873,9 +877,13 @@ class BluetoothSink:
         """Set up audio routing using GStreamer BlueZ plugin."""
         try:
             # GStreamer BlueZ plugin handles A2DP via D-Bus automatically
-            logger.info("GStreamer BlueZ: Audio from %s routed automatically", device.name)
+            logger.info(
+                "GStreamer BlueZ: Audio from %s routed automatically", device.name
+            )
         except Exception as e:
-            logger.error("Error setting up GStreamer BlueZ routing: %s", e, exc_info=True)
+            logger.error(
+                "Error setting up GStreamer BlueZ routing: %s", e, exc_info=True
+            )
 
     def _setup_pulseaudio_routing(self, device: BluetoothDevice):
         """Set up PulseAudio loopback from Bluetooth to ALSA."""

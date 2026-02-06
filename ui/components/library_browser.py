@@ -203,29 +203,31 @@ class LibraryBrowser(Gtk.Box):
         """Show search results as a flat list of tracks."""
         self._showing_search_results = True
         self.store.clear()
-        
+
         if not tracks:
             # Show "No results" message
             self.store.append(None, ["No results found", "info", None])
             return
-        
+
         # Add a "Search Results" header
-        results_iter = self.store.append(None, [f"Search Results ({len(tracks)})", "folder", None])
-        
+        results_iter = self.store.append(
+            None, [f"Search Results ({len(tracks)})", "folder", None]
+        )
+
         # Add tracks under the header
         for track in tracks:
             track_name = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
             display_name = f"{track_name} - {artist}"
             self.store.append(results_iter, [display_name, "track", track])
-        
+
         # Expand the results folder
         path = self.store.get_path(results_iter)
         self.tree_view.expand_row(path, False)
 
     def clear_search(self) -> None:
         """Clear search results and restore the folder view."""
-        if self._showing_search_results and hasattr(self, '_library') and self._library:
+        if self._showing_search_results and hasattr(self, "_library") and self._library:
             self.populate(self._library)
 
     def _on_click_pressed(self, gesture, n_press, x, y):
@@ -324,11 +326,14 @@ class LibraryBrowser(Gtk.Box):
     def _replace_and_play_track(self, track: TrackMetadata) -> None:
         """Replace playlist with single track and play it using events."""
         if self._events:
-            self._events.publish(EventBus.ACTION_REPLACE_PLAYLIST, {
-                "tracks": [track],
-                "current_index": 0,
-                "start_playback": True,
-            })
+            self._events.publish(
+                EventBus.ACTION_REPLACE_PLAYLIST,
+                {
+                    "tracks": [track],
+                    "current_index": 0,
+                    "start_playback": True,
+                },
+            )
         else:
             # Fallback to signal if no EventBus
             self.emit("track-selected", track)
@@ -338,36 +343,39 @@ class LibraryBrowser(Gtk.Box):
         if not tracks:
             return
         if self._events:
-            self._events.publish(EventBus.ACTION_REPLACE_PLAYLIST, {
-                "tracks": tracks,
-                "current_index": 0,
-                "start_playback": True,
-            })
+            self._events.publish(
+                EventBus.ACTION_REPLACE_PLAYLIST,
+                {
+                    "tracks": tracks,
+                    "current_index": 0,
+                    "start_playback": True,
+                },
+            )
         else:
             # Fallback to signal if no EventBus
             self.emit("album-selected", tracks)
 
     def _replace_and_play_folder(self, folder_path: str, tree_iter=None) -> None:
         """Replace playlist with folder contents and play first track.
-        
+
         For folder playback, we collect tracks from disk (not tree) to ensure
         all files are included, sorted properly.
         """
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return
-        
+
         # Collect tracks from disk
         tracks = []
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
         tracks.sort(key=lambda t: t.file_path)
-        
+
         if not tracks:
             # Fallback: try collecting from tree
             if tree_iter:
                 self._collect_tracks(self.store, tree_iter, tracks)
-        
+
         if tracks:
             self._replace_and_play_album(tracks)
 
@@ -388,7 +396,7 @@ class LibraryBrowser(Gtk.Box):
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return
-        
+
         # Collect tracks and use ADD_FOLDER (PlaybackController handles MOC sync)
         if self._events:
             # Collect tracks from disk
@@ -530,12 +538,18 @@ class LibraryBrowser(Gtk.Box):
                 menu_box.append(add_item)
             else:
                 # Fallback: folder path not in data; get path from tree so MOC can append by path
-                folder_iter = self.store.get_iter(self.selected_path) if self.selected_path else None
+                folder_iter = (
+                    self.store.get_iter(self.selected_path)
+                    if self.selected_path
+                    else None
+                )
                 tracks = []
                 if folder_iter:
                     self._collect_tracks(self.store, folder_iter, tracks)
                 folder_path_from_tree = (
-                    self._get_folder_path_from_iter(folder_iter) if folder_iter else None
+                    self._get_folder_path_from_iter(folder_iter)
+                    if folder_iter
+                    else None
                 )
 
                 if tracks:
@@ -553,7 +567,9 @@ class LibraryBrowser(Gtk.Box):
                     if folder_path_from_tree:
                         add_item.connect(
                             "clicked",
-                            lambda w, p=str(folder_path_from_tree): self._on_menu_add_folder(p),
+                            lambda w, p=str(
+                                folder_path_from_tree
+                            ): self._on_menu_add_folder(p),
                         )
                     else:
                         add_item.connect(
