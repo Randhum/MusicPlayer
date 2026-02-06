@@ -358,7 +358,7 @@ class LibraryBrowser(Gtk.Box):
         if not folder.exists() or not folder.is_dir():
             return
         
-        # Use ACTION_APPEND_FOLDER for MOC, or collect and add tracks
+        # Collect tracks and use ADD_FOLDER (PlaybackController handles MOC sync)
         if self._events:
             # Collect tracks from disk
             tracks = []

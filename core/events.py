@@ -20,17 +20,17 @@ class EventBus:
     # =========================================================================
 
     # Playback state (published by PlaybackController)
-    PLAYBACK_STARTED = "playback.started"
-    PLAYBACK_PAUSED = "playback.paused"
-    PLAYBACK_STOPPED = "playback.stopped"
-    PLAYBACK_STOP_REQUESTED = "playback.stop_requested"  # Request stop (e.g., current track removed)
-    POSITION_CHANGED = "position.changed"
-    DURATION_CHANGED = "duration.changed"
+    # Unified playback state event: {"state": "playing"|"paused"|"stopped", "track": TrackMetadata?}
+    PLAYBACK_STATE_CHANGED = "playback.state_changed"
+    # Note: PLAYBACK_STARTED, PLAYBACK_PAUSED, PLAYBACK_STOPPED merged into PLAYBACK_STATE_CHANGED
+    # Note: PLAYBACK_STOP_REQUESTED merged into ACTION_STOP with reason field
+    # Unified progress event: {"position": float, "duration": float}
+    PLAYBACK_PROGRESS = "playback.progress"
+    # Note: POSITION_CHANGED, DURATION_CHANGED merged into PLAYBACK_PROGRESS
     SHUFFLE_CHANGED = "playback.shuffle_changed"
     LOOP_MODE_CHANGED = "playback.loop_mode_changed"
-    AUTONEXT_CHANGED = "playback.autonext_changed"
-    ACTIVE_BACKEND_CHANGED = "playback.active_backend_changed"
     VOLUME_CHANGED = "volume.changed"
+    # Note: AUTONEXT_CHANGED, ACTIVE_BACKEND_CHANGED removed (no subscribers)
 
     # Playlist state (published by PlaylistManager)
     PLAYLIST_CHANGED = "playlist.changed"
@@ -41,10 +41,10 @@ class EventBus:
     BT_DEVICE_CONNECTED = "bluetooth.device_connected"
     BT_DEVICE_DISCONNECTED = "bluetooth.device_disconnected"
     BT_DEVICE_ADDED = "bluetooth.device_added"
-    BT_DEVICE_REMOVED = "bluetooth.device_removed"
     BT_SINK_ENABLED = "bluetooth.sink_enabled"
     BT_SINK_DISABLED = "bluetooth.sink_disabled"
     BT_SINK_DEVICE_CONNECTED = "bluetooth.sink_device_connected"
+    # Note: BT_DEVICE_REMOVED removed (no subscribers)
 
     # =========================================================================
     # UI -> Core: Action Requests
@@ -63,7 +63,7 @@ class EventBus:
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
     ACTION_REFRESH_MOC = "action.refresh_moc"
-    ACTION_APPEND_FOLDER = "action.append_folder"
+    # Note: ACTION_APPEND_FOLDER removed - use ADD_FOLDER for all folder additions
 
     # Playlist modification actions (handled by PlaylistManager)
     ACTION_REPLACE_PLAYLIST = "action.replace_playlist"  # Replace entire playlist
@@ -72,11 +72,7 @@ class EventBus:
     ACTION_REMOVE = "action.remove"
     ACTION_CLEAR_PLAYLIST = "action.clear_playlist"
 
-    # =========================================================================
-    # Internal: Core -> Core
-    # Used for internal coordination between core components
-    # =========================================================================
-    RELOAD_PLAYLIST_FROM_MOC = "playlist.reload_from_moc"
+    # Note: RELOAD_PLAYLIST_FROM_MOC removed (never published, dead code)
 
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Any], None]]] = {}

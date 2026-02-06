@@ -75,12 +75,9 @@ class PlayerControls(Gtk.Box):
 
         self._create_ui()
 
-        # Subscribe to state events
-        self._events.subscribe(EventBus.PLAYBACK_STARTED, self._on_playback_started)
-        self._events.subscribe(EventBus.PLAYBACK_PAUSED, self._on_playback_paused)
-        self._events.subscribe(EventBus.PLAYBACK_STOPPED, self._on_playback_stopped)
-        self._events.subscribe(EventBus.POSITION_CHANGED, self._on_position_changed)
-        self._events.subscribe(EventBus.DURATION_CHANGED, self._on_duration_changed)
+        # Subscribe to state events (unified playback state and progress events)
+        self._events.subscribe(EventBus.PLAYBACK_STATE_CHANGED, self._on_playback_state_changed)
+        self._events.subscribe(EventBus.PLAYBACK_PROGRESS, self._on_playback_progress)
         self._events.subscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
         self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
         self._events.subscribe(EventBus.LOOP_MODE_CHANGED, self._on_loop_mode_changed)
@@ -476,41 +473,38 @@ class PlayerControls(Gtk.Box):
     # Event Handlers (State Updates)
     # ============================================================================
 
-    def _on_playback_started(self, data: Optional[dict]) -> None:
-        """Handle playback started event."""
-        self._playing = True
-        self.set_playing(True)
+    def _on_playback_state_changed(self, data: Optional[dict]) -> None:
+        """Handle unified playback state change event.
+        
+        Data: {"state": "playing"|"paused"|"stopped", "track": TrackMetadata?}
+        """
+        if not data:
+            return
+        state = data.get("state", "stopped")
+        if state == "playing":
+            self._playing = True
+            self.set_playing(True)
+        elif state == "paused":
+            self._playing = False
+            self.set_playing(False)
+        elif state == "stopped":
+            self._playing = False
+            self.set_playing(False)
+            # Reset timeline to 00:00
+            self.update_progress(0.0, 0.0)
 
-    def _on_playback_paused(self, data: Optional[dict]) -> None:
-        """Handle playback paused event."""
-        self._playing = False
-        self.set_playing(False)
-
-    def _on_playback_stopped(self, data: Optional[dict]) -> None:
-        """Handle playback stopped event."""
-        self._playing = False
-        self.set_playing(False)
-        # Reset timeline to 00:00
-        self.update_progress(0.0, 0.0)
-
-    def _on_position_changed(self, data: Optional[dict]) -> None:
-        """Handle position changed event - cache and update UI."""
+    def _on_playback_progress(self, data: Optional[dict]) -> None:
+        """Handle unified playback progress event - position and duration.
+        
+        Data: {"position": float, "duration": float}
+        """
         if not data:
             return
         position = data.get("position", 0.0)
         duration = data.get("duration", self._last_duration)
         self._last_position = position
-        if "duration" in data:
-            self._last_duration = duration
-        self.update_progress(position, duration)
-
-    def _on_duration_changed(self, data: Optional[dict]) -> None:
-        """Handle duration changed event."""
-        if not data:
-            return
-        duration = data.get("duration", 0.0)
         self._last_duration = duration
-        self.update_progress(self._last_position, duration)
+        self.update_progress(position, duration)
 
     def _on_track_changed(self, data: Optional[dict]) -> None:
         """Handle track changed event."""

@@ -304,22 +304,16 @@ class PlaylistView(Gtk.Box):
         if not folder.exists() or not folder.is_dir():
             return
         
-        if self._use_moc:
-            # Use MOC's native append command - it handles recursion and is much faster
-            # This triggers a single sync after MOC processes all tracks
-            self._events.publish(EventBus.ACTION_APPEND_FOLDER, {"folder_path": str(folder.resolve())})
-        else:
-            # For non-MOC mode, collect tracks and add them
-            tracks = []
-            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-            
-            # Sort tracks by file path to match library order (library sorts by file_path)
-            tracks.sort(key=lambda t: t.file_path)
-            
-            if tracks:
-                # Add tracks to maintain order
-                self.add_tracks(tracks)
+        # Collect tracks and use ADD_FOLDER - PlaybackController handles MOC sync via PLAYLIST_CHANGED
+        tracks = []
+        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
+            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+        
+        # Sort tracks by file path to match library order (library sorts by file_path)
+        tracks.sort(key=lambda t: t.file_path)
+        
+        if tracks:
+            self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
 
     def replace_and_play_folder(self, folder_path: str) -> None:
         """Replace playlist with folder contents and play first track.

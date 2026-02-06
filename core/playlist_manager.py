@@ -50,7 +50,7 @@ class PlaylistManager:
 
         if self._event_bus:
             self._event_bus.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
-            self._event_bus.subscribe(EventBus.RELOAD_PLAYLIST_FROM_MOC, self._on_reload_from_moc_requested)
+            # Note: RELOAD_PLAYLIST_FROM_MOC subscription removed (event was never published)
             self._event_bus.subscribe(EventBus.ADD_FOLDER, self._on_add_folder)
             self._event_bus.subscribe(EventBus.ACTION_MOVE, self._on_action_move)
             self._event_bus.subscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
@@ -81,8 +81,21 @@ class PlaylistManager:
             indices.append(cur)
         self._shuffle_queue = indices
 
-    def get_next_index(self) -> int:
-        """Next index (sequential or from shuffle queue). Does not mutate current_index."""
+    def has_next(self) -> bool:
+        """Check if there is a next track (read-only, does not consume shuffle queue)."""
+        if not self.current_playlist:
+            return False
+        if not self._shuffle_enabled:
+            return self.current_index < len(self.current_playlist) - 1
+        # In shuffle mode, check if queue has valid entries
+        return bool(self._shuffle_queue) or len(self.current_playlist) > 1
+
+    def advance_to_next(self) -> int:
+        """Get next index and consume from shuffle queue if shuffled.
+        
+        Returns the next index (-1 if none). For shuffle mode, this pops from the queue.
+        Does NOT mutate current_index - caller should use set_current_index() to apply.
+        """
         if not self.current_playlist:
             return -1
         if not self._shuffle_enabled:
@@ -94,10 +107,7 @@ class PlaylistManager:
         self._regenerate_shuffle_queue()
         return self._shuffle_queue.pop(0) if self._shuffle_queue else -1
 
-    def _on_reload_from_moc_requested(self, data: Optional[dict]) -> None:
-        """Subscriber: RELOAD_PLAYLIST_FROM_MOC → reload_from_moc(current_file)."""
-        current_file = data.get("current_file") if data else None
-        self.reload_from_moc(current_file=current_file)
+    # Note: _on_reload_from_moc_requested() removed (RELOAD_PLAYLIST_FROM_MOC was never published)
 
     def reload_from_moc(self, current_file: Optional[str] = None) -> bool:
         """Load playlist from MOC via the injected provider and apply with set_playlist. Returns True if reloaded."""
@@ -155,10 +165,11 @@ class PlaylistManager:
             elif isinstance(t, dict):
                 track_list.append(TrackMetadata.from_dict(t))
         current_index = data.get("current_index", 0) if track_list else -1
-        self.set_playlist(track_list, current_index)
+        start_playback = data.get("start_playback", False)
+        self.set_playlist(track_list, current_index, start_playback=start_playback)
 
     def set_playlist(
-        self, tracks: List[TrackMetadata], current_index: int = -1
+        self, tracks: List[TrackMetadata], current_index: int = -1, start_playback: bool = False
     ) -> None:
         """Replace playlist and index in one go; publish once; sync to file. Used by view and load paths."""
         self.current_playlist = list(tracks)
@@ -169,10 +180,10 @@ class PlaylistManager:
         )
         if self._shuffle_enabled:
             self._regenerate_shuffle_queue()
-        self._emit_playlist_replaced()
+        self._emit_playlist_replaced(start_playback=start_playback)
         self._sync_to_file()
 
-    def _emit_playlist_replaced(self) -> None:
+    def _emit_playlist_replaced(self, start_playback: bool = False) -> None:
         """Publish PLAYLIST_CHANGED and, if index valid, CURRENT_INDEX_CHANGED and TRACK_CHANGED."""
         if not self._event_bus:
             return
@@ -183,6 +194,7 @@ class PlaylistManager:
                 "index": self.current_index,
                 "playlist_length": len(self.current_playlist),
                 "content_changed": True,
+                "start_playback": start_playback,
             },
         )
         if self.current_index >= 0:
@@ -291,10 +303,9 @@ class PlaylistManager:
             self.current_index = -1
         if self._event_bus:
             # If we removed the currently playing track, request playback stop
-            # Note: We publish a state event (PLAYBACK_STOP_REQUESTED), not an action event
-            # Managers should not publish ACTION_* events - those flow from UI to Core
+            # ACTION_STOP with reason="track_removed" indicates system-initiated stop
             if removed_current:
-                self._event_bus.publish(EventBus.PLAYBACK_STOP_REQUESTED, {"reason": "current_track_removed"})
+                self._event_bus.publish(EventBus.ACTION_STOP, {"reason": "track_removed"})
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
@@ -401,12 +412,7 @@ class PlaylistManager:
             self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": new_track})
         self._sync_to_file()
 
-    def get_next_track(self) -> Optional[TrackMetadata]:
-        """Get the next track in the playlist."""
-        if self.current_index < len(self.current_playlist) - 1:
-            self.current_index += 1
-            return self.current_playlist[self.current_index]
-        return None
+    # Note: get_next_track() removed - use advance_to_next() then get_current_track()
 
     def get_previous_track(self) -> Optional[TrackMetadata]:
         """Get the previous track in the playlist."""

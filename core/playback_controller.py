@@ -86,11 +86,10 @@ class PlaybackController:
         self._recent_shuffle_write: Optional[float] = None
         self._recent_repeat_write: Optional[float] = None
         self._loading_from_moc: bool = False
+        # MOC sync state - simplified: only track if syncing and if re-sync needed
         self._syncing_to_moc: bool = False
-        self._pending_start_playback: bool = False
-        self._sync_idle_id: Optional[int] = None  # coalesce PLAYLIST_CHANGED + ACTION_SYNC into one sync
-        self._pending_sync_start_playback: bool = False
-        self._playlist_changed_during_sync: bool = False  # Track if playlist changed while syncing
+        self._pending_start_playback: bool = False  # Start playback after current sync completes
+        self._playlist_changed_during_sync: bool = False  # Re-sync needed after current sync
         self._user_action_time: float = 0.0
         self._startup_complete: bool = False
 
@@ -117,18 +116,11 @@ class PlaybackController:
         )
         self._events.subscribe(EventBus.ACTION_SET_VOLUME, self._on_action_set_volume)
         self._events.subscribe(EventBus.ACTION_REFRESH_MOC, self._on_action_refresh_moc)
-        self._events.subscribe(
-            EventBus.ACTION_APPEND_FOLDER, self._on_action_append_folder
-        )
-        # Subscribe to ACTION_REPLACE_PLAYLIST to handle start_playback (playlist is handled by PlaylistManager)
-        self._events.subscribe(
-            EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist
-        )
+        # Note: ACTION_APPEND_FOLDER removed - MOC sync handled via PLAYLIST_CHANGED
 
-        # Subscribe to state events from PlaylistManager
-        self._events.subscribe(EventBus.PLAYBACK_STOP_REQUESTED, self._on_playback_stop_requested)
+        # Note: PLAYBACK_STOP_REQUESTED merged into ACTION_STOP with reason field
 
-        # Subscribe to playlist changes to sync with MOC
+        # Subscribe to playlist changes - single handler for all playlist modifications
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
 
         # Subscribe to shuffle (PlaylistManager owns shuffle queue; we just sync to MOC)
@@ -154,35 +146,36 @@ class PlaybackController:
     def _set_playback_state(self, state: PlaybackState) -> None:
         old = self._playback_state
         self._playback_state = state
+        # Publish unified state change event (replaces PLAYBACK_STARTED, PLAYBACK_PAUSED, PLAYBACK_STOPPED)
         if state == PlaybackState.PLAYING and old != PlaybackState.PLAYING:
-            self._events.publish(
-                EventBus.PLAYBACK_STARTED,
-                {"track": self._playlist.get_current_track()},
-            )
+            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {
+                "state": "playing",
+                "track": self._playlist.get_current_track(),
+            })
         elif state == PlaybackState.PAUSED and old == PlaybackState.PLAYING:
-            self._events.publish(EventBus.PLAYBACK_PAUSED, {})
+            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "paused"})
         elif state == PlaybackState.STOPPED and old != PlaybackState.STOPPED:
-            self._events.publish(EventBus.PLAYBACK_STOPPED, {})
+            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "stopped"})
 
     def _set_active_backend(self, backend: str) -> None:
         if self._active_backend != backend:
             self._active_backend = backend
-            self._events.publish(
-                EventBus.ACTIVE_BACKEND_CHANGED, {"backend": self._active_backend}
-            )
+            # Note: ACTIVE_BACKEND_CHANGED event removed (no subscribers)
 
     def _set_position(self, position: float) -> None:
+        """Update position and publish unified progress event."""
         self._position = max(0.0, position)
         self._events.publish(
-            EventBus.POSITION_CHANGED,
+            EventBus.PLAYBACK_PROGRESS,
             {"position": self._position, "duration": self._duration},
         )
 
     def _set_duration(self, duration: float) -> None:
+        """Update duration and publish unified progress event."""
         self._duration = max(0.0, duration)
         self._events.publish(
-            EventBus.DURATION_CHANGED,
-            {"duration": self._duration, "position": self._position},
+            EventBus.PLAYBACK_PROGRESS,
+            {"position": self._position, "duration": self._duration},
         )
 
     def _set_shuffle_enabled(self, enabled: bool) -> None:
@@ -195,10 +188,7 @@ class PlaybackController:
             self._loop_mode = mode
             self._events.publish(EventBus.LOOP_MODE_CHANGED, {"mode": mode})
 
-    def _set_autonext_enabled(self, enabled: bool) -> None:
-        if self._autonext_enabled != enabled:
-            self._autonext_enabled = enabled
-            self._events.publish(EventBus.AUTONEXT_CHANGED, {"enabled": enabled})
+    # Note: _set_autonext_enabled() removed (was never called, AUTONEXT_CHANGED had no subscribers)
 
     def _set_volume(self, volume: float) -> None:
         new_vol = max(0.0, min(1.0, volume))
@@ -370,7 +360,7 @@ class PlaybackController:
         if self._bt_sink and self._should_use_bt_sink():
             self._bt_sink.control_playback("next")
             return
-        next_index = self._playlist.get_next_index()
+        next_index = self._playlist.advance_to_next()
         if next_index >= 0:
             self._playlist.set_current_index(next_index)
             self._load_and_play_current_track()
@@ -426,43 +416,40 @@ class PlaybackController:
         self._playlist.set_current_index(index)
         self._load_and_play_current_track()
 
-    def _on_playback_stop_requested(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle stop requested by PlaylistManager (e.g., current track removed).
-        
-        This is a state event from Core, not an action from UI.
-        Managers publish PLAYBACK_STOP_REQUESTED instead of ACTION_STOP.
-        """
-        self._on_action_stop(None)
+    # Note: _on_playback_stop_requested() removed - ACTION_STOP now handles all stop requests
+    # (with optional reason field for system-initiated stops)
 
-    def _on_action_replace_playlist(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle replace playlist action - only handles start_playback.
+    def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
+        """Handle playlist changes - sync to MOC and optionally start playback.
         
-        PlaylistManager handles the actual playlist replacement via set_playlist().
-        We only need to handle the start_playback flag here.
-        The playlist will already be updated by the time PLAYLIST_CHANGED fires.
+        This is the single handler for all playlist modifications. The event data
+        contains all needed information including start_playback intent.
         """
         if not data:
             return
+        content_changed = data.get("content_changed", True)
+        if not content_changed:
+            return
+        # Skip if we're loading from MOC (avoid sync loop)
+        if self._loading_from_moc:
+            return
+        
         start_playback = data.get("start_playback", False)
-        logger.debug("ACTION_REPLACE_PLAYLIST: start_playback=%s, use_moc=%s, syncing=%s",
+        logger.debug("PLAYLIST_CHANGED: start_playback=%s, use_moc=%s, syncing=%s",
                      start_playback, self._use_moc, self._syncing_to_moc)
         
-        if start_playback:
-            if self._use_moc and self._syncing_to_moc:
-                # MOC sync already in progress - set _pending_start_playback for the re-sync.
-                # _on_playlist_changed will set _playlist_changed_during_sync, and on_done
-                # will use _pending_start_playback when calculating re_sync_start.
-                logger.debug("MOC sync in progress, setting _pending_start_playback=True for re-sync")
-                self._pending_start_playback = True
-            elif self._use_moc:
-                # MOC mode but not syncing - a sync will be scheduled by _on_playlist_changed.
-                # Set _pending_sync_start_playback so _run_pending_moc_sync starts playback.
-                logger.debug("MOC mode, setting _pending_sync_start_playback=True")
-                self._pending_sync_start_playback = True
+        if self._use_moc:
+            if self._syncing_to_moc:
+                # Sync in progress - mark for re-sync and preserve playback intent
+                self._playlist_changed_during_sync = True
+                if start_playback:
+                    self._pending_start_playback = True
             else:
-                # Non-MOC mode - schedule playback start after playlist is set
-                logger.debug("Non-MOC mode, scheduling _start_playback_after_replace")
-                GLib.idle_add(self._start_playback_after_replace)
+                # Schedule sync with playback intent
+                GLib.idle_add(self._sync_moc_playlist, start_playback)
+        elif start_playback:
+            # Non-MOC mode with playback request
+            GLib.idle_add(self._start_playback_after_replace)
 
     def _start_playback_after_replace(self) -> bool:
         """Start playback after playlist replace. Called via idle_add (non-MOC mode only)."""
@@ -523,19 +510,7 @@ class PlaybackController:
         self._reload_playlist_from_moc(current_file=current_file)
         return False
 
-    def _on_action_append_folder(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle append folder action - add folder to MOC playlist, then reload into app state (UI updates via PLAYLIST_CHANGED)."""
-        if not self._use_moc or not data or "folder_path" not in data:
-            return
-        folder_path = data["folder_path"]
-        if not folder_path:
-            return
-        if self._moc_controller.append_to_playlist(folder_path):
-            logger.info("Appended folder to MOC playlist: %s", folder_path)
-            self._recent_moc_write = time.time()
-            self._reload_playlist_from_moc()
-        else:
-            logger.warning("Failed to append folder to MOC playlist: %s", folder_path)
+    # Note: _on_action_append_folder() removed - MOC sync handled via PLAYLIST_CHANGED
 
     def _play_with_moc(self, track: TrackMetadata) -> None:
         if not self._use_moc:
@@ -562,10 +537,10 @@ class PlaybackController:
             # This ensures consistent state: index and track are updated together, and events are published correctly
             self._playlist.set_current_index(track_index)
         else:
-            # Track not in playlist - set track directly (rare case, e.g., playing external file)
-            # This bypasses playlist index but still publishes TRACK_CHANGED event
+            # Track not in playlist - set index to -1 (rare case, e.g., playing external file)
+            # Note: TRACK_CHANGED not published here - PlaylistManager is the sole publisher
+            # Track info is still available via PLAYBACK_STATE_CHANGED event
             self._playlist.set_current_index(-1)
-            self._events.publish(EventBus.TRACK_CHANGED, {"track": track})
 
         # Just play the file - MOC's --playit will add it to playlist if needed
         # Only set PLAYING if MOC actually starts (avoids UI showing play when MOC didn't start)
@@ -596,10 +571,10 @@ class PlaybackController:
             # This ensures consistent state: index and track are updated together, and events are published correctly
             self._playlist.set_current_index(track_index)
         else:
-            # Track not in playlist - set track directly (rare case, e.g., playing external file)
-            # This bypasses playlist index but still publishes TRACK_CHANGED event
+            # Track not in playlist - set index to -1 (rare case, e.g., playing external file)
+            # Note: TRACK_CHANGED not published here - PlaylistManager is the sole publisher
+            # Track info is still available via PLAYBACK_STATE_CHANGED event
             self._playlist.set_current_index(-1)
-            self._events.publish(EventBus.TRACK_CHANGED, {"track": track})
 
         # Update duration from track metadata before setting playback state
         if track.duration:
@@ -653,78 +628,92 @@ class PlaybackController:
         self._set_position(desired)
         return False
 
-    def _run_pending_moc_sync(self) -> bool:
-        """Single idle callback: run one sync with coalesced start_playback."""
-        self._sync_idle_id = None
-        start = self._pending_sync_start_playback
-        self._pending_sync_start_playback = False
-        logger.debug("_run_pending_moc_sync: start_playback=%s", start)
-        self._sync_moc_playlist(start)
-        return False
-
     def _sync_moc_playlist(self, start_playback: bool = False) -> bool:
+        """Sync current playlist to MOC and optionally start playback.
+        
+        Args:
+            start_playback: If True, start playing the current track after sync.
+        
+        If called while already syncing, marks for re-sync after current sync completes.
+        """
         if not self._use_moc:
             return False
 
         if self._syncing_to_moc:
-            logger.debug("_sync_moc_playlist: already syncing, start_playback=%s -> pending=%s",
-                         start_playback, start_playback)
+            # Already syncing - mark for re-sync
+            logger.debug("_sync_moc_playlist: already syncing, marking for re-sync")
+            self._playlist_changed_during_sync = True
             if start_playback:
                 self._pending_start_playback = True
             return False
+        
         playlist = self._playlist.get_playlist()
         current_index = self._playlist.get_current_index()
         track = self._playlist.get_current_track()
+        # Only start via MOC if track is audio (not video)
         should_start = start_playback and track and not is_video_file(track.file_path)
+        
         self._syncing_to_moc = True
-        self._recent_moc_write = time.time()  # Suppress reload-from-MOC during and right after sync
+        self._recent_moc_write = time.time()
 
         def on_done():
             logger.debug("MOC sync on_done: playlist_changed=%s, should_start=%s, pending_start=%s",
                          self._playlist_changed_during_sync, should_start, self._pending_start_playback)
             self._syncing_to_moc = False
             self._recent_moc_write = time.time()
+            
+            # Update mtime
             try:
                 config = get_config()
                 if config.moc_playlist_path.exists():
                     self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
             except OSError:
                 pass
-            # Check if playlist changed during sync - if so, re-sync
+            
+            # Check if re-sync needed (playlist changed during sync)
             if self._playlist_changed_during_sync:
                 self._playlist_changed_during_sync = False
-                # Preserve start_playback intent: if original should_start OR pending, keep it
                 re_sync_start = should_start or self._pending_start_playback
-                logger.debug("Playlist changed during MOC sync, scheduling re-sync with start=%s", re_sync_start)
                 self._pending_start_playback = False
+                logger.debug("Re-syncing after playlist changed during sync, start=%s", re_sync_start)
                 GLib.idle_add(self._sync_moc_playlist, re_sync_start)
                 return
-            # Set active backend to MOC AFTER sync completes (not before) so polling doesn't interfere
-            if should_start and track:
-                logger.debug("MOC sync complete, should_start=True, setting backend to moc")
-                self._set_active_backend("moc")
-                self._moc_last_file = str(Path(track.file_path).resolve())
-            if self._pending_start_playback:
-                logger.debug("MOC sync complete, _pending_start_playback=True, scheduling playback")
-                self._pending_start_playback = False
-                def start_after_sync():
-                    # Only play if we still have a valid current track (avoids race with MOC load)
-                    t = self._playlist.get_current_track()
-                    logger.debug("start_after_sync: track=%s", t.file_path if t else None)
-                    if t and t.file_path:
-                        self._load_and_play_current_track()
-                    return False
-                GLib.idle_add(start_after_sync)
+            
+            # Handle playback start
+            effective_start = should_start or self._pending_start_playback
+            self._pending_start_playback = False
+            
+            if effective_start:
+                t = self._playlist.get_current_track()
+                if t and t.file_path:
+                    logger.debug("MOC sync complete, starting playback: %s", t.file_path)
+                    self._set_active_backend("moc")
+                    self._moc_last_file = str(Path(t.file_path).resolve())
+                    # If track is video, use internal player instead
+                    if not self._should_use_moc(t):
+                        self._play_with_internal(t)
+                    else:
+                        # MOC already started playback - set state immediately so UI updates
+                        # without waiting for next poll cycle
+                        self._set_playback_state(PlaybackState.PLAYING)
+                        self._set_position(0.0)
+                        if t.duration:
+                            self._set_duration(t.duration)
 
-        if len(playlist) >= 100:
-            self._moc_controller.set_playlist_large(
-                playlist, current_index, should_start, on_done=on_done
-            )
-        else:
-            self._moc_controller.set_playlist(
-                playlist, current_index, start_playback=should_start
-            )
-            on_done()
+        try:
+            if len(playlist) >= 100:
+                self._moc_controller.set_playlist_large(
+                    playlist, current_index, should_start, on_done=on_done
+                )
+            else:
+                self._moc_controller.set_playlist(
+                    playlist, current_index, start_playback=should_start
+                )
+                on_done()
+        except Exception as e:
+            logger.error("MOC sync failed: %s", e)
+            self._syncing_to_moc = False
+            self._pending_start_playback = False
         return False
 
     def _reload_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
@@ -748,22 +737,6 @@ class PlaybackController:
         except OSError:
             pass
 
-    def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        """Request sync to MOC when playlist content changes."""
-        content_changed = data is None or data.get("content_changed", True)
-        if not content_changed:
-            return
-        if not self._use_moc or self._active_backend not in ("moc", "none"):
-            return
-        if self._loading_from_moc:
-            return
-        # If currently syncing, mark that playlist changed so we re-sync after current sync completes
-        if self._syncing_to_moc:
-            self._playlist_changed_during_sync = True
-            return
-        if self._sync_idle_id is None:
-            self._sync_idle_id = GLib.idle_add(self._run_pending_moc_sync)
-
     def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
         pass  # PlaylistManager owns shuffle queue via same event
 
@@ -782,7 +755,7 @@ class PlaybackController:
         if self._operation_state != OperationState.SEEKING:
             # Update position first
             self._set_position(position)
-        # Update duration if it changed (this publishes DURATION_CHANGED event)
+        # Update duration if it changed (this publishes PLAYBACK_PROGRESS event)
         if duration > 0:
             self._set_duration(duration)
 
@@ -812,8 +785,7 @@ class PlaybackController:
 
         # Skip all state updates during MOC sync - MOC state is unstable while
         # playlist is being rebuilt. Sync's on_done will set correct state.
-        # Also skip if sync is scheduled but not started yet (_sync_idle_id is not None).
-        if self._syncing_to_moc or self._sync_idle_id is not None:
+        if self._syncing_to_moc:
             return True  # Continue polling, but don't update anything
 
         status = self._moc_controller.get_status()
@@ -845,7 +817,7 @@ class PlaybackController:
         if self._operation_state != OperationState.SEEKING:
             # Update position first
             self._set_position(position)
-        # Update duration if it changed (this publishes DURATION_CHANGED event)
+        # Update duration if it changed (this publishes PLAYBACK_PROGRESS event)
         if duration > 0:
             self._set_duration(duration)
 
@@ -890,7 +862,8 @@ class PlaybackController:
         )
         if track_finished:
             self._user_action_time = time.time()
-            if self._playlist.get_next_index() >= 0:
+            # RC-008: Use has_next() for read-only check (doesn't consume shuffle queue)
+            if self._playlist.has_next():
                 self._handle_track_finished()
             else:
                 self._set_playback_state(PlaybackState.STOPPED)
@@ -920,7 +893,7 @@ class PlaybackController:
         loop_mode = self._loop_mode
         playlist = self._playlist.get_playlist()
         cur = self._playlist.get_current_index()
-        next_idx = self._playlist.get_next_index()
+        next_idx = self._playlist.advance_to_next()
         if loop_mode == 1:
             self._on_action_play(None)
         elif loop_mode == 2:
@@ -1037,29 +1010,25 @@ class PlaybackController:
 
     def publish_initial_state(self) -> None:
         """Publish current playback state as events so UI (e.g. PlayerControls) can sync without reading state."""
+        # Unified progress event (replaces POSITION_CHANGED, DURATION_CHANGED)
         self._events.publish(
-            EventBus.POSITION_CHANGED,
+            EventBus.PLAYBACK_PROGRESS,
             {"position": self._position, "duration": self._duration},
-        )
-        self._events.publish(
-            EventBus.DURATION_CHANGED,
-            {"duration": self._duration, "position": self._position},
         )
         self._events.publish(EventBus.SHUFFLE_CHANGED, {"enabled": self._shuffle_enabled})
         self._events.publish(EventBus.LOOP_MODE_CHANGED, {"mode": self._loop_mode})
         self._events.publish(EventBus.VOLUME_CHANGED, {"volume": self._volume})
-        self._events.publish(
-            EventBus.ACTIVE_BACKEND_CHANGED, {"backend": self._active_backend}
-        )
+        # Note: ACTIVE_BACKEND_CHANGED publish removed (no subscribers)
+        # Unified playback state event
         if self._playback_state == PlaybackState.PLAYING:
-            self._events.publish(
-                EventBus.PLAYBACK_STARTED,
-                {"track": self._playlist.get_current_track()},
-            )
+            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {
+                "state": "playing",
+                "track": self._playlist.get_current_track(),
+            })
         elif self._playback_state == PlaybackState.PAUSED:
-            self._events.publish(EventBus.PLAYBACK_PAUSED, {})
+            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "paused"})
         else:
-            self._events.publish(EventBus.PLAYBACK_STOPPED, {})
+            self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "stopped"})
 
     def cleanup(self) -> None:
         if self._use_moc:
