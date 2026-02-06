@@ -123,6 +123,8 @@ class LibraryBrowser(Gtk.Box):
 
     def populate(self, library: "MusicLibrary") -> None:
         """Populate the tree with folder structure."""
+        self._library = library  # Keep reference for restoring after search
+        self._showing_search_results = False
         self.store.clear()
 
         folder_structure = library.get_folder_structure()
@@ -196,6 +198,35 @@ class LibraryBrowser(Gtk.Box):
                     key,
                     subfolder_path,
                 )
+
+    def show_search_results(self, tracks: List[TrackMetadata]) -> None:
+        """Show search results as a flat list of tracks."""
+        self._showing_search_results = True
+        self.store.clear()
+        
+        if not tracks:
+            # Show "No results" message
+            self.store.append(None, ["No results found", "info", None])
+            return
+        
+        # Add a "Search Results" header
+        results_iter = self.store.append(None, [f"Search Results ({len(tracks)})", "folder", None])
+        
+        # Add tracks under the header
+        for track in tracks:
+            track_name = track.title or Path(track.file_path).stem
+            artist = track.artist or "Unknown Artist"
+            display_name = f"{track_name} - {artist}"
+            self.store.append(results_iter, [display_name, "track", track])
+        
+        # Expand the results folder
+        path = self.store.get_path(results_iter)
+        self.tree_view.expand_row(path, False)
+
+    def clear_search(self) -> None:
+        """Clear search results and restore the folder view."""
+        if self._showing_search_results and hasattr(self, '_library') and self._library:
+            self.populate(self._library)
 
     def _on_click_pressed(self, gesture, n_press, x, y):
         """Handle click press - mark that a click is in progress."""

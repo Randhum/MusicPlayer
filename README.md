@@ -1385,6 +1385,7 @@ Fixed critical synchronization issues between tracks, playlist, playback state, 
 - **Chunked sync error handling**: Added error handling to `_chunked_append_next()` to ensure `on_done()` is always called even if an error occurs during sync, preventing `_syncing_to_moc` from getting stuck `True`.
 - **Progress bar sync**: Both `_play_with_moc()` and `_play_with_internal()` now immediately reset position to 0 and set duration from track metadata when starting a new track. Previously, the UI would show stale values until the next polling cycle (up to 500ms delay).
 - **Stuck seek state**: Fixed an issue where `_operation_state` could get stuck in `SEEKING` mode if backend was "none" (seek never completed). Now `_reset_seek_state()` is always called. Also, both play functions and STOP action now reset `_operation_state` to `IDLE`.
+- **Search bar behavior**: Search results now appear in the library browser (sidebar) instead of replacing the playlist. The library browser shows a "Search Results" folder with matching tracks. Clearing the search restores the normal folder view.
 
 These fixes ensure that:
 - UI shows correct state on startup if a track is already playing

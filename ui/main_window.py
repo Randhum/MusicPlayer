@@ -443,14 +443,13 @@ class MainWindow(Gtk.ApplicationWindow):
         return False  # Don't repeat
 
     def _on_search_changed(self, entry):
-        """Handle search entry changes."""
+        """Handle search entry changes - show results in library browser."""
         query = entry.get_text()
         if query:
             results = self.library.search(query)
-            self.playlist_view.clear()
-            self.playlist_view.add_tracks(results)
+            self.library_browser.show_search_results(results)
         else:
-            self.playlist_view.clear()
+            self.library_browser.clear_search()
 
     def _on_track_selected(self, browser, track: TrackMetadata):
         """Handle track selection from library browser."""
