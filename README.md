@@ -1306,90 +1306,32 @@ Track your learning progress!
 
 ## 📝 Recent Changes
 
-### Playlist Sync Stability Fix (Latest)
+### Event-Driven Architecture
 
-Fixed critical synchronization issues that caused the app to stop working when rapidly modifying playlists:
+The application uses a clean event-driven architecture:
 
-- **Shuffle queue invalidation**: When removing tracks, the shuffle queue indices were not regenerated, causing invalid index references. Now `remove_track()` regenerates the shuffle queue.
-- **MOC sync race condition**: When modifying the playlist while a MOC sync was in progress, those changes were lost. Now tracks changes during sync and re-syncs automatically when the current sync completes.
-- **Double MOC sync on folder play**: Fixed by using a unified `ACTION_REPLACE_PLAYLIST` event with `start_playback=true`. PlaylistManager handles the playlist update, PlaybackController handles MOC sync via `PLAYLIST_CHANGED` and starts playback via `ACTION_REPLACE_PLAYLIST`.
-- **Playback stopping after start**: Fixed issue where `_pending_start_playback` was set even in the normal sync path, causing `on_done` to schedule a second `_load_and_play_current_track` which would stop the just-started MOC playback. Now `_pending_start_playback` is only set when sync is already in progress (re-sync path).
-- **Active backend not set on sync playback**: When playback was started via `_sync_moc_playlist` (double-click folder), `_active_backend` was never set to "moc". This caused `_poll_moc_status` to skip updating playback state (it checks `if _active_backend != "moc": return`). Now `_set_active_backend("moc")` is called when `should_start` is True.
-- **Removing current track**: When removing the currently playing track, playback now stops cleanly (publishes `ACTION_STOP`) instead of leaving the app in an inconsistent state where MOC plays one track but the UI shows another.
-- **Files affected**: `playlist_manager.py`, `playback_controller.py`
+- **Unified events**: Granular events merged into `PLAYBACK_STATE_CHANGED` and `PLAYBACK_PROGRESS`
+- **Single source of truth**: `PlaylistManager` owns playlist; `PlaybackController` owns playback state
+- **Decoupled components**: UI publishes `ACTION_*` events, core publishes `*_CHANGED` events
+- **No circular dependencies**: Components communicate only through EventBus
 
-### GTK Popover Fix
+### Playback & MOC Integration
 
-Fixed "Broken accounting of active state for widget GtkPopover" warning that appeared when adding tracks to playlist:
+- **Reliable sync**: Chunked playlist loading for large folders with race condition protection
+- **Backend switching**: Clean transitions between MOC (audio) and internal player (video)
+- **State consistency**: All UI components stay in sync during playback and playlist changes
+- **Immediate updates**: No polling delay when tracks change
 
-- **Root cause**: Race condition between `_close_menu()` calling `popdown()` and the delayed `_cleanup_popover()` scheduled by the "closed" signal handler
-- **Fix**: In `_close_menu()`, disconnect the signal handler before calling `popdown()`, then schedule cleanup via `GLib.idle_add()` to let GTK finish state transitions before unparenting
-- **Files affected**: `library_browser.py`, `playlist_view.py`
+### UI Improvements
 
-### State–Event Integration
+- **Drag-to-reorder**: Touch-friendly playlist reordering with accurate drop positioning
+- **Search**: Results appear in library browser; clearing restores folder view
+- **Seek behavior**: Works while paused; small seeks register properly
+- **GTK stability**: Fixed assertion errors during large playlist operations
 
-Internal state and event management are aligned so every meaningful state change publishes the corresponding event:
+All components now stay in sync: UI shows correct state on startup, playlist view tracks selection properly, and metadata panel reflects the current track accurately.
 
-- **PlaybackController**: Holds playback state and publishes unified events when it changes:
-  - `PLAYBACK_STATE_CHANGED` (merged from PLAYBACK_STARTED/PAUSED/STOPPED): `{"state": "playing"|"paused"|"stopped", "track": TrackMetadata?}`
-  - `PLAYBACK_PROGRESS` (merged from POSITION_CHANGED/DURATION_CHANGED): `{"position": float, "duration": float}`
-  - `SHUFFLE_CHANGED`, `LOOP_MODE_CHANGED`, `VOLUME_CHANGED`
-- **PlaylistManager**: When add/remove/move/clear change the current index or current track, **CURRENT_INDEX_CHANGED** and **TRACK_CHANGED** are now emitted (via `_emit_current_track_changed`), so metadata and MPRIS stay in sync when the playlist is edited.
-- **Rule**: State is updated only through setters; setters publish the relevant events so subscribers (UI, PlaybackController) stay in sync.
-
-### Event Bus Cleanup (KISS Simplification)
-
-The event system was simplified following KISS principles. Removed/merged events:
-
-| Removed Event | Merged Into / Reason |
-|---------------|---------------------|
-| PLAYBACK_STARTED, PLAYBACK_PAUSED, PLAYBACK_STOPPED | PLAYBACK_STATE_CHANGED |
-| POSITION_CHANGED, DURATION_CHANGED | PLAYBACK_PROGRESS |
-| PLAYBACK_STOP_REQUESTED | ACTION_STOP (with reason field) |
-| ACTION_APPEND_FOLDER | Removed (use ADD_FOLDER) |
-| AUTONEXT_CHANGED | Removed (no subscribers) |
-| ACTIVE_BACKEND_CHANGED | Removed (no subscribers) |
-| BT_DEVICE_REMOVED | Removed (no subscribers) |
-| RELOAD_PLAYLIST_FROM_MOC | Removed (never published) |
-
-Also simplified PlaylistManager API: `has_next()` for read-only check, `advance_to_next()` for mutating shuffle queue.
-
-### State Synchronization Fixes
-
-Fixed critical synchronization issues between tracks, playlist, playback state, and UI components:
-
-- **PlayerControls state-action flow**: All user actions (play, pause, seek, volume, shuffle, loop) go through EventBus only. Volume changes publish `ACTION_SET_VOLUME`; `PlaybackController` updates its state and publishes VOLUME_CHANGED, and applies system volume. PlayerControls caches state from events (position, duration, shuffle, loop, volume, playlist_length, current_index) and initializes UI from that cache; **MainWindow** calls `playback_controller.publish_initial_state()` then `player_controls._initialize_from_state()` after load so UI stays in sync.
-- **Label–playback sync**: `_on_playback_progress` always receives both position and duration so time labels always reflect current state.
-- **Playlist view GTK assertion (gtk_css_node_insert_after)**: Large-playlist and chunked tree updates are scheduled with `GLib.PRIORITY_LOW` so store modifications run after layout/draw; this avoids modifying the widget tree during a CSS/layout pass.
-- **Progress bar drag always reflected**: On seek (drag or click), PlaybackController position (published via PLAYBACK_PROGRESS) is always updated so the UI and “play from here” stay in sync. When no backend is active or duration is 0, the controller still updates state; when a backend is active, it also seeks. Player controls always publish `ACTION_SEEK` on drag end (including when duration is 0) and use a 150ms rapid-change window for drag detection. MOC `seek_relative` uses `round(delta)` so small drags (e.g. 0.5s) still seek. **Seek while paused**: Internal player seeks immediately; MOC does not support seek while paused, so the app stores the desired position and applies it shortly after play starts (`_apply_moc_seek_after_play`).
-- **Playlist Loading Events**: `PlaylistManager.load_current_playlist()` now properly publishes `CURRENT_INDEX_CHANGED` and `TRACK_CHANGED` events after loading, ensuring UI components sync correctly on startup
-- **MainWindow Initialization Order**: Layered init (foundation → backends → playback controller → dock manager → UI → post-UI). All playlist operations go through `PlaylistView` (e.g. `load_current_playlist()`); playlist load runs after UI is created via `_init_playlist_and_state()`. `PlaybackController` receives `system_volume` and applies volume on `ACTION_SET_VOLUME`.
-- **Event Data Standardization**: All `PLAYLIST_CHANGED` events now consistently include `content_changed` boolean field
-- **MPRIS2 Navigation Updates**: PlayerControls now subscribes to `PLAYLIST_CHANGED` events to update MPRIS2 navigation capabilities when playlist changes
-- **Track Change Flow**: Improved documentation and consistency in `PlaybackController` track change handling
-- **MOC Sync Race Condition Fix**: Fixed a race condition where `_active_backend` and `_moc_last_file` were set before MOC sync completed, causing polling to interfere with playback. These are now set in `on_done()` after sync completes. Additionally, re-sync logic now preserves the `start_playback` intent from the original sync request, ensuring playback starts correctly even when playlist changes occur during sync.
-- **Double-click folder during sync**: Fixed an issue where double-clicking a new folder while a large folder was syncing to MOC would replace the playlist but not start playback. The problem was that `_start_playback_after_replace` tried to play immediately, but the subsequent MOC sync (triggered by `PLAYLIST_CHANGED`) would clear the playlist and interrupt playback. Now in MOC mode, `ACTION_REPLACE_PLAYLIST` with `start_playback=true` sets `_pending_sync_start_playback` so the MOC sync starts playback when it completes, avoiding the race condition.
-- **Chunked sync superseding**: Added sync ID mechanism to `MocController.set_playlist_large` to prevent stale chunked sync callbacks from interfering when a new sync supersedes an in-progress one. When a re-sync starts, old callbacks are safely ignored based on their sync ID.
-- **MOC polling not updating UI**: Fixed an issue where `_poll_moc_status` would skip updates if `_active_backend` wasn't "moc", even when MOC was actively playing. Now the poll detects when MOC is playing/paused but `_active_backend` is "none" and automatically activates the MOC backend, ensuring UI updates resume.
-- **Poll-sync race condition**: Fixed a race condition where the poll could interfere during the gap between playlist change and MOC sync start. Now `_syncing_to_moc` is set to `True` immediately in `_on_action_replace_playlist` (not deferred), and `_poll_moc_status` checks this flag early and skips all state updates during sync to prevent UI flickering and state corruption.
-- **GTK assertion errors during large playlist load**: Fixed `gtk_tree_view_scroll_to_cell: assertion 'priv->tree != NULL'` and `gtk_css_node_insert_after` errors. The issue was `_update_selection` checking playlist length instead of store row count - during chunked updates the store may have fewer rows than the playlist. Now checks both `current_index < len(tracks)` AND `current_index < len(store)`.
-- **Progress not updating when playing another folder**: Fixed an issue where `PLAYBACK_PROGRESS` events weren't immediately published after MOC sync completed and playback started. The UI had to wait for the next poll cycle (500ms) to receive progress updates. Now after sync completes with `start_playback=true`, the `on_done` callback immediately publishes `PLAYBACK_STATE_CHANGED` (playing), `PLAYBACK_PROGRESS` (position=0, duration from track metadata) ensuring instant UI update.
-- **Drag-to-reorder tracks landing in wrong position**: Fixed `move_track()` in PlaylistManager where dragging a track forward (e.g., from index 0 to index 3) would place it one position earlier than expected (at index 2 instead of 3). The bug was an incorrect `to_index - 1` adjustment when moving forward. Now tracks always land exactly where dropped: `move_track(0, 3)` on [A,B,C,D,E] correctly produces [B,C,D,A,E] with A at index 3.
-- **Drag target row calculation**: Simplified the drag-update coordinate calculation in PlaylistView by using GTK's built-in `get_path_at_pos()` instead of manual coordinate math with hardcoded header heights and scroll offset adjustments. This fixes issues where the drop target highlight would point to the wrong row, especially in scrolled lists.
-- **Drag responsiveness**: Reduced long-press threshold from 500ms to 250ms for snappier drag-to-reorder activation on desktop.
-- **Track not advancing after seek**: Fixed an issue where tracks wouldn't auto-advance after dragging the progress bar. The bug was a race condition in initialization: `set_initial_state_from_moc()` would read MOC's initial `autonext=false` state, then `_initialize_moc()` would enable autonext in MOC but not update the app's `_autonext_enabled` flag. Now `_autonext_enabled` is explicitly set to `True` when enabling autonext in MOC.
-- **Dual playback when switching between audio/video**: Fixed an issue where both MOC (audio) and internal player (video) could play simultaneously when switching between audio and video tracks. Now `_play_with_moc()` stops the internal player first, and `_play_with_internal()` stops MOC first.
-- **Video playback not starting via folder play**: Fixed an issue where double-clicking a folder with video files wouldn't start playback. The sync logic incorrectly set `should_start=False` for video files, preventing playback initiation. Now the original `start_playback` intent is preserved and video files are played via the internal player after MOC sync completes.
-- **Chunked sync error handling**: Added error handling to `_chunked_append_next()` to ensure `on_done()` is always called even if an error occurs during sync, preventing `_syncing_to_moc` from getting stuck `True`.
-- **Progress bar sync**: Both `_play_with_moc()` and `_play_with_internal()` now immediately reset position to 0 and set duration from track metadata when starting a new track. Previously, the UI would show stale values until the next polling cycle (up to 500ms delay).
-- **Stuck seek state**: Fixed an issue where `_operation_state` could get stuck in `SEEKING` mode if backend was "none" (seek never completed). Now `_reset_seek_state()` is always called. Also, both play functions and STOP action now reset `_operation_state` to `IDLE`.
-- **Search bar behavior**: Search results now appear in the library browser (sidebar) instead of replacing the playlist. The library browser shows a "Search Results" folder with matching tracks. Clearing the search restores the normal folder view.
-
-These fixes ensure that:
-- UI shows correct state on startup if a track is already playing
-- Playlist view shows correct selection on startup
-- Metadata panel shows correct track on startup
-- All UI components stay in sync during track and playlist changes
+See [EVENT_SEQUENCES.md](EVENT_SEQUENCES.md) for detailed architecture documentation.
 
 ---
 
