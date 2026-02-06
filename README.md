@@ -496,7 +496,8 @@ pactl info
 ```
 
 ### "Bluetooth not working!"
-i
+
+```bash
 # Is adapter on?
 bluetoothctl power on
 
