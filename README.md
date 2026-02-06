@@ -1299,7 +1299,27 @@ Track your learning progress!
 
 ## 📝 Recent Changes
 
-### State–Event Integration (Latest)
+### Playlist Sync Stability Fix (Latest)
+
+Fixed critical synchronization issues that caused the app to stop working when rapidly modifying playlists:
+
+- **Shuffle queue invalidation**: When removing tracks, the shuffle queue indices were not regenerated, causing invalid index references. Now `remove_track()` regenerates the shuffle queue.
+- **MOC sync race condition**: When modifying the playlist while a MOC sync was in progress, those changes were lost. Now tracks changes during sync and re-syncs automatically when the current sync completes.
+- **Double MOC sync on folder play**: When double-clicking a folder, both `PLAYLIST_CHANGED` and `ACTION_SYNC_PLAYLIST_TO_MOC` were scheduling separate syncs to MOC. Now both use the same coalescing mechanism (`_sync_idle_id`) to ensure only one sync runs.
+- **Playback stopping after start**: Fixed issue where `_pending_start_playback` was set even in the normal sync path, causing `on_done` to schedule a second `_load_and_play_current_track` which would stop the just-started MOC playback. Now `_pending_start_playback` is only set when sync is already in progress (re-sync path).
+- **Active backend not set on sync playback**: When playback was started via `_sync_moc_playlist` (double-click folder), `_active_backend` was never set to "moc". This caused `_poll_moc_status` to skip updating playback state (it checks `if _active_backend != "moc": return`). Now `_set_active_backend("moc")` is called when `should_start` is True.
+- **Removing current track**: When removing the currently playing track, playback now stops cleanly (publishes `ACTION_STOP`) instead of leaving the app in an inconsistent state where MOC plays one track but the UI shows another.
+- **Files affected**: `playlist_manager.py`, `playback_controller.py`
+
+### GTK Popover Fix
+
+Fixed "Broken accounting of active state for widget GtkPopover" warning that appeared when adding tracks to playlist:
+
+- **Root cause**: Race condition between `_close_menu()` calling `popdown()` and the delayed `_cleanup_popover()` scheduled by the "closed" signal handler
+- **Fix**: In `_close_menu()`, disconnect the signal handler before calling `popdown()`, then schedule cleanup via `GLib.idle_add()` to let GTK finish state transitions before unparenting
+- **Files affected**: `library_browser.py`, `playlist_view.py`
+
+### State–Event Integration
 
 Internal state and event management are aligned so every meaningful state change publishes the corresponding event:
 
@@ -1324,6 +1344,7 @@ Fixed critical synchronization issues between tracks, playlist, playback state, 
 - **Event Data Standardization**: All `PLAYLIST_CHANGED` events now consistently include `content_changed` boolean field
 - **MPRIS2 Navigation Updates**: PlayerControls now subscribes to `PLAYLIST_CHANGED` events to update MPRIS2 navigation capabilities when playlist changes
 - **Track Change Flow**: Improved documentation and consistency in `PlaybackController` track change handling
+- **MOC Sync Race Condition Fix**: Fixed a race condition where `_active_backend` and `_moc_last_file` were set before MOC sync completed, causing polling to interfere with playback. These are now set in `on_done()` after sync completes. Additionally, re-sync logic now preserves the `start_playback` intent from the original sync request, ensuring playback starts correctly even when playlist changes occur during sync.
 
 These fixes ensure that:
 - UI shows correct state on startup if a track is already playing

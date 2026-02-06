@@ -560,8 +560,16 @@ class LibraryBrowser(Gtk.Box):
         """Close the context menu safely."""
         if self.context_menu:
             try:
+                # Disconnect signal first to prevent double cleanup
+                try:
+                    self.context_menu.disconnect_by_func(self._on_popover_closed)
+                except (TypeError, AttributeError):
+                    pass
+                # Call popdown to close visually
                 self.context_menu.popdown()
             except (AttributeError, RuntimeError):
                 # Widget may have been destroyed
                 pass
+            # Schedule cleanup in idle to let GTK finish state transitions
+            GLib.idle_add(self._cleanup_popover)
         self._menu_showing = False

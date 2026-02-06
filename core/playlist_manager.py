@@ -258,12 +258,17 @@ class PlaylistManager:
         if not (0 <= index < len(self.current_playlist)):
             return
         old_index = self.current_index
+        removed_current = index == self.current_index
         removed_track = self.current_playlist.pop(index)
         if index < self.current_index:
             self.current_index -= 1
         elif index == self.current_index:
+            # When removing the current track, reset index and stop playback
             self.current_index = -1
         if self._event_bus:
+            # If we removed the currently playing track, stop playback first
+            if removed_current:
+                self._event_bus.publish(EventBus.ACTION_STOP)
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
@@ -274,6 +279,9 @@ class PlaylistManager:
                 },
             )
             self._emit_current_track_changed(old_index)
+        # Regenerate shuffle queue when tracks are removed (indices change)
+        if self._shuffle_enabled:
+            self._regenerate_shuffle_queue()
         self._sync_to_file()
 
     def move_track(self, from_index: int, to_index: int) -> None:

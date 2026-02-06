@@ -90,6 +90,7 @@ class PlaybackController:
         self._pending_start_playback: bool = False
         self._sync_idle_id: Optional[int] = None  # coalesce PLAYLIST_CHANGED + ACTION_SYNC into one sync
         self._pending_sync_start_playback: bool = False
+        self._playlist_changed_during_sync: bool = False  # Track if playlist changed while syncing
         self._user_action_time: float = 0.0
         self._startup_complete: bool = False
 
@@ -466,11 +467,25 @@ class PlaybackController:
         return False
 
     def _on_action_sync_playlist_to_moc(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle explicit sync of internal playlist to MOC (e.g. after add track or play folder)."""
+        """Handle explicit sync of internal playlist to MOC (e.g. after add track or play folder).
+        
+        Uses the same coalescing mechanism as _on_playlist_changed to avoid double syncs.
+        """
         if not self._use_moc:
             return
         start_playback = data.get("start_playback", False) if data else False
-        GLib.idle_add(self._sync_moc_playlist, start_playback)
+        # Record that we want to start playback for the coalesced sync
+        if start_playback:
+            self._pending_sync_start_playback = True
+        # If currently syncing, mark that we need to re-sync and preserve start_playback for re-sync path
+        if self._syncing_to_moc:
+            if start_playback:
+                self._pending_start_playback = True  # Only set for re-sync path
+            self._playlist_changed_during_sync = True
+            return
+        # Schedule sync if not already scheduled (coalesce with PLAYLIST_CHANGED)
+        if self._sync_idle_id is None:
+            self._sync_idle_id = GLib.idle_add(self._run_pending_moc_sync)
 
     def _on_action_append_folder(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle append folder action - add folder to MOC playlist, then reload into app state (UI updates via PLAYLIST_CHANGED)."""
@@ -634,6 +649,19 @@ class PlaybackController:
                     self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
             except OSError:
                 pass
+            # Check if playlist changed during sync - if so, re-sync
+            if self._playlist_changed_during_sync:
+                self._playlist_changed_during_sync = False
+                logger.debug("Playlist changed during MOC sync, scheduling re-sync")
+                # Preserve start_playback intent: if original should_start OR pending, keep it
+                re_sync_start = should_start or self._pending_start_playback
+                self._pending_start_playback = False
+                GLib.idle_add(self._sync_moc_playlist, re_sync_start)
+                return
+            # Set active backend to MOC AFTER sync completes (not before) so polling doesn't interfere
+            if should_start and track:
+                self._set_active_backend("moc")
+                self._moc_last_file = str(Path(track.file_path).resolve())
             if self._pending_start_playback:
                 self._pending_start_playback = False
                 def start_after_sync():
@@ -679,15 +707,18 @@ class PlaybackController:
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Request sync to MOC. Coalesced with ACTION_SYNC_PLAYLIST_TO_MOC so we run one sync."""
         content_changed = data is None or data.get("content_changed", True)
-        if (
-            content_changed
-            and self._use_moc
-            and self._active_backend in ("moc", "none")
-            and not self._loading_from_moc
-            and not self._syncing_to_moc
-        ):
-            if self._sync_idle_id is None:
-                self._sync_idle_id = GLib.idle_add(self._run_pending_moc_sync)
+        if not content_changed:
+            return
+        if not self._use_moc or self._active_backend not in ("moc", "none"):
+            return
+        if self._loading_from_moc:
+            return
+        # If currently syncing, mark that playlist changed so we re-sync after current sync completes
+        if self._syncing_to_moc:
+            self._playlist_changed_during_sync = True
+            return
+        if self._sync_idle_id is None:
+            self._sync_idle_id = GLib.idle_add(self._run_pending_moc_sync)
 
     def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
         pass  # PlaylistManager owns shuffle queue via same event
