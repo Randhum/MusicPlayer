@@ -119,7 +119,7 @@ class PlaylistView(Gtk.Box):
         self._drag_start_time = (
             0  # Timestamp when drag started (for long-press detection)
         )
-        self._long_press_threshold = 500000  # 500ms in microseconds
+        self._long_press_threshold = 250000  # 250ms in microseconds (snappier drag feel)
         self._drop_target_index = -1  # Index of row being highlighted as drop target
 
         # Context menu
@@ -780,71 +780,46 @@ class PlaylistView(Gtk.Box):
         if not self._drag_mode:
             return
 
-        # Calculate target row based on Y position and visible rows
-        # DO NOT update selection during drag - only visual highlight
+        # Calculate target row using GTK's built-in path detection
         try:
             success, start_x, start_y = gesture.get_start_point()
             if not success:
                 return
 
+            current_x = start_x + offset_x
             current_y = start_y + offset_y
 
-            # Get visible range - add error handling
-            visible_range = self.tree_view.get_visible_range()
             playlist = self.playlist_manager.get_playlist()
-            if not playlist or not visible_range:
+            if not playlist:
                 return
 
-            start_path, end_path = visible_range
-            if not start_path or not end_path:
-                return
+            # Convert widget coordinates to bin window coordinates
+            # The tree view header offsets the content, so we need to adjust
+            # get_path_at_pos expects bin window coords (content area, not header)
+            bin_x, bin_y = self.tree_view.convert_widget_to_bin_window_coords(
+                int(current_x), int(current_y)
+            )
 
-            # Get indices with error handling
-            start_indices = start_path.get_indices()
-            end_indices = end_path.get_indices()
-            if not start_indices or not end_indices:
-                return
+            # Use get_path_at_pos for accurate row detection
+            path_info = self.tree_view.get_path_at_pos(bin_x, bin_y)
             
-            start_idx = start_indices[0]
-            end_idx = end_indices[0]
+            if path_info:
+                path = path_info[0]
+                indices = path.get_indices()
+                if indices:
+                    target_index = indices[0]
+                else:
+                    # Fallback: if at bottom of list, use last index
+                    target_index = len(playlist) - 1
+            else:
+                # Mouse is outside row bounds - determine if above or below
+                # If y is negative or small, use first row; if large, use last row
+                if bin_y < 0:  # Above first row
+                    target_index = 0
+                else:
+                    target_index = len(playlist) - 1
 
-            # Get cell area - add error handling
-            try:
-                start_rect = self.tree_view.get_cell_area(start_path, None)
-                if not start_rect or start_rect.height <= 0:
-                    return
-                row_height = start_rect.height
-            except (AttributeError, RuntimeError, ValueError):
-                return
-
-            # Get tree view bounds - add error handling
-            try:
-                allocation = self.tree_view.get_allocation()
-                if not allocation or allocation.height <= 0:
-                    return
-            except (AttributeError, RuntimeError):
-                return
-
-            # Calculate which visible row the Y coordinate corresponds to
-            header_height = 30
-            scroll_offset = 0
-            
-            # Get scroll position - add error handling
-            try:
-                scrolled = self.tree_view.get_parent()
-                if isinstance(scrolled, Gtk.ScrolledWindow):
-                    vadjustment = scrolled.get_vadjustment()
-                    if vadjustment:
-                        scroll_offset = vadjustment.get_value()
-            except (AttributeError, RuntimeError):
-                pass  # Use default scroll_offset = 0
-
-            # Calculate relative Y position within visible area
-            adjusted_y = current_y - header_height + scroll_offset
-            row_offset = int(adjusted_y / row_height) if row_height > 0 else 0
-
-            # Calculate target index with bounds checking
-            target_index = start_idx + row_offset
+            # Bounds check
             target_index = max(0, min(target_index, len(playlist) - 1))
 
             # Only update visual highlight, NOT selection model

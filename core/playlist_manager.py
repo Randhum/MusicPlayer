@@ -330,6 +330,7 @@ class PlaylistManager:
             to_index: Destination position (where track should end up)
 
         After the move, the track is at position to_index in the final list.
+        Example: move_track(0, 3) on [A,B,C,D,E] results in [B,C,D,A,E] with A at index 3.
         """
         if not (
             0 <= from_index < len(self.current_playlist)
@@ -338,11 +339,9 @@ class PlaylistManager:
             return
         old_index = self.current_index
         track = self.current_playlist.pop(from_index)
-        if from_index < to_index:
-            insert_index = to_index - 1
-        else:
-            insert_index = to_index
-        self.current_playlist.insert(insert_index, track)
+        # After pop, insert at to_index puts the track at final position to_index
+        # This works for both forward and backward moves
+        self.current_playlist.insert(to_index, track)
         if self.current_index == from_index:
             self.current_index = to_index
         elif from_index < self.current_index <= to_index:

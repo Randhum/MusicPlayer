@@ -203,7 +203,9 @@ class PlaybackController:
             return False
         if self._moc_controller.ensure_server():
             # Enable autonext in MOC (required for track advancement)
+            # Also set our flag since set_initial_state_from_moc may have set it to False
             self._moc_controller.set_autonext(True)
+            self._autonext_enabled = True
             # Sync shuffle state from MOC
             moc_shuffle = self._moc_controller.get_shuffle_state()
             if moc_shuffle is not None:
