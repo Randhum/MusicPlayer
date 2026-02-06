@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 
 from mutagen import File
 from mutagen.flac import FLAC
-from mutagen.id3 import ID3NoHeaderError
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4
 from mutagen.oggvorbis import OggVorbis

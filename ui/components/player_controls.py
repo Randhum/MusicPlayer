@@ -1,12 +1,7 @@
 """Player controls component - play/pause/next/prev/volume/progress."""
 
 from enum import Enum
-from pathlib import Path
-from typing import TYPE_CHECKING, Optional
-
-if TYPE_CHECKING:
-    from ui.components.bluetooth_panel import BluetoothPanel
-    from ui.components.playlist_view import PlaylistView
+from typing import Optional
 
 import gi
 

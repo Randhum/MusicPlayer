@@ -21,7 +21,6 @@ except ImportError:
 from core.config import get_config
 from core.logging import get_logger
 from core.metadata import TrackMetadata
-from core.security import SecurityValidator
 
 logger = get_logger(__name__)
 

@@ -4,7 +4,6 @@ from typing import Callable, Optional
 
 import dbus
 import dbus.service
-from dbus.mainloop.glib import DBusGMainLoop
 import gi
 
 gi.require_version("GLib", "2.0")

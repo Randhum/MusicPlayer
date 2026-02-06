@@ -1,7 +1,7 @@
 """Playlist view component - shows current queue/playlist."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import Callable, List, Optional
 
 
 import gi

@@ -1,6 +1,6 @@
 """Main application window with dockable panels."""
 
-from typing import List, Optional
+from typing import List
 
 import gi
 

@@ -2,7 +2,7 @@
 
 import time
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
 
 import dbus
 

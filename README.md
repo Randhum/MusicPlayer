@@ -1148,9 +1148,7 @@ User Action → UI Component → EventBus (ACTION_*) → PlaybackController
 - **Core → UI**: Core managers publish *_CHANGED events (notifications)
 - **Single source of mutation**: PlaybackController handles index changes for playback; PlaylistManager handles playlist content changes
 
-**Detailed event sequences:** See [docs/EVENT_SEQUENCES.md](docs/EVENT_SEQUENCES.md) for step-by-step diagrams of all major event flows including playlist replacement, MOC synchronization, and large playlist handling.
-
-**Race condition analysis:** See [docs/RACE_CONDITION_ANALYSIS.md](docs/RACE_CONDITION_ANALYSIS.md) for detailed analysis of potential race conditions, their mitigations, and recommendations.
+**Detailed event sequences:** See [EVENT_SEQUENCES.md](EVENT_SEQUENCES.md) for step-by-step diagrams of all major event flows including playlist replacement, MOC synchronization, and large playlist handling.
 
 **Benefits:**
 - **No circular dependencies** - Components depend only on EventBus and script modules (PlaylistManager, PlaybackController)
@@ -1251,7 +1249,6 @@ The codebase follows Linux best practices:
 - **Explicit state machines** using enums instead of boolean flags
 - **Separation of concerns** between UI updates and playback operations
 - **Race condition prevention** through explicit state management
-- **Code cleanup log**: All incremental cleanups (dead code, imports, exception handling) are documented in `cleanup.md`.
 
 #### Testing
 

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from core.events import EventBus
-from core.exceptions import PlaylistError, SecurityError
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 from core.security import SecurityValidator

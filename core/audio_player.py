@@ -12,7 +12,7 @@ The AudioPlayer class handles:
 
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 import gi
 

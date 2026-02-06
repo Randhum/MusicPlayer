@@ -8,7 +8,7 @@ gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, GObject, Gtk
 
-from core.bluetooth_manager import BluetoothDevice, BluetoothManager
+from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.events import EventBus
 

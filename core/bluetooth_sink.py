@@ -3,7 +3,7 @@
 import subprocess
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, List, Optional, Set
 
 import dbus
 import gi

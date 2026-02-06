@@ -2,7 +2,7 @@
 import time
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Any
+from typing import TYPE_CHECKING, Dict, Optional, Any
 if TYPE_CHECKING:
     from core.playlist_manager import PlaylistManager
 import gi
