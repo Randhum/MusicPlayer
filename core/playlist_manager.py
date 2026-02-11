@@ -427,13 +427,6 @@ class PlaylistManager:
 
     # Note: get_next_track() removed - use advance_to_next() then get_current_track()
 
-    def get_previous_track(self) -> Optional[TrackMetadata]:
-        """Get the previous track in the playlist."""
-        if self.current_index > 0:
-            self.current_index -= 1
-            return self.current_playlist[self.current_index]
-        return None
-
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist to a file.
 

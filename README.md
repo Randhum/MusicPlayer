@@ -1334,6 +1334,11 @@ The application uses a clean event-driven architecture:
 - Removed unused reconnect/message-validation helpers from `core/dbus_utils.py`
 - Removed unused playback guard and row CSS cache from `ui/components/playlist_view.py`
 - Removed unused drag counter state from `ui/components/player_controls.py`
+- Removed unused fallback library selection handlers from `ui/main_window.py`
+- Removed unused custom GTK signals/methods from `ui/components/playlist_view.py` and `ui/components/bluetooth_panel.py`
+- Removed unused workflow helpers from `core/workflow_utils.py` (`validate_track`, `select_player`)
+- Removed unused mutating legacy method `get_previous_track()` from `core/playlist_manager.py`
+- Removed inactive/unimplemented watchdog scaffold from `core/music_library.py`
 
 All components now stay in sync: UI shows correct state on startup, playlist view tracks selection properly, and metadata panel reflects the current track accurately.
 

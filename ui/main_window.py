@@ -1,7 +1,5 @@
 """Main application window with dockable panels."""
 
-from typing import List
-
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -13,7 +11,6 @@ from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
 from core.events import EventBus
 from core.logging import get_logger
-from core.metadata import TrackMetadata
 from core.moc_controller import MocController
 from core.mpris2 import MPRIS2Manager
 from core.music_library import MusicLibrary
@@ -322,8 +319,6 @@ class MainWindow(Gtk.ApplicationWindow):
             playlist_view=self.playlist_view,
             player_controls=self.player_controls,
         )
-        self.library_browser.connect("track-selected", self._on_track_selected)
-        self.library_browser.connect("album-selected", self._on_album_selected)
 
     def _create_playlist_view(self):
         """Create and configure the playlist view."""
@@ -444,14 +439,6 @@ class MainWindow(Gtk.ApplicationWindow):
             self.library_browser.show_search_results(results)
         else:
             self.library_browser.clear_search()
-
-    def _on_track_selected(self, browser, track: TrackMetadata):
-        """Handle track selection from library browser."""
-        self.playlist_view.replace_and_play_track(track)
-
-    def _on_album_selected(self, browser, tracks: List[TrackMetadata]):
-        """Handle album selection from library browser."""
-        self.playlist_view.replace_and_play_album(tracks)
 
     def _on_system_volume_changed(self, volume: float):
         """Handle system volume change from external source (e.g., volume keys) - publish so UI updates."""

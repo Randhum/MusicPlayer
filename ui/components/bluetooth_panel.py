@@ -6,7 +6,7 @@ import gi
 
 gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, GObject, Gtk
+from gi.repository import GLib, Gtk
 
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
@@ -15,10 +15,6 @@ from core.events import EventBus
 
 class BluetoothPanel(Gtk.Box):
     """Component for Bluetooth status and device management."""
-
-    __gsignals__ = {
-        "device-selected": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-    }
 
     def __init__(
         self,
@@ -155,8 +151,6 @@ class BluetoothPanel(Gtk.Box):
                     elif not device.connected:
                         self.bt_manager.connect_device(device_path)
 
-            # Still emit signal for other listeners if needed
-            self.emit("device-selected", device_path)
 
     def _on_bt_device_connected(self, data: Optional[dict]) -> None:
         """Handle device connection event."""
@@ -226,29 +220,3 @@ class BluetoothPanel(Gtk.Box):
         self.status_label.set_text("Speaker mode disabled")
         self.status_icon.set_from_icon_name("bluetooth-disabled-symbolic")
 
-    def handle_playback_control(self, action: str) -> bool:
-        """
-        Handle playback control commands when BT sink is active.
-
-        Args:
-            action: One of 'play', 'pause', 'stop', 'next', 'prev'
-
-        Returns:
-            True if BT is active and command was handled, False otherwise
-        """
-        if not self.bt_sink or not self.bt_sink.is_sink_enabled:
-            return False
-
-        if not self.bt_sink.connected_device:
-            return False
-
-        # Route to bt_sink playback control
-        return self.bt_sink.control_playback(action)
-
-    def is_bt_playback_active(self) -> bool:
-        """Check if BT sink is active and receiving audio."""
-        return (
-            self.bt_sink
-            and self.bt_sink.is_sink_enabled
-            and self.bt_sink.connected_device is not None
-        )

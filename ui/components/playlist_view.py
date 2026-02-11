@@ -9,7 +9,7 @@ import gi
 gi.require_version("Gdk", "4.0")
 gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gdk, GLib, GObject, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from core.events import EventBus
 from core.logging import get_logger
@@ -21,11 +21,6 @@ logger = get_logger(__name__)
 
 class PlaylistView(Gtk.Box):
     """Playlist tree; subscribes to PLAYLIST_CHANGED/CURRENT_INDEX_CHANGED; publishes ACTION_*."""
-
-    __gsignals__ = {
-        "track-activated": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-        "current-index-changed": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
-    }
 
     def __init__(
         self,
@@ -285,7 +280,6 @@ class PlaylistView(Gtk.Box):
         self._playback_lock = True
         # Don't mutate state - let controller handle it
         self._events.publish(EventBus.ACTION_PLAY_TRACK, {"index": index})
-        self.emit("track-activated", index)
         GLib.timeout_add(500, self._release_playback_lock)
 
     def replace_and_play_track(self, track: TrackMetadata) -> None:
