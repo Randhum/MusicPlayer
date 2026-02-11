@@ -131,7 +131,6 @@ class PlaylistView(Gtk.Box):
         self._click_selected_index = -1
 
         # Playback state
-        self._playback_in_progress = False
         self._playback_lock = False
 
         # Drag-to-reorder state
@@ -155,7 +154,6 @@ class PlaylistView(Gtk.Box):
         # Blinking highlight for current playing track when another row is selected
         self._blink_timeout_id = None
         self._blink_state = False  # Toggle state for blinking
-        self._row_css_classes = {}  # Track CSS classes per row path
         self._setup_blinking_highlight()
 
         # Columns with touch-friendly padding
@@ -690,11 +688,6 @@ class PlaylistView(Gtk.Box):
     def _release_playback_lock(self):
         """Release playback lock."""
         self._playback_lock = False
-        return False  # Don't repeat
-
-    def _reset_playback_guard(self):
-        """Reset the playback guard after a delay."""
-        self._playback_in_progress = False
         return False  # Don't repeat
 
     def _on_row_activated(self, tree_view, path, column):

@@ -1329,6 +1329,12 @@ The application uses a clean event-driven architecture:
 - **Seek behavior**: Works while paused; small seeks register properly
 - **GTK stability**: Fixed assertion errors during large playlist operations
 
+### Dead Code Cleanup
+
+- Removed unused reconnect/message-validation helpers from `core/dbus_utils.py`
+- Removed unused playback guard and row CSS cache from `ui/components/playlist_view.py`
+- Removed unused drag counter state from `ui/components/player_controls.py`
+
 All components now stay in sync: UI shows correct state on startup, playlist view tracks selection properly, and metadata panel reflects the current track accurately.
 
 See [EVENT_SEQUENCES.md](EVENT_SEQUENCES.md) for detailed architecture documentation.

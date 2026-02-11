@@ -2,7 +2,7 @@
 
 import time
 from functools import wraps
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable
 
 import dbus
 
@@ -22,9 +22,6 @@ class DBusConnectionMonitor:
             bus: D-Bus bus to monitor
         """
         self.bus = bus
-        self._last_check = time.time()
-        self._reconnect_callbacks: List[Callable] = []
-        self._is_connected = True
 
     def check_connection(self) -> bool:
         """
@@ -36,25 +33,10 @@ class DBusConnectionMonitor:
         try:
             # Try to get a well-known name to test connection
             self.bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus")
-            self._is_connected = True
-            self._last_check = time.time()
             return True
         except Exception as e:
             logger.warning("D-Bus connection check failed: %s", e)
-            self._is_connected = False
             return False
-
-    def register_reconnect_callback(self, callback: Callable):
-        """Register a callback to be called on reconnection."""
-        self._reconnect_callbacks.append(callback)
-
-    def trigger_reconnect(self):
-        """Trigger reconnection callbacks."""
-        for callback in self._reconnect_callbacks:
-            try:
-                callback()
-            except Exception as e:
-                logger.error("Error in reconnect callback: %s", e, exc_info=True)
 
 
 def dbus_retry(max_retries: int = 3, backoff: float = 0.5):
@@ -140,52 +122,3 @@ def dbus_safe_call(func: Callable, default_return: Any = None, log_errors: bool 
         return default_return
 
 
-def validate_dbus_message(
-    message: Any, required_interface: Optional[str] = None
-) -> bool:
-    """
-    Validate a D-Bus message for security.
-
-    This function is intended for low-level D-Bus message validation.
-    Note: When using dbus.service.Object, messages are handled automatically
-    and methods receive regular Python arguments, not message objects.
-
-    Args:
-        message: D-Bus message object (low-level API) or any object with
-                get_interface() and get_sender() methods
-        required_interface: Required interface name (optional)
-
-    Returns:
-        True if message is valid, False otherwise
-    """
-    try:
-        # Check if message has required interface
-        if required_interface:
-            if not hasattr(message, "get_interface"):
-                logger.warning("D-Bus message object missing get_interface() method")
-                return False
-            if message.get_interface() != required_interface:
-                logger.warning(
-                    "D-Bus message has wrong interface: expected %s, got %s",
-                    required_interface,
-                    message.get_interface(),
-                )
-                return False
-
-        # Validate sender (basic check)
-        if not hasattr(message, "get_sender"):
-            logger.warning("D-Bus message object missing get_sender() method")
-            return False
-
-        sender = message.get_sender()
-        if sender and not sender.startswith(":"):
-            # Well-known names should be validated
-            # For now, just log suspicious senders
-            if ".." in sender or "/" in sender:
-                logger.warning("D-Bus message from suspicious sender: %s", sender)
-                return False
-
-        return True
-    except Exception as e:
-        logger.error("Error validating D-Bus message: %s", e, exc_info=True)
-        return False

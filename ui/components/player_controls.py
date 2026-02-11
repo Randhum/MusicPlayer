@@ -58,7 +58,6 @@ class PlayerControls(Gtk.Box):
         self._updating_volume = False
         self._updating_toggle = False
         self._updating_progress = False
-        self._value_changed_count: int = 0
         self._last_value_changed_time: int = 0
         self._drag_timeout_id: Optional[int] = None
         self._press_x: float = 0.0
@@ -334,7 +333,6 @@ class PlayerControls(Gtk.Box):
         # If this is a rapid change and we're not already dragging, start drag
         if is_rapid_change and self._seek_state == SeekState.IDLE:
             self._seek_state = SeekState.DRAGGING
-            self._value_changed_count = 0
             self._press_handled = (
                 True  # Mark that this press is being handled as a drag
             )
@@ -348,7 +346,6 @@ class PlayerControls(Gtk.Box):
 
         # During drag: update display (labels) only; do not seek playback until drag ends
         if self._seek_state == SeekState.DRAGGING:
-            self._value_changed_count += 1
             duration = self._last_duration
             if duration > 0:
                 scale_value = scale.get_value()
@@ -379,7 +376,6 @@ class PlayerControls(Gtk.Box):
             self._seek_state = SeekState.IDLE
             self._updating_progress = False
 
-            self._value_changed_count = 0
             self._last_value_changed_time = 0
 
         self._drag_timeout_id = None
