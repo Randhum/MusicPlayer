@@ -1341,6 +1341,11 @@ The application uses a clean event-driven architecture:
 - Removed inactive/unimplemented watchdog scaffold from `core/music_library.py`
 - Removed redundant no-op branches and stale comments in playback/UI modules
 - Removed extra unused imports and a no-op shuffle subscriber in UI/playback modules
+- Simplified `LibraryBrowser` constructor by removing unused backward-compat parameters
+- Wired explicit `on_open_uri` callback path in MPRIS2 manager/service
+- Simplified `PipeWireVolume` to explicit pactl-based behavior (removed inactive native D-Bus path)
+- Removed unused dock layout helper and unused persisted panel visibility field
+- Removed unused `EventBus` debug toggle path (`set_debug` / internal flag)
 
 All components now stay in sync: UI shows correct state on startup, playlist view tracks selection properly, and metadata panel reflects the current track accurately.
 

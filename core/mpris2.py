@@ -92,6 +92,7 @@ class MPRIS2Service(dbus.service.Object):
         self.on_set_volume: Optional[Callable[[float], None]] = None
         self.on_quit: Optional[Callable[[], None]] = None
         self.on_raise: Optional[Callable[[], None]] = None
+        self.on_open_uri: Optional[Callable[[str], None]] = None
 
     @dbus.service.method(MPRIS2_ROOT_INTERFACE, in_signature="", out_signature="")
     def Quit(self):
@@ -755,6 +756,7 @@ class MPRIS2Manager:
             if self._window_callbacks:
                 self.service.on_quit = self._window_callbacks.get("on_quit")
                 self.service.on_raise = self._window_callbacks.get("on_raise")
+                self.service.on_open_uri = self._window_callbacks.get("on_open_uri")
 
             logger.info(
                 "MPRIS2: Service registered successfully on %s", MPRIS2_OBJECT_PATH
@@ -803,18 +805,20 @@ class MPRIS2Manager:
             self.service.on_set_position = on_set_position
             self.service.on_set_volume = on_set_volume
 
-    def set_window_callbacks(self, on_quit=None, on_raise=None):
+    def set_window_callbacks(self, on_quit=None, on_raise=None, on_open_uri=None):
         """Set window control callbacks."""
         # Store callbacks for when service is ready
         self._window_callbacks = {
             "on_quit": on_quit,
             "on_raise": on_raise,
+            "on_open_uri": on_open_uri,
         }
 
         # Apply to service if it's ready
         if self.service:
             self.service.on_quit = on_quit
             self.service.on_raise = on_raise
+            self.service.on_open_uri = on_open_uri
 
     def update_metadata(self, track: Optional[TrackMetadata]):
         """Update current track metadata."""

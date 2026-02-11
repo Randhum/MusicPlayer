@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from core.music_library import MusicLibrary
-    from ui.components.playlist_view import PlaylistView
-    from ui.components.player_controls import PlayerControls
 
 import gi
 
@@ -33,23 +31,17 @@ class LibraryBrowser(Gtk.Box):
     def __init__(
         self,
         event_bus: Optional[EventBus] = None,
-        playlist_view: Optional["PlaylistView"] = None,
-        player_controls: Optional["PlayerControls"] = None,
     ):
         """
         Initialize library browser.
 
         Args:
-            event_bus: EventBus instance for publishing events (preferred over playlist_view)
-            playlist_view: Optional PlaylistView instance (kept for backward compatibility)
-            player_controls: Optional PlayerControls instance for playback coordination
+            event_bus: EventBus instance for publishing playback/playlist actions
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.set_size_request(300, -1)
         self.set_vexpand(True)  # Expand to fill available vertical space
         self._events = event_bus
-        self.playlist_view = playlist_view
-        self.player_controls = player_controls
 
         # Header
         header = Gtk.Label(label="Library")

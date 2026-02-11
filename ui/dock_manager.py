@@ -209,33 +209,6 @@ class DockManager:
         elif isinstance(parent, Gtk.Window):
             parent.set_child(panel)
 
-    def create_paned_layout(
-        self,
-        *panels: DockablePanel,
-        orientation: Gtk.Orientation = Gtk.Orientation.HORIZONTAL
-    ) -> Gtk.Paned:
-        """Create a paned container with multiple panels."""
-        if len(panels) < 2:
-            raise ValueError("Need at least 2 panels for a paned layout")
-
-        # Build nested paned structure
-        result = Gtk.Paned(orientation=orientation)
-        result.set_start_child(panels[0])
-
-        if len(panels) == 2:
-            result.set_end_child(panels[1])
-        else:
-            # Recursively create paned for remaining panels
-            remaining = self.create_paned_layout(*panels[1:], orientation=orientation)
-            result.set_end_child(remaining)
-
-        result.set_shrink_start_child(False)
-        result.set_shrink_end_child(False)
-        result.set_resize_start_child(True)
-        result.set_resize_end_child(True)
-
-        return result
-
     def save_layout(self):
         """Save current layout configuration."""
         config = {"panels": {}, "positions": {}}
@@ -243,7 +216,6 @@ class DockManager:
         for panel_id, panel in self.panels.items():
             config["panels"][panel_id] = {
                 "detached": panel.is_detached,
-                "visible": panel.get_visible(),
             }
 
             if panel.is_detached and panel.detached_window:

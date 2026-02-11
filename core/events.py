@@ -77,7 +77,6 @@ class EventBus:
 
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Any], None]]] = {}
-        self._debug_enabled = False
 
     def subscribe(self, event: str, callback: Callable[[Any], None]) -> None:
         if event not in self._subscribers:
@@ -92,8 +91,6 @@ class EventBus:
                 pass
 
     def publish(self, event: str, data: Any = None) -> None:
-        if self._debug_enabled:
-            logger.debug("Publishing event: %s (data: %s)", event, data)
         for callback in self._subscribers.get(event, []):
             try:
                 callback(data)
@@ -101,6 +98,3 @@ class EventBus:
                 logger.error(
                     "Error in event callback for %s: %s", event, e, exc_info=True
                 )
-
-    def set_debug(self, enabled: bool) -> None:
-        self._debug_enabled = enabled
