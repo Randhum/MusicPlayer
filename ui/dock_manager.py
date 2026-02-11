@@ -6,9 +6,8 @@ from typing import Callable, Dict, Optional
 
 import gi
 
-gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+from gi.repository import Gtk
 
 from core.config import get_config
 from core.logging import get_logger

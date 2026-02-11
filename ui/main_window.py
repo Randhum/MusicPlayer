@@ -27,8 +27,6 @@ from ui.dock_manager import DockManager
 logger = get_logger(__name__)
 
 
-# Update intervals (milliseconds) - moved to PlaybackController
-
 # Window defaults
 DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 800

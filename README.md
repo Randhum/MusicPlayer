@@ -1339,6 +1339,8 @@ The application uses a clean event-driven architecture:
 - Removed unused workflow helpers from `core/workflow_utils.py` (`validate_track`, `select_player`)
 - Removed unused mutating legacy method `get_previous_track()` from `core/playlist_manager.py`
 - Removed inactive/unimplemented watchdog scaffold from `core/music_library.py`
+- Removed redundant no-op branches and stale comments in playback/UI modules
+- Removed extra unused imports and a no-op shuffle subscriber in UI/playback modules
 
 All components now stay in sync: UI shows correct state on startup, playlist view tracks selection properly, and metadata panel reflects the current track accurately.
 

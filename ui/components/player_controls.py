@@ -10,7 +10,6 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib, Gtk
 
 from core.events import EventBus
-from core.metadata import TrackMetadata
 from core.mpris2 import MPRIS2Manager
 from core.system_volume import SystemVolume
 

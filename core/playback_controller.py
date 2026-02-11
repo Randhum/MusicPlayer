@@ -130,9 +130,6 @@ class PlaybackController:
         # Subscribe to playlist changes - single handler for all playlist modifications
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
 
-        # Subscribe to shuffle (PlaylistManager owns shuffle queue; we just sync to MOC)
-        self._events.subscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
-
         # Subscribe to BT events
         if bt_sink:
             self._events.subscribe(EventBus.BT_SINK_ENABLED, self._on_bt_sink_enabled)
@@ -782,9 +779,6 @@ class PlaybackController:
         except OSError:
             pass
 
-    def _on_shuffle_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        pass  # PlaylistManager owns shuffle queue via same event
-
     def _poll_internal_player_status(self) -> bool:
         """Poll internal player status and update state."""
         # Only poll if internal player is the active backend
@@ -883,9 +877,6 @@ class PlaybackController:
         if moc_shuffle and not self._shuffle_enabled:
             # MOC reports shuffle on (e.g. toggled in MOC) - sync to us
             self._set_shuffle_enabled(True)
-        elif not moc_shuffle and not self._shuffle_enabled:
-            # Both off - no change
-            pass
         # When moc_shuffle is False but we have True: keep our True (MOC -i may not report Shuffle)
 
         moc_repeat = status.get("repeat", False)

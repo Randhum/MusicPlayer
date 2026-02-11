@@ -4,9 +4,8 @@ from typing import Optional
 
 import gi
 
-gi.require_version("GLib", "2.0")
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+from gi.repository import Gtk
 
 from core.bluetooth_manager import BluetoothManager
 from core.bluetooth_sink import BluetoothSink
@@ -180,13 +179,11 @@ class BluetoothPanel(Gtk.Box):
                 self.sink_status.set_text("Speaker mode enabled")
             else:
                 button.set_active(False)
-                if self.sink_status:
-                    self.sink_status.set_text("Failed to enable")
+                self.sink_status.set_text("Failed to enable")
         else:
             # Disable sink mode
             self.bt_sink.disable_sink_mode()
-            if self.sink_status:
-                self.sink_status.set_text("Speaker mode disabled")
+            self.sink_status.set_text("Speaker mode disabled")
 
     def _on_bt_sink_enabled(self, data: Optional[dict]) -> None:
         """Handle sink enabled event."""
