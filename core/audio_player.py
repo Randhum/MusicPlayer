@@ -72,6 +72,9 @@ class AudioPlayer:
 
         # Explicit state machine (replaces is_playing boolean)
         self._playback_state: PlaybackState = PlaybackState.STOPPED
+        # Set to True by EOS handler; consumed (reset to False) by PlaybackController poll.
+        # Allows the poll to detect track-end even though current_track remains set after EOS.
+        self.track_just_finished: bool = False
 
         # Timeout callback IDs for cleanup
         self._position_timeout_id: Optional[int] = None
@@ -158,6 +161,7 @@ class AudioPlayer:
 
         elif msg_type == Gst.MessageType.EOS:
             self._playback_state = PlaybackState.STOPPED
+            self.track_just_finished = True  # consumed by PlaybackController poll
             # Stop position updates
             if self._position_timeout_id is not None:
                 try:
@@ -165,11 +169,9 @@ class AudioPlayer:
                 except (ValueError, TypeError):
                     pass
                 self._position_timeout_id = None
-            # Send final position update (position = duration) to show "00:00" left
+            # Snap position to duration so the progress bar shows 100 % briefly
             if self.duration > 0:
                 self.position = self.duration
-                # Position changed - PlaybackController will poll for updates
-            # Track finished - PlaybackController will poll for updates
 
         elif msg_type == Gst.MessageType.STATE_CHANGED:
             if message.src == self.playbin:

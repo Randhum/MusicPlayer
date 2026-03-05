@@ -34,6 +34,15 @@ class EventBus:
     # Note: AUTONEXT_CHANGED, ACTIVE_BACKEND_CHANGED removed (no subscribers)
 
     # Playlist state (published by PlaylistManager)
+    # Contract:
+    #   PLAYLIST_CHANGED   — content mutations only (add/remove/move/replace/clear)
+    #                        Data: {"playlist_length": int, "content_changed": bool, ...}
+    #   CURRENT_INDEX_CHANGED — index cursor moved (next/prev/play-track/content shift)
+    #                        Data: {"index": int, "old_index": int}
+    #   TRACK_CHANGED      — current-track object changed (new metadata to display)
+    #                        Data: {"track": TrackMetadata | None}
+    # Emission order (on content mutation): PLAYLIST_CHANGED → CURRENT_INDEX_CHANGED → TRACK_CHANGED
+    # On pure index change (set_current_index): CURRENT_INDEX_CHANGED → TRACK_CHANGED only
     PLAYLIST_CHANGED = "playlist.changed"
     CURRENT_INDEX_CHANGED = "playlist.current_index_changed"
     TRACK_CHANGED = "track.changed"
@@ -77,6 +86,9 @@ class EventBus:
 
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Any], None]]] = {}
+        # Lightweight debug counters (progress publish frequency)
+        self._progress_count: int = 0
+        self._progress_log_interval: int = 100  # Log every N progress events
 
     def subscribe(self, event: str, callback: Callable[[Any], None]) -> None:
         if event not in self._subscribers:
@@ -91,6 +103,12 @@ class EventBus:
                 pass
 
     def publish(self, event: str, data: Any = None) -> None:
+        if event == self.PLAYBACK_PROGRESS:
+            self._progress_count += 1
+            if self._progress_count % self._progress_log_interval == 0:
+                logger.debug(
+                    "PLAYBACK_PROGRESS published %d times", self._progress_count
+                )
         for callback in self._subscribers.get(event, []):
             try:
                 callback(data)

@@ -44,6 +44,23 @@ class OperationState(Enum):
 
 # MOC status update interval (milliseconds)
 MOC_STATUS_UPDATE_INTERVAL = 500
+# Audio formats routed to GStreamer instead of MOC.
+# MOC's strengths are MP3, OGG and FLAC; everything else is either unreliable or
+# completely unsupported by MOC (position/duration not reported, no decoder, etc.).
+# GStreamer covers all of these via gst-plugins-{good,bad,ugly}.
+_GSTREAMER_AUDIO_FORMATS = frozenset({
+    # PCM-based: MOC position/duration reporting broken in UI integration
+    ".wav", ".wave",
+    ".aiff", ".aif",
+    # No MOC decoder at all
+    ".ape",   # Monkey's Audio
+    ".wma",   # Windows Media Audio
+    ".alac",  # Apple Lossless (standalone container)
+    # MOC decoder exists but is hit-or-miss across installations
+    ".opus",  # Opus (requires libopus in MOC, not always present)
+    ".m4a",   # AAC or ALAC container (libfaad in MOC unreliable)
+    ".aac",   # Raw AAC
+})
 # Seconds to treat a MOC/shuffle write as "recent" (skip reload to avoid races)
 RECENT_WRITE_WINDOW = 2.0
 
@@ -168,21 +185,22 @@ class PlaybackController:
             self._active_backend = backend
             # Note: ACTIVE_BACKEND_CHANGED event removed (no subscribers)
 
-    def _set_position(self, position: float) -> None:
-        """Update position and publish unified progress event."""
+    def _update_progress(self, position: float, duration: float) -> None:
+        """Update position + duration together and publish one PLAYBACK_PROGRESS event."""
         self._position = max(0.0, position)
-        self._events.publish(
-            EventBus.PLAYBACK_PROGRESS,
-            {"position": self._position, "duration": self._duration},
-        )
-
-    def _set_duration(self, duration: float) -> None:
-        """Update duration and publish unified progress event."""
         self._duration = max(0.0, duration)
         self._events.publish(
             EventBus.PLAYBACK_PROGRESS,
             {"position": self._position, "duration": self._duration},
         )
+
+    def _set_position(self, position: float) -> None:
+        """Update position (convenience wrapper, publishes progress)."""
+        self._update_progress(position, self._duration)
+
+    def _set_duration(self, duration: float) -> None:
+        """Update duration (convenience wrapper, publishes progress)."""
+        self._update_progress(self._position, duration)
 
     def _set_shuffle_enabled(self, enabled: bool) -> None:
         if self._shuffle_enabled != enabled:
@@ -230,6 +248,9 @@ class PlaybackController:
         """Check if MOC should be used for this track."""
         if not self._use_moc or not track or not track.file_path:
             return False
+        ext = Path(track.file_path).suffix.lower()
+        if ext in _GSTREAMER_AUDIO_FORMATS:
+            return False  # Use GStreamer: MOC lacks reliable WAV/AIFF support
         return not is_video_file(track.file_path)
 
     def _should_use_bt_sink(self) -> bool:
@@ -365,8 +386,7 @@ class PlaybackController:
         self._playlist.set_current_index(-1)  # This also clears current_track
         self._set_playback_state(PlaybackState.STOPPED)
         # Reset timeline to 00:00
-        self._set_position(0.0)
-        self._set_duration(0.0)
+        self._update_progress(0.0, 0.0)
 
     def _on_action_next(self, data: Optional[Dict[str, Any]]) -> None:
         if self._bt_sink and self._should_use_bt_sink():
@@ -569,9 +589,7 @@ class PlaybackController:
                 return
 
         # Reset progress immediately so UI doesn't show stale values
-        self._set_position(0.0)
-        if track.duration:
-            self._set_duration(track.duration)
+        self._update_progress(0.0, track.duration if track.duration else 0.0)
         self._set_playback_state(PlaybackState.PLAYING)
 
     def _play_with_internal(self, track: TrackMetadata) -> None:
@@ -603,9 +621,7 @@ class PlaybackController:
             self._playlist.set_current_index(-1)
 
         # Reset progress immediately so UI doesn't show stale values
-        self._set_position(0.0)
-        if track.duration:
-            self._set_duration(track.duration)
+        self._update_progress(0.0, track.duration if track.duration else 0.0)
 
         self._set_playback_state(PlaybackState.PLAYING)
 
@@ -738,9 +754,7 @@ class PlaybackController:
                         self._set_active_backend("moc")
                         self._moc_last_file = str(Path(t.file_path).resolve())
                         self._set_playback_state(PlaybackState.PLAYING)
-                        self._set_position(0.0)
-                        if t.duration:
-                            self._set_duration(t.duration)
+                        self._update_progress(0.0, t.duration if t.duration else 0.0)
 
         try:
             if len(playlist) >= 100:
@@ -789,30 +803,29 @@ class PlaybackController:
         position = self._internal_player.get_position()
         duration = self._internal_player.get_duration()
 
-        # Update state (this will publish events)
-        # Batch updates when both change to avoid UI flicker
+        # Update state — batch position + duration into one publish
         if self._operation_state != OperationState.SEEKING:
-            # Update position first
-            self._set_position(position)
-        # Update duration if it changed (this publishes PLAYBACK_PROGRESS event)
-        if duration > 0:
+            self._update_progress(position, duration if duration > 0 else self._duration)
+        elif duration > 0:
             self._set_duration(duration)
 
         # Update playback state
         if self._internal_player.is_playing:
             if self._playback_state != PlaybackState.PLAYING:
                 self._set_playback_state(PlaybackState.PLAYING)
+        elif self._internal_player.track_just_finished:
+            # EOS arrived: consume the flag and trigger auto-advance.
+            # Must be checked BEFORE current_track because EOS leaves current_track set,
+            # which would otherwise make us think the player is merely paused.
+            self._internal_player.track_just_finished = False
+            self._set_playback_state(PlaybackState.STOPPED)
+            self._handle_track_finished()
         elif self._internal_player.current_track:
             if self._playback_state != PlaybackState.PAUSED:
                 self._set_playback_state(PlaybackState.PAUSED)
         else:
-            # Check if track finished (was playing, now stopped, position at end)
-            was_playing = self._playback_state == PlaybackState.PLAYING
-            if was_playing and duration > 0 and position >= duration - 0.5:
-                # Track finished - handle auto-advance
-                self._set_playback_state(PlaybackState.STOPPED)
-                self._handle_track_finished()
-            elif self._playback_state != PlaybackState.STOPPED:
+            # No track loaded and no EOS — player was stopped externally or never started
+            if self._playback_state != PlaybackState.STOPPED:
                 self._set_playback_state(PlaybackState.STOPPED)
 
         return True  # Continue polling
@@ -853,13 +866,10 @@ class PlaybackController:
         position = float(status.get("position", 0.0))
         duration = float(status.get("duration", 0.0))
 
-        # Update position and duration
-        # Batch updates when both change to avoid UI flicker
+        # Batch position + duration into one publish
         if self._operation_state != OperationState.SEEKING:
-            # Update position first
-            self._set_position(position)
-        # Update duration if it changed (this publishes PLAYBACK_PROGRESS event)
-        if duration > 0:
+            self._update_progress(position, duration if duration > 0 else self._duration)
+        elif duration > 0:
             self._set_duration(duration)
 
         # Update playback state
@@ -905,8 +915,7 @@ class PlaybackController:
                 self._handle_track_finished()
             else:
                 self._set_playback_state(PlaybackState.STOPPED)
-                self._set_position(0.0)
-                self._set_duration(0.0)
+                self._update_progress(0.0, 0.0)
 
         # Detect playlist file changes
         self._check_moc_playlist_changes()
@@ -1003,13 +1012,15 @@ class PlaybackController:
             self._stop_inactive_backends()
 
     def _reset_seek_state(self) -> bool:
-        """Reset seek state to IDLE after seek operation completes."""
+        """Reset seek state to IDLE after seek operation completes.
+
+        Also publishes a fresh progress update so the UI never sits on a stale value.
+        """
         self._operation_state = OperationState.IDLE
         # Restore playback state from actual backend state
-        # Polling will update it correctly, but set it optimistically based on active backend
         active_backend = self._active_backend
         if active_backend == "moc":
-            status = self._moc_controller.get_status(force_refresh=False)
+            status = self._moc_controller.get_status(force_refresh=True)
             if status:
                 state = status.get("state", "STOP")
                 if state == "PLAY":
@@ -1018,6 +1029,8 @@ class PlaybackController:
                     self._set_playback_state(PlaybackState.PAUSED)
                 else:
                     self._set_playback_state(PlaybackState.STOPPED)
+                # Publish fresh progress from backend
+                self._set_position(float(status.get("position", self._position)))
         elif active_backend == "internal":
             if self._internal_player.is_playing:
                 self._set_playback_state(PlaybackState.PLAYING)
@@ -1025,6 +1038,8 @@ class PlaybackController:
                 self._set_playback_state(PlaybackState.PAUSED)
             else:
                 self._set_playback_state(PlaybackState.STOPPED)
+            # Publish fresh progress from internal player
+            self._set_position(self._internal_player.position)
         # If no active backend, polling will handle it
         return False  # Don't repeat
 

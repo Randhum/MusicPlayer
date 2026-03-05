@@ -38,6 +38,7 @@ class PlaylistView(Gtk.Box):
             False  # Track if bulk update is in progress
         )
         self._chunked_update_id: Optional[int] = None  # Track chunked update timeout ID
+        self._selection_deferred: bool = False  # True if index changed during bulk update
 
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -384,14 +385,17 @@ class PlaylistView(Gtk.Box):
         self._update_view()
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
-        """Subscriber: playlist content changed → refresh tree."""
-        tracks = self.playlist_manager.get_playlist()
-        # Defer tree update for large playlists to avoid GTK assertion (gtk_css_node_insert_after:
-        # store updates must run after layout/draw). Use LOW priority so they run when truly idle.
-        if len(tracks) >= 100:
-            GLib.idle_add(self._update_view, priority=GLib.PRIORITY_LOW)
-        else:
-            self._update_view()
+        """Subscriber: playlist content changed → refresh tree (always deferred).
+
+        GTK TreeStore mutations (store.clear/append) must not happen during a
+        layout/draw cycle.  Since PLAYLIST_CHANGED can fire synchronously inside
+        a deep event chain triggered by a GTK callback, we always defer to idle.
+        """
+        logger.debug(
+            "playlist_view: scheduling rebuild (%d tracks)",
+            len(self.playlist_manager.get_playlist()),
+        )
+        GLib.idle_add(self._update_view)
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
         """Subscriber: current index changed → update selection and blinking (deferred to avoid GTK assertion)."""
@@ -409,11 +413,16 @@ class PlaylistView(Gtk.Box):
         self.save_button.set_sensitive(has_tracks)
 
     def _update_view(self):
-        """Update the tree view with current tracks from PlaylistManager."""
+        """Update the tree view with current tracks from PlaylistManager.
+
+        Detaches the model from the TreeView during bulk store mutations to
+        prevent GTK CSS-node assertions (gtk_css_node_insert_after).  The
+        TreeView ignores model-change signals while detached, so rapid
+        clear+append cycles never conflict with its layout engine.
+        """
         tracks = self.playlist_manager.get_playlist()
 
         # Always reset bulk update state before starting a new update
-        # This ensures consistent behavior regardless of previous state
         if self._chunked_update_id is not None:
             GLib.source_remove(self._chunked_update_id)
             self._chunked_update_id = None
@@ -425,13 +434,16 @@ class PlaylistView(Gtk.Box):
             pass
         self._stop_blinking_highlight()
 
-        # For large playlists, use chunked updates to avoid blocking UI
+        # Detach model so TreeView doesn't process row signals mid-update
+        self.tree_view.set_model(None)
+        self.store.clear()
+
         if len(tracks) >= 100:
-            # Start chunked update
+            # Large playlist → chunked update.
+            # The model is detached only for the clear+first-chunk (the dangerous
+            # part).  Reattach immediately after so the user sees the first rows
+            # while remaining chunks keep appending in the background.
             self._bulk_update_in_progress = True
-            self.store.clear()
-            # Process first chunk immediately to show something right away
-            # Then schedule remaining chunks asynchronously
             first_chunk_size = min(100, len(tracks))
             for i in range(first_chunk_size):
                 track = tracks[i]
@@ -442,69 +454,54 @@ class PlaylistView(Gtk.Box):
                 )
                 self.store.append([i + 1, title, artist, duration])
 
-            # If there are more tracks, schedule remaining chunks
+            # Reattach now — first rows are visible immediately
+            self.tree_view.set_model(self.store)
+
             if len(tracks) > first_chunk_size:
                 self._chunked_update_id = GLib.idle_add(
                     self._update_view_chunked, first_chunk_size
                 )
             else:
-                # All tracks processed in first chunk
                 self._bulk_update_in_progress = False
                 self._chunked_update_id = None
                 self._playback_lock = False
                 GLib.idle_add(self._apply_selection_after_view_update)
         else:
-            # For small playlists, update synchronously (fast enough)
-            self.store.clear()
+            # Small playlist → inline update, reattach immediately after
             for i, track in enumerate(tracks):
-                # Use filename as fallback if title is missing
                 title = track.title or Path(track.file_path).stem
                 artist = track.artist or "Unknown Artist"
                 duration = (
                     self._format_duration(track.duration) if track.duration else "--:--"
                 )
                 self.store.append([i + 1, title, artist, duration])
-            # Defer selection/blink so we're not in same stack as store updates (avoids GTK assertion)
+            self.tree_view.set_model(self.store)
             GLib.idle_add(self._apply_selection_after_view_update)
 
     def _apply_selection_after_view_update(self) -> bool:
-        """Idle callback: update selection and blink after store repopulate (avoids GTK assertion)."""
+        """Idle callback: update selection and blink after store repopulate."""
         self._update_selection()
         self._update_button_states()
         return False
 
     def _update_view_chunked(self, start_index: int, chunk_size: int = 100) -> bool:
-        """
-        Update tree view in chunks to avoid blocking UI.
+        """Continue populating the store in chunks.  The model was already
+        reattached after the first chunk so the user sees rows immediately.
+        Subsequent appends (single-row insertions) are safe on an attached model.
 
-        Args:
-            start_index: Index to start processing from
-            chunk_size: Number of tracks to process per chunk
-
-        Returns:
-            False (always) - we schedule next chunks explicitly via GLib.idle_add
+        Returns False always (we schedule next chunks via GLib.idle_add).
         """
-        # Always read current playlist state (may have changed since callback was scheduled)
         tracks = self.playlist_manager.get_playlist()
         total_tracks = len(tracks)
 
-        # Verify we're still in bulk update mode (might have been cancelled by another _update_view call)
+        # Verify we're still in bulk update mode (might have been cancelled)
         if not self._bulk_update_in_progress:
             self._chunked_update_id = None
             self._playback_lock = False
             return False
 
-        # Safety check: if playlist is empty or start_index is out of bounds, finalize
-        if total_tracks == 0:
-            self._bulk_update_in_progress = False
-            self._chunked_update_id = None
-            self._playback_lock = False
-            self._update_selection()
-            self._update_button_states()
-            return False
-
-        # If start_index is beyond current playlist, we're done (playlist might have shrunk)
-        if start_index >= total_tracks:
+        # If playlist became empty or shrank past our index, finalize
+        if total_tracks == 0 or start_index >= total_tracks:
             self._bulk_update_in_progress = False
             self._chunked_update_id = None
             self._playback_lock = False
@@ -516,7 +513,6 @@ class PlaylistView(Gtk.Box):
         end_index = min(start_index + chunk_size, total_tracks)
         for i in range(start_index, end_index):
             track = tracks[i]
-            # Use filename as fallback if title is missing
             title = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
             duration = (
@@ -524,27 +520,28 @@ class PlaylistView(Gtk.Box):
             )
             self.store.append([i + 1, title, artist, duration])
 
-        # Check if more chunks to process (LOW priority to avoid gtk_css_node_insert_after)
         if end_index < total_tracks:
             self._chunked_update_id = GLib.idle_add(
                 self._update_view_chunked, end_index, priority=GLib.PRIORITY_LOW
             )
-            return False  # Don't repeat automatically - we scheduled the next chunk explicitly
+            return False
 
-        # All chunks processed - finalize
+        # All chunks processed — finalize
         self._bulk_update_in_progress = False
         self._chunked_update_id = None
-        self._playback_lock = False  # Ensure controls work after large load
+        self._playback_lock = False
         self._update_selection()
         self._update_button_states()
-        return False  # Done
+        return False
 
     def _update_selection(self, skip_scroll: bool = False):
         """Update selection and blinking for current track. Event-driven (CURRENT_INDEX_CHANGED).
         Current playing track always blinks; selection shows current track. All tree ops wrapped to avoid GTK assertion.
         """
         if self._bulk_update_in_progress:
+            self._selection_deferred = True  # Apply once bulk update finishes
             return
+        self._selection_deferred = False
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
         selection = self.tree_view.get_selection()

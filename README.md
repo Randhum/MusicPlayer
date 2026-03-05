@@ -149,11 +149,12 @@ rc-service bluetooth status
 
 ### Supported Formats
 
-| Type | Formats | Why It Works |
-|------|---------|--------------|
-| 🎵 **Lossy Audio** | MP3, AAC/M4A, OGG, Opus, WMA | `gst-plugins-good`, `mpg123` |
-| 🎶 **Lossless Audio** | FLAC, WAV, AIFF, ALAC, APE | `gst-plugins-flac` |
-| 🎬 **Video** | MP4, MKV, WebM, AVI, MOV | `gst-plugins-bad`, `openh264` |
+| Type | Formats | Backend | Notes |
+|------|---------|---------|-------|
+| 🎵 **Lossy (MOC)** | MP3, OGG, FLAC | MOC | Native MOC decoders — most reliable path |
+| 🎵 **Lossy (GStreamer)** | AAC/M4A, Opus, WMA | GStreamer | `gst-plugins-good/bad/ugly` |
+| 🎶 **Lossless (GStreamer)** | WAV, AIFF, ALAC, APE | GStreamer | `gst-plugins-good/bad` |
+| 🎬 **Video** | MP4, MKV, WebM, AVI, MOV | GStreamer | `gst-plugins-bad`, `openh264` |
 
 ---
 
@@ -1088,121 +1089,59 @@ MusicPlayer/
     └── musicplayer.init
 ```
 
-### The Event-Driven Pattern
-
-We follow an event-driven architecture where:
-- **State** = Event-driven: playlist in `PlaylistManager`; playback state (position, duration, play/pause, shuffle, loop, volume) in `PlaybackController`, published via EventBus so UI and MPRIS2 react via events only
-- **Events** = `EventBus` (decoupled communication)
-- **Controller** = `PlaybackController` (routes commands to backends)
-- **View** = `ui/` components (subscribe to events, call PlaylistManager for playlist ops)
-- **Backends** = `AudioPlayer`, `MocController`, `BluetoothSink` (playback engines)
-
-This architecture eliminates circular dependencies and makes the codebase much more maintainable!
-
 ### Architecture
 
-#### Event-Driven Architecture
+The application follows a simple event-driven model:
+- `PlaylistManager` owns playlist data and persistence.
+- `PlaybackController` owns playback state and backend routing.
+- UI components publish actions and subscribe to state changes.
+- `EventBus` handles decoupled communication between modules.
 
-The application uses an **event-driven architecture** with clear separation of concerns:
+This keeps responsibilities clear and avoids circular dependencies.
 
-**Core Components:**
+#### Core Components
 
-1. **EventBus** (`core/events.py`) - Centralized publish-subscribe system
-   - Components publish events instead of calling callbacks directly
-   - Eliminates circular dependencies
-   - Enables decoupled communication
+1. `EventBus` (`core/events.py`)
+   - Central publish/subscribe channel.
+2. `PlaylistManager` (`core/playlist_manager.py`)
+   - Single source of truth for playlist content and current index.
+   - Publishes playlist/index/track change events.
+3. `PlaybackController` (`core/playback_controller.py`)
+   - Routes actions to backends.
+   - Publishes playback state, progress, shuffle, loop, and volume updates.
+4. Playback backends
+   - `MocController` (`core/moc_controller.py`) for selected audio formats.
+   - `AudioPlayer` (`core/audio_player.py`) for video and selected audio formats.
+   - `BluetoothSink` (`core/bluetooth_sink.py`) when sink mode is active.
 
-2. **PlaybackController** (`core/playback_controller.py`) - Holds playback state; subscribes to ACTION_* and PLAYLIST_CHANGED; publishes unified events: PLAYBACK_STATE_CHANGED, PLAYBACK_PROGRESS, SHUFFLE_CHANGED, LOOP_MODE_CHANGED, VOLUME_CHANGED.
-   - Playback state, volume, shuffle, backend; when `PlaylistManager` is set, playlist reads/writes delegate to it
-   - State changes publish events
-   - **PlaylistManager** (`core/playlist_manager.py`) - Single source of truth for playlist; subscribes to ADD_FOLDER, ACTION_MOVE, ACTION_REMOVE, ACTION_CLEAR_PLAYLIST, ACTION_REPLACE_PLAYLIST; publishes PLAYLIST_CHANGED, CURRENT_INDEX_CHANGED, TRACK_CHANGED. Load/save and PlaylistView use it; PlaybackController and UI react via pub/sub.
+#### Event Flow
 
-3. **PlaybackController** (`core/playback_controller.py`) - Pub/sub driven
-   - Subscribes to ACTION_* and PLAYLIST_CHANGED; holds playback state and publishes events; UI and MPRIS2 react to events
-   - Routes playback to MOC, internal player, or BT sink; MOC status polling; one backend active at a time
-   - Single “load from MOC” path: `_reload_playlist_from_moc()` used by refresh, append folder, file-change poll, and track-change reload
-
-**Data Flow:**
-
-```
-User Action → UI Component → EventBus (ACTION_*) → PlaybackController
-                                                          ↓
-                                                    Backend (MOC/Internal/BT)
-                                                          ↓
-                                                    PlaybackController (publish events)
-                                                          ↓
-                                                    EventBus (STATE_*)
-                                                          ↓
-                                                    UI Components (update display)
+```text
+UI action -> ACTION_* event -> Controller/Manager -> state change -> *_CHANGED event -> UI/MPRIS2 update
 ```
 
-**Playlist data flow:**
-- **PlaylistManager** is the single source of truth for playlist; it subscribes to ADD_FOLDER, ACTION_MOVE, ACTION_REMOVE, ACTION_CLEAR_PLAYLIST, ACTION_REPLACE_PLAYLIST and publishes PLAYLIST_CHANGED, CURRENT_INDEX_CHANGED, TRACK_CHANGED. When current track is removed, it publishes ACTION_STOP with reason="track_removed". Events drive view and playback; no central AppState.
+#### Playlist Event Contract
 
-**Event bus flow (outline):**
-- **LibraryBrowser** "Add Folder" → publish ADD_FOLDER (tracks) → PlaylistManager adds, PlaylistView redraws via PLAYLIST_CHANGED, PlaybackController syncs to MOC. "Play Folder" → publish ACTION_REPLACE_PLAYLIST with start_playback=true → PlaylistManager replaces playlist, PlaybackController starts playback.
-- **PlayerControls** publishes Play/Pause/Next/Prev/Seek → PlaybackController subscribes and drives playback; PlayerControls/MetadataPanel/PlaylistView subscribe to playback/position/track events and update UI.
-- **PlaylistView** publishes ACTION_PLAY_TRACK (row activation), ACTION_MOVE, ACTION_REMOVE, ACTION_CLEAR_PLAYLIST, ACTION_REPLACE_PLAYLIST → PlaylistManager subscribes and updates; MOC sync via PLAYLIST_CHANGED. The current playing track blinks (driven by CURRENT_INDEX_CHANGED); selection/blink updates are deferred to idle to avoid GTK assertion.
+- `PLAYLIST_CHANGED`: content mutations only (add, remove, move, replace, clear).
+- `CURRENT_INDEX_CHANGED`: active index changed.
+- `TRACK_CHANGED`: active track object changed.
+- Content mutation order: `PLAYLIST_CHANGED -> CURRENT_INDEX_CHANGED -> TRACK_CHANGED`.
+- Pure index change order: `CURRENT_INDEX_CHANGED -> TRACK_CHANGED`.
 
-**Event architecture principles:**
-- **UI → Core**: UI components publish ACTION_* events (requests)
-- **Core → UI**: Core managers publish *_CHANGED events (notifications)
-- **Single source of mutation**: PlaybackController handles index changes for playback; PlaylistManager handles playlist content changes
+#### Engineering Guidelines
 
-**Detailed event sequences:** See [EVENT_SEQUENCES.md](EVENT_SEQUENCES.md) for step-by-step diagrams of all major event flows including playlist replacement, MOC synchronization, and large playlist handling.
-
-**Benefits:**
-- **No circular dependencies** - Components depend only on EventBus and script modules (PlaylistManager, PlaybackController)
-- **Unidirectional data flow** - Actions go up, state flows down
-- **Easy to test** - Components can be tested in isolation
-- **Easy to extend** - New features just subscribe to events
-- **Single source of truth** - State is never duplicated
-
-#### Code Harmonization
-
-The codebase follows systematic harmonization to ensure consistency and maintainability:
-
-**Harmonization Plan:**
-- Event-driven architecture implemented
-- Single source of truth (PlaylistManager for playlist; PlaybackController publishes playback state via events)
-- Consistent error handling patterns
-- Type hints completion in progress
-
-**Current Status:**
-- ✅ Event-driven architecture implemented
-- ✅ Event-driven state (PlaylistManager + PlaybackController; no AppState)
-- ✅ Circular dependencies eliminated
-- ✅ Configuration files created (pyproject.toml, .pylintrc, .editorconfig)
-- ✅ Import organization standardized in priority files
-- 🔄 Code formatting (requires Black installation)
-- 🔄 Naming harmonization
-- 🔄 Type hints completion
-- 🔄 Documentation improvements
-- 🔄 Error handling improvements
-
-**Remaining implementations:** A detailed, actionable list of unfinished features (music library fs monitoring, user error notifications, tests, `data/` service files, harmonization) is in [TODO.md](TODO.md).
-
-**Code size:** Boilerplate was reduced; largest files were slimmed (docstrings, UI consolidation, function count). **PlaybackController** was cut to ~950 lines (from ~1230) and made event-bus driven: MOC chunked sync moved to **MocController** (`set_playlist_large`); shuffle queue and next-index logic moved to **PlaylistManager** (`has_next()`, `advance_to_next()`, subscribes to `SHUFFLE_CHANGED`). Controller now subscribes to actions, delegates to playlist/MOC, and publishes state only. PlaylistView delegating getters removed; MOC enable/disable/toggle → set_autonext/set_shuffle/set_repeat; clear(stop_first); _ensure_duration removed; playlist_manager _sync_to_file inlined. A build under ~2500 lines would require optional stubs for Bluetooth and MPRIS2 and further slimming of playlist_view and moc_controller.
+- Keep state ownership in managers, not UI widgets.
+- Prefer event publication over direct cross-component calls.
+- Use type hints and structured logging.
+- Keep write paths and command execution validated and explicit.
 
 #### MOC Integration Architecture
 
-The MOC (Music On Console) integration follows a simple, direct approach:
-
-**Design Principles:**
-- **`play_file()`** is the primary playback method - uses `mocp --playit <filepath>` for reliable track selection
-- **Simple state tracking** - boolean `_server_connected` flag instead of complex state machines
-- **Lightweight caching** - 200ms TTL cache for status to reduce MOC server load
-- **Direct M3U writing** - playlist changes are written directly to MOC's playlist file
-
-**Key Methods:**
-- `play_file(filepath)` - Play a specific file using `--playit` (preferred method)
-- `play()` - Resume playback (uses `--unpause` if paused, `--play` if stopped)
-- `toggle_pause()` - Toggle play/pause using `--toggle-pause`
-- `get_status()` - Get current playback state via `--info` with caching
-- `set_playlist()` - Write playlist to M3U and optionally start playback
-- `toggle_shuffle()` / `disable_autonext()` / `enable_autonext()` - Control MOC features
-
-**Note:** MOC autonext is disabled by default. The app's `PlaybackController` handles track navigation to ensure consistent state management and prevent conflicts between MOC's internal playlist and the app's playlist state. When you add many tracks (e.g. "play folder"), the MOC sync is triggered via PLAYLIST_CHANGED event. Playback is only started if the current track is still valid after sync (avoids "Cannot play - no valid track" and keeps UI and playback in sync when MOC takes longer to load). The Play button only switches to Pause when MOC actually starts playback (so the UI stays in sync if MOC fails to start).
+MOC is integrated through a thin command wrapper (`mocp`) focused on reliability:
+- `play_file()` uses `mocp --playit <file>` as the primary track-selection path.
+- Status is read through `--info` with short caching to reduce command overhead.
+- Playlist sync writes M3U data from app state to MOC state.
+- Autonext in MOC is disabled by default; track progression is controlled by `PlaybackController`.
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server
@@ -1216,40 +1155,27 @@ The MOC (Music On Console) integration follows a simple, direct approach:
 - `--info` - Get current track info
 - `--exit` - Shutdown server
 
-**Why This Approach:**
-- MOC has no "jump to playlist index" command (`-j` is for seeking within a track, not track selection)
-- `play_file()` with `--playit` is the most reliable way to play a specific track
-- Simpler code is easier to debug and maintain
-- Let MOC handle its own features (autonext, shuffle) rather than re-implementing them
+This approach keeps behavior deterministic and aligns MOC playback with the app's event-driven state model.
 
 #### UI State Management
 
-The UI components use explicit state machines for user interaction:
+UI and playback interaction are controlled by explicit state enums:
+- `SeekState`: `IDLE`, `DRAGGING`, `SEEKING`
+- `PlaybackState`: `STOPPED`, `LOADING`, `PAUSED`, `PLAYING`, `SEEKING`
+- `OperationState`: `IDLE`, `SEEKING`, `SYNCING`
 
-**State Machines:**
-- **`SeekState`** (player_controls.py): `IDLE`, `DRAGGING`, `SEEKING` - Manages progress bar interactions
-- **`PlaybackState`** (playback_controller.py, audio_player.py): `STOPPED`, `LOADING`, `PAUSED`, `PLAYING`, `SEEKING` - Tracks playback state
-- **`OperationState`** (playback_controller.py): `IDLE`, `SEEKING`, `SYNCING` - Prevents race conditions in MOC operations
-
-**Benefits:**
-- **No race conditions**: State machines prevent conflicts between UI updates and playback operations
-- **Self-documenting**: Enums make code intent clear
-- **Easier debugging**: Explicit state transitions are easier to trace
-- **Event-driven state**: PlaylistManager for playlist; PlaybackController holds playback state and publishes events; UI and MPRIS2 subscribe to events (no central AppState).
+These states reduce race conditions and make transitions traceable during debugging.
 
 ### Development
 
 #### Code Quality
 
-The codebase follows Linux best practices:
-- **Type hints** throughout (compatible with mypy)
-- **Structured logging** instead of print statements
-- **XDG Base Directory** compliance
-- **Security validation** for all user inputs
-- **D-Bus integration** following specifications
-- **Explicit state machines** using enums instead of boolean flags
-- **Separation of concerns** between UI updates and playback operations
-- **Race condition prevention** through explicit state management
+The codebase follows these standards:
+- Type hints for public and critical internal paths
+- Structured logging (no print-based diagnostics)
+- XDG-compliant configuration and cache handling
+- Input/path validation for filesystem and command execution
+- Explicit state models for playback and UI interaction
 
 #### Testing
 
@@ -1267,15 +1193,6 @@ Run with coverage:
 ```bash
 pytest tests/ --cov=core --cov=ui --cov-report=html
 ```
-
-#### Adding New Features
-
-1. Follow existing code patterns
-2. Use logging instead of print statements
-3. Validate all user inputs via `SecurityValidator`
-4. Use config system for paths and settings
-5. Add tests for new functionality
-6. Update README.md
 
 </details>
 
@@ -1302,54 +1219,6 @@ Track your learning progress!
 - [ ] 🛠️ Modified the code (any small change counts!)
 - [ ] 🚀 Created your own IoT project idea
 
----
-
-## 📝 Recent Changes
-
-### Event-Driven Architecture
-
-The application uses a clean event-driven architecture:
-
-- **Unified events**: Granular events merged into `PLAYBACK_STATE_CHANGED` and `PLAYBACK_PROGRESS`
-- **Single source of truth**: `PlaylistManager` owns playlist; `PlaybackController` owns playback state
-- **Decoupled components**: UI publishes `ACTION_*` events, core publishes `*_CHANGED` events
-- **No circular dependencies**: Components communicate only through EventBus
-
-### Playback & MOC Integration
-
-- **Reliable sync**: Chunked playlist loading for large folders with race condition protection
-- **Backend switching**: Clean transitions between MOC (audio) and internal player (video)
-- **State consistency**: All UI components stay in sync during playback and playlist changes
-- **Immediate updates**: No polling delay when tracks change
-
-### UI Improvements
-
-- **Drag-to-reorder**: Touch-friendly playlist reordering with accurate drop positioning
-- **Search**: Results appear in library browser; clearing restores folder view
-- **Seek behavior**: Works while paused; small seeks register properly
-- **GTK stability**: Fixed assertion errors during large playlist operations
-
-### Dead Code Cleanup
-
-- Removed unused reconnect/message-validation helpers from `core/dbus_utils.py`
-- Removed unused playback guard and row CSS cache from `ui/components/playlist_view.py`
-- Removed unused drag counter state from `ui/components/player_controls.py`
-- Removed unused fallback library selection handlers from `ui/main_window.py`
-- Removed unused custom GTK signals/methods from `ui/components/playlist_view.py` and `ui/components/bluetooth_panel.py`
-- Removed unused workflow helpers from `core/workflow_utils.py` (`validate_track`, `select_player`)
-- Removed unused mutating legacy method `get_previous_track()` from `core/playlist_manager.py`
-- Removed inactive/unimplemented watchdog scaffold from `core/music_library.py`
-- Removed redundant no-op branches and stale comments in playback/UI modules
-- Removed extra unused imports and a no-op shuffle subscriber in UI/playback modules
-- Simplified `LibraryBrowser` constructor by removing unused backward-compat parameters
-- Wired explicit `on_open_uri` callback path in MPRIS2 manager/service
-- Simplified `PipeWireVolume` to explicit pactl-based behavior (removed inactive native D-Bus path)
-- Removed unused dock layout helper and unused persisted panel visibility field
-- Removed unused `EventBus` debug toggle path (`set_debug` / internal flag)
-
-All components now stay in sync: UI shows correct state on startup, playlist view tracks selection properly, and metadata panel reflects the current track accurately.
-
-See [EVENT_SEQUENCES.md](EVENT_SEQUENCES.md) for detailed architecture documentation.
 
 ---
 

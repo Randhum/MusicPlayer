@@ -35,6 +35,9 @@ class MocController:
         self._status_cache: Optional[Dict] = None
         self._status_cache_time: float = 0.0
         self._status_cache_ttl: float = 0.2  # Cache for 200ms
+        # Debug counters
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
 
     def is_available(self) -> bool:
         return self._mocp_path is not None
@@ -220,7 +223,15 @@ class MocController:
         current_time = time.time()
         if not force_refresh and self._status_cache is not None:
             if current_time - self._status_cache_time < self._status_cache_ttl:
+                self._cache_hits += 1
+                if self._cache_hits % 100 == 0:
+                    logger.debug(
+                        "MOC status cache: %d hits / %d misses",
+                        self._cache_hits,
+                        self._cache_misses,
+                    )
                 return self._status_cache
+        self._cache_misses += 1
 
         if not self.ensure_server():
             self._status_cache = None

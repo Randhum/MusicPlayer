@@ -333,15 +333,22 @@ class BluetoothManager:
 
                         self.connected_device = device
                         if self._event_bus:
-                            self._event_bus.publish(
-                                EventBus.BT_DEVICE_CONNECTED, {"device": device}
+                            # D-Bus signals may fire on non-main threads; defer
+                            # EventBus publish to the GLib main loop so subscribers
+                            # (which may do GTK ops) always run on the main thread.
+                            GLib.idle_add(
+                                self._event_bus.publish,
+                                EventBus.BT_DEVICE_CONNECTED,
+                                {"device": device},
                             )
                     elif not new_connected and old_connected:
                         if self.connected_device == device:
                             self.connected_device = None
                         if self._event_bus:
-                            self._event_bus.publish(
-                                EventBus.BT_DEVICE_DISCONNECTED, {"device": device}
+                            GLib.idle_add(
+                                self._event_bus.publish,
+                                EventBus.BT_DEVICE_DISCONNECTED,
+                                {"device": device},
                             )
 
                 # Update Trusted state
@@ -356,7 +363,11 @@ class BluetoothManager:
             device_path = str(path)
             device = self.devices.get(device_path)
             if device and self._event_bus:
-                self._event_bus.publish(EventBus.BT_DEVICE_ADDED, {"device": device})
+                GLib.idle_add(
+                    self._event_bus.publish,
+                    EventBus.BT_DEVICE_ADDED,
+                    {"device": device},
+                )
 
     def _on_interfaces_removed(self, path, interfaces):
         """Handle interfaces (devices) being removed."""

@@ -78,6 +78,7 @@ class PlayerControls(Gtk.Box):
         self._events.subscribe(EventBus.LOOP_MODE_CHANGED, self._on_loop_mode_changed)
         self._events.subscribe(EventBus.VOLUME_CHANGED, self._on_volume_changed)
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
+        self._events.subscribe(EventBus.CURRENT_INDEX_CHANGED, self._on_current_index_changed)
 
         if self.system_volume:
             self.set_volume(self.system_volume.get_volume())
@@ -504,12 +505,15 @@ class PlayerControls(Gtk.Box):
         self._update_mpris2_nav()
 
     def _on_playlist_changed(self, data: Optional[dict]) -> None:
-        """Handle playlist changed event - cache and update MPRIS2 nav."""
-        if data is not None:
-            if "playlist_length" in data:
-                self._playlist_length = int(data["playlist_length"])
-            if "index" in data:
-                self._current_index = int(data["index"])
+        """Handle playlist content change - cache length and update MPRIS2 nav."""
+        if data is not None and "playlist_length" in data:
+            self._playlist_length = int(data["playlist_length"])
+        self._update_mpris2_nav()
+
+    def _on_current_index_changed(self, data: Optional[dict]) -> None:
+        """Handle index cursor change - cache index and update MPRIS2 nav."""
+        if data is not None and "index" in data:
+            self._current_index = int(data["index"])
         self._update_mpris2_nav()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:

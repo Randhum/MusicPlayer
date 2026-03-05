@@ -46,6 +46,7 @@ class PlaylistManager:
         self._moc_playlist_provider: Optional[
             Callable[..., Tuple[List[TrackMetadata], int]]
         ] = None
+        self._sync_timer: Optional[object] = None  # threading.Timer for debounced writes
 
         if self._event_bus:
             self._event_bus.subscribe(
@@ -196,19 +197,19 @@ class PlaylistManager:
         self._sync_to_file()
 
     def _emit_playlist_replaced(self, start_playback: bool = False) -> None:
-        """Publish PLAYLIST_CHANGED and, if index valid, CURRENT_INDEX_CHANGED and TRACK_CHANGED."""
+        """Emit content change, then index/track change. Canonical order: PLAYLIST_CHANGED → CURRENT_INDEX_CHANGED → TRACK_CHANGED."""
         if not self._event_bus:
             return
+        # 1) Content changed
         self._event_bus.publish(
             EventBus.PLAYLIST_CHANGED,
             {
-                "playlist_changed": True,
-                "index": self.current_index,
                 "playlist_length": len(self.current_playlist),
                 "content_changed": True,
                 "start_playback": start_playback,
             },
         )
+        # 2) Index + track (only when valid — prevents None/track events on clear)
         if self.current_index >= 0:
             self._event_bus.publish(
                 EventBus.CURRENT_INDEX_CHANGED,
@@ -251,8 +252,6 @@ class PlaylistManager:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
-                    "playlist_changed": True,
-                    "index": self.current_index,
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
                 },
@@ -285,8 +284,6 @@ class PlaylistManager:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
-                    "playlist_changed": True,
-                    "index": self.current_index,
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
                 },
@@ -323,8 +320,6 @@ class PlaylistManager:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
-                    "playlist_changed": True,
-                    "index": self.current_index,
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
                 },
@@ -366,8 +361,6 @@ class PlaylistManager:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
-                    "playlist_changed": True,
-                    "index": self.current_index,
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
                 },
@@ -386,8 +379,6 @@ class PlaylistManager:
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
-                    "playlist_changed": True,
-                    "index": -1,
                     "playlist_length": 0,
                     "content_changed": True,
                 },
@@ -421,8 +412,9 @@ class PlaylistManager:
                 EventBus.CURRENT_INDEX_CHANGED,
                 {"index": index, "old_index": old_index},
             )
-            new_track = self.get_current_track()
-            self._event_bus.publish(EventBus.TRACK_CHANGED, {"track": new_track})
+            self._event_bus.publish(
+                EventBus.TRACK_CHANGED, {"track": self.get_current_track()}
+            )
         self._sync_to_file()
 
     # Note: get_next_track() removed - use advance_to_next() then get_current_track()
@@ -549,39 +541,35 @@ class PlaylistManager:
         return self.playlists_dir / "current_playlist.json"
 
     def _sync_to_file(self) -> None:
-        """Auto-save current playlist to JSON file (sync for small, threaded for large)."""
+        """Debounced auto-save: waits 500ms after the last mutation before writing.
+
+        Rapid bursts (e.g., adding many tracks) only trigger one write.
+        """
         if not self._auto_save_enabled:
             return
-        try:
-            if len(self.current_playlist) > 200:
-                import threading
+        import threading
 
-                playlist_copy = self.current_playlist.copy()
-                index_copy = self.current_index
+        # Cancel any pending write
+        if self._sync_timer is not None:
+            self._sync_timer.cancel()
 
-                def save():
-                    try:
-                        data = {
-                            "tracks": [t.to_dict() for t in playlist_copy],
-                            "current_index": index_copy,
-                        }
-                        with open(
-                            self.current_playlist_file, "w", encoding="utf-8"
-                        ) as f:
-                            json.dump(data, f, indent=2, ensure_ascii=False)
-                    except Exception as e:
-                        logger.warning("Failed to auto-save current playlist: %s", e)
+        playlist_copy = self.current_playlist.copy()
+        index_copy = self.current_index
 
-                threading.Thread(target=save, daemon=True).start()
-            else:
+        def _do_write():
+            try:
                 data = {
-                    "tracks": [t.to_dict() for t in self.current_playlist],
-                    "current_index": self.current_index,
+                    "tracks": [t.to_dict() for t in playlist_copy],
+                    "current_index": index_copy,
                 }
                 with open(self.current_playlist_file, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.warning("Failed to auto-save current playlist: %s", e)
+            except Exception as e:
+                logger.warning("Failed to auto-save current playlist: %s", e)
+
+        self._sync_timer = threading.Timer(0.5, _do_write)
+        self._sync_timer.daemon = True
+        self._sync_timer.start()
 
     def load_current_playlist(self) -> bool:
         """Load the current playlist from auto-save file. Replaces and publishes once via set_playlist."""
