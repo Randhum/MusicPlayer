@@ -1122,11 +1122,17 @@ UI action -> ACTION_* event -> Controller/Manager -> state change -> *_CHANGED e
 
 #### Playlist Event Contract
 
-- `PLAYLIST_CHANGED`: content mutations only (add, remove, move, replace, clear).
+- `PLAYLIST_CHANGED`: content mutations only (add, remove, move, replace, clear). No playback intent.
 - `CURRENT_INDEX_CHANGED`: active index changed.
 - `TRACK_CHANGED`: active track object changed.
 - Content mutation order: `PLAYLIST_CHANGED -> CURRENT_INDEX_CHANGED -> TRACK_CHANGED`.
 - Pure index change order: `CURRENT_INDEX_CHANGED -> TRACK_CHANGED`.
+
+#### Playback Intent
+
+Playback intent is separate from playlist content changes:
+- UI publishes `ACTION_REPLACE_PLAYLIST` (content) then `ACTION_PLAY` (intent) as two events.
+- `PlaybackController` queues `ACTION_PLAY` if MOC sync is in progress and executes it after sync completes.
 
 #### Engineering Guidelines
 

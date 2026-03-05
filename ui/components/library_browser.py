@@ -320,12 +320,9 @@ class LibraryBrowser(Gtk.Box):
         if self._events:
             self._events.publish(
                 EventBus.ACTION_REPLACE_PLAYLIST,
-                {
-                    "tracks": [track],
-                    "current_index": 0,
-                    "start_playback": True,
-                },
+                {"tracks": [track], "current_index": 0},
             )
+            self._events.publish(EventBus.ACTION_PLAY, None)
         else:
             # Fallback to signal if no EventBus
             self.emit("track-selected", track)
@@ -337,12 +334,9 @@ class LibraryBrowser(Gtk.Box):
         if self._events:
             self._events.publish(
                 EventBus.ACTION_REPLACE_PLAYLIST,
-                {
-                    "tracks": tracks,
-                    "current_index": 0,
-                    "start_playback": True,
-                },
+                {"tracks": tracks, "current_index": 0},
             )
+            self._events.publish(EventBus.ACTION_PLAY, None)
         else:
             # Fallback to signal if no EventBus
             self.emit("album-selected", tracks)

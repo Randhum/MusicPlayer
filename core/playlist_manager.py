@@ -162,7 +162,6 @@ class PlaylistManager:
         Data fields:
             tracks: List of TrackMetadata (or dicts) to set as new playlist
             current_index: Index to set as current (default 0)
-            start_playback: If True, caller expects playback to start (handled by PlaybackController)
         """
         if not data:
             return
@@ -177,14 +176,12 @@ class PlaylistManager:
             elif isinstance(t, dict):
                 track_list.append(TrackMetadata.from_dict(t))
         current_index = data.get("current_index", 0) if track_list else -1
-        start_playback = data.get("start_playback", False)
-        self.set_playlist(track_list, current_index, start_playback=start_playback)
+        self.set_playlist(track_list, current_index)
 
     def set_playlist(
         self,
         tracks: List[TrackMetadata],
         current_index: int = -1,
-        start_playback: bool = False,
     ) -> None:
         """Replace playlist and index in one go; publish once; sync to file. Used by view and load paths."""
         self.current_playlist = list(tracks)
@@ -193,10 +190,10 @@ class PlaylistManager:
         )
         if self._shuffle_enabled:
             self._regenerate_shuffle_queue()
-        self._emit_playlist_replaced(start_playback=start_playback)
+        self._emit_playlist_replaced()
         self._sync_to_file()
 
-    def _emit_playlist_replaced(self, start_playback: bool = False) -> None:
+    def _emit_playlist_replaced(self) -> None:
         """Emit content change, then index/track change. Canonical order: PLAYLIST_CHANGED → CURRENT_INDEX_CHANGED → TRACK_CHANGED."""
         if not self._event_bus:
             return
@@ -206,7 +203,6 @@ class PlaylistManager:
             {
                 "playlist_length": len(self.current_playlist),
                 "content_changed": True,
-                "start_playback": start_playback,
             },
         )
         # 2) Index + track (only when valid — prevents None/track events on clear)
