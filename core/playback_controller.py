@@ -112,6 +112,7 @@ class PlaybackController:
         self._playlist_changed_during_sync: bool = False  # Re-sync needed after current sync
         self._pending_play_after_sync: bool = False  # ACTION_PLAY arrived during sync
         self._user_action_time: float = 0.0
+        self._last_action_backend: str = "none"
         self._startup_complete: bool = False
 
         if self._use_moc:
@@ -172,7 +173,7 @@ class PlaybackController:
                     "track": self._playlist.get_current_track(),
                 },
             )
-        elif state == PlaybackState.PAUSED and old == PlaybackState.PLAYING:
+        elif state == PlaybackState.PAUSED and old != PlaybackState.PAUSED:
             self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "paused"})
         elif state == PlaybackState.STOPPED and old != PlaybackState.STOPPED:
             self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "stopped"})
@@ -272,9 +273,54 @@ class PlaybackController:
 
         # Stop MOC if not active
         if active_backend != "moc" and self._use_moc:
-            status = self._moc_controller.get_status(force_refresh=False)
+            status = self._moc_controller.get_status(force_refresh=True)
             if status and status.get("state") in ("PLAY", "PAUSE"):
                 self._moc_controller.stop()
+
+    def _mark_backend_action(self, backend: str) -> None:
+        """Record latest backend intent for conflict resolution."""
+        self._user_action_time = time.time()
+        self._last_action_backend = backend
+
+    def _enforce_backend_exclusivity(self, target_backend: str) -> None:
+        """Stop non-target backend(s) to keep a strict single-backend invariant."""
+        if target_backend == "moc":
+            if self._internal_player.is_playing or self._internal_player.current_track:
+                self._internal_player.stop()
+            return
+        if target_backend == "internal":
+            if self._use_moc:
+                status = self._moc_controller.get_status(force_refresh=True)
+                if status and status.get("state") in ("PLAY", "PAUSE"):
+                    self._moc_controller.stop()
+
+    def _resolve_dual_playback_conflict(self, moc_status: Optional[Dict[str, Any]]) -> None:
+        """Self-heal if both backends play simultaneously; latest action wins."""
+        if not moc_status:
+            return
+        moc_playing = moc_status.get("state") == "PLAY"
+        internal_playing = bool(self._internal_player.is_playing)
+        if not (moc_playing and internal_playing):
+            return
+
+        winner = (
+            self._last_action_backend
+            if self._last_action_backend in ("moc", "internal")
+            else self._active_backend
+        )
+        if winner == "internal":
+            logger.warning(
+                "Dual playback detected (moc+internal); resolving to internal (latest action)"
+            )
+            self._moc_controller.stop()
+            self._set_active_backend("internal")
+        else:
+            logger.warning(
+                "Dual playback detected (moc+internal); resolving to moc (latest action)"
+            )
+            if self._internal_player.is_playing or self._internal_player.current_track:
+                self._internal_player.stop()
+            self._set_active_backend("moc")
 
     def _load_and_play_current_track(self) -> bool:
         track = self._playlist.get_current_track()
@@ -285,12 +331,11 @@ class PlaybackController:
         if not track_path.exists() or not track_path.is_file():
             logger.warning("Cannot play - file does not exist: %s", track.file_path)
             return False
-        self._user_action_time = time.time()
         if self._should_use_moc(track):
-            self._play_with_moc(track)
-        else:
-            self._play_with_internal(track)
-        return True
+            self._mark_backend_action("moc")
+            return self._play_with_moc(track)
+        self._mark_backend_action("internal")
+        return self._play_with_internal(track)
 
     def _on_action_play(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle play action: resume if same track paused, else load and play current track.
@@ -302,21 +347,28 @@ class PlaybackController:
                 self._bt_sink.control_playback("play")
             return
 
-        # During MOC sync: start playback immediately — play_file() works
-        # independently of MOC's playlist state, so the track plays while
-        # the playlist continues syncing in the background.
+        # During MOC sync: start playback immediately using shared backend paths.
         if self._use_moc and (self._syncing_to_moc or self._moc_sync_scheduled):
             track = self._playlist.get_current_track()
+            if not track:
+                playlist = self._playlist.get_playlist()
+                if playlist:
+                    self._playlist.set_current_index(0)
+                    track = self._playlist.get_current_track()
             if track and track.file_path:
                 if self._should_use_moc(track):
-                    self._moc_controller.play_file(track.file_path)
-                    self._set_active_backend("moc")
-                    self._moc_last_file = str(Path(track.file_path).resolve())
-                    self._update_progress(0.0, track.duration if track.duration else 0.0)
-                    self._set_playback_state(PlaybackState.PLAYING)
+                    self._mark_backend_action("moc")
+                    if self._play_with_moc(track):
+                        self._pending_play_after_sync = False
+                    else:
+                        # Fallback: retry when current sync completes.
+                        self._pending_play_after_sync = True
                 else:
-                    self._play_with_internal(track)
-            self._pending_play_after_sync = False
+                    self._mark_backend_action("internal")
+                    if self._play_with_internal(track):
+                        self._pending_play_after_sync = False
+                    else:
+                        self._pending_play_after_sync = True
             return
 
         track = self._playlist.get_current_track()
@@ -333,7 +385,9 @@ class PlaybackController:
             logger.warning("Cannot play - file does not exist: %s", track.file_path)
             return
 
-        self._user_action_time = time.time()
+        self._mark_backend_action(
+            "moc" if self._should_use_moc(track) else "internal"
+        )
         active_backend = self._active_backend
         playing_file = (
             self._moc_last_file
@@ -384,26 +438,23 @@ class PlaybackController:
                 self._bt_sink.control_playback("stop")
             return
 
-        active_backend = self._active_backend
-        if active_backend == "moc":
+        # Idempotent hard-stop for both local backends to prevent drift-induced dual playback.
+        if self._use_moc:
             self._moc_controller.stop()
-        elif active_backend == "internal":
+        if self._internal_player.is_playing or self._internal_player.current_track:
             self._internal_player.stop()
 
         # Reset operation state to prevent stuck SEEKING state
         self._operation_state = OperationState.IDLE
 
-        # Batch state updates to avoid intermediate inconsistent states
-        # Order: backend -> index -> playback state -> timeline
+        # Order matters: publish STOPPED before clearing index so UI subscribers
+        # see playback stop before the track/index cleared events arrive.
         self._set_active_backend("none")
-        self._internal_last_file = (
-            None  # clear so same_track check is correct after stop
-        )
-        self._moc_last_file = None  # also clear MOC last file
-        self._playlist.set_current_index(-1)  # This also clears current_track
+        self._internal_last_file = None
+        self._moc_last_file = None
         self._set_playback_state(PlaybackState.STOPPED)
-        # Reset timeline to 00:00
         self._update_progress(0.0, 0.0)
+        self._playlist.set_current_index(-1)
 
     def _on_action_next(self, data: Optional[Dict[str, Any]]) -> None:
         if self._bt_sink and self._should_use_bt_sink():
@@ -558,16 +609,14 @@ class PlaybackController:
 
     # Note: _on_action_append_folder() removed - MOC sync handled via PLAYLIST_CHANGED
 
-    def _play_with_moc(self, track: TrackMetadata) -> None:
+    def _play_with_moc(self, track: TrackMetadata) -> bool:
         if not self._use_moc:
-            return
+            return False
 
         # Reset operation state to prevent stuck states
         self._operation_state = OperationState.IDLE
 
-        # Stop internal player if it's playing (prevents dual playback)
-        if self._internal_player.is_playing or self._internal_player.current_track:
-            self._internal_player.stop()
+        self._enforce_backend_exclusivity("moc")
 
         # Set _moc_last_file for track-end detection
         if track and track.file_path:
@@ -591,23 +640,23 @@ class PlaybackController:
         # Play the file
         if track and track.file_path:
             if not self._moc_controller.play_file(track.file_path):
-                return
+                return False
 
         # Reset progress immediately so UI doesn't show stale values
         self._update_progress(0.0, track.duration if track.duration else 0.0)
         self._set_playback_state(PlaybackState.PLAYING)
+        return True
 
-    def _play_with_internal(self, track: TrackMetadata) -> None:
+    def _play_with_internal(self, track: TrackMetadata) -> bool:
         """Play track using internal player."""
         # Reset operation state to prevent stuck states
         self._operation_state = OperationState.IDLE
 
-        # Stop MOC if it was the active backend (prevents dual playback)
-        if self._use_moc and self._active_backend == "moc":
-            self._moc_controller.stop()
+        self._enforce_backend_exclusivity("internal")
 
         self._internal_player.load_track(track)
-        self._internal_player.play()
+        if not self._internal_player.play():
+            return False
 
         # Find track index in playlist
         playlist = self._playlist.get_playlist()
@@ -629,6 +678,7 @@ class PlaybackController:
         self._update_progress(0.0, track.duration if track.duration else 0.0)
 
         self._set_playback_state(PlaybackState.PLAYING)
+        return True
 
     def _seek_moc(self, position: float) -> None:
         """Seek in MOC. Always reflect position in state. MOC cannot seek while paused."""
@@ -734,20 +784,9 @@ class PlaybackController:
                     )
                     self._load_and_play_current_track()
 
-        try:
-            if len(playlist) >= 100:
-                self._moc_controller.set_playlist_large(
-                    playlist, current_index, start_playback=False, on_done=on_done
-                )
-            else:
-                self._moc_controller.set_playlist(
-                    playlist, current_index, start_playback=False
-                )
-                on_done()
-        except Exception as e:
-            logger.error("MOC sync failed: %s", e)
-            self._syncing_to_moc = False
-            self._pending_play_after_sync = False
+        self._moc_controller.sync_playlist_async(
+            playlist, current_index, on_done=on_done
+        )
         return False
 
     def _reload_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
@@ -821,6 +860,8 @@ class PlaybackController:
         status = self._moc_controller.get_status()
         if not status:
             return True  # Try again later
+
+        self._resolve_dual_playback_conflict(status)
 
         moc_state = status.get("state", "STOP")
 

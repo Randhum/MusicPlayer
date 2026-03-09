@@ -16,13 +16,15 @@ from gi.repository import Gdk, GLib, GObject, Gtk
 from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
+from core.music_library import AUDIO_EXTENSIONS
 
 logger = get_logger(__name__)
 
 
-def _track_order_key(track: TrackMetadata) -> tuple[int, str, str]:
-    """Sort tracks by track number first, then title, then file path."""
+def _track_order_key(track: TrackMetadata) -> tuple[str, int, str, str]:
+    """Sort tracks by parent directory, then track number, then title, then path."""
     return (
+        str(Path(track.file_path).parent).lower(),
         track.track_number if track.track_number is not None else 999,
         (track.title or Path(track.file_path).stem).lower(),
         str(track.file_path).lower(),
@@ -362,8 +364,9 @@ class LibraryBrowser(Gtk.Box):
 
         # Collect tracks from disk
         tracks = []
-        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+        for path in folder.rglob("*"):
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+                tracks.append(TrackMetadata(str(path)))
         tracks.sort(key=_track_order_key)
 
         if not tracks:
@@ -396,8 +399,9 @@ class LibraryBrowser(Gtk.Box):
         if self._events:
             # Collect tracks from disk
             tracks = []
-            for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-                tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+            for path in folder.rglob("*"):
+                if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+                    tracks.append(TrackMetadata(str(path)))
             tracks.sort(key=_track_order_key)
             if tracks:
                 self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})

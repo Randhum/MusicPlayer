@@ -14,14 +14,16 @@ from gi.repository import Gdk, GLib, Gtk
 from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
+from core.music_library import AUDIO_EXTENSIONS
 from core.playlist_manager import PlaylistManager
 
 logger = get_logger(__name__)
 
 
-def _track_order_key(track: TrackMetadata) -> tuple[int, str, str]:
-    """Sort tracks by track number first, then title, then file path."""
+def _track_order_key(track: TrackMetadata) -> tuple[str, int, str, str]:
+    """Sort tracks by parent directory, then track number, then title, then path."""
     return (
+        str(Path(track.file_path).parent).lower(),
         track.track_number if track.track_number is not None else 999,
         (track.title or Path(track.file_path).stem).lower(),
         str(track.file_path).lower(),
@@ -333,8 +335,9 @@ class PlaylistView(Gtk.Box):
 
         # Collect tracks and use ADD_FOLDER - PlaybackController handles MOC sync via PLAYLIST_CHANGED
         tracks = []
-        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+        for path in folder.rglob("*"):
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+                tracks.append(TrackMetadata(str(path)))
 
         tracks.sort(key=_track_order_key)
 
@@ -361,8 +364,9 @@ class PlaylistView(Gtk.Box):
         if not folder.exists() or not folder.is_dir():
             return False
         tracks = []
-        for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
-            tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
+        for path in folder.rglob("*"):
+            if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
+                tracks.append(TrackMetadata(str(path)))
         tracks.sort(key=_track_order_key)
         if not tracks:
             return False

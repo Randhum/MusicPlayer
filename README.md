@@ -1140,13 +1140,17 @@ Playback intent is separate from playlist content changes:
 - Prefer event publication over direct cross-component calls.
 - Use type hints and structured logging.
 - Keep write paths and command execution validated and explicit.
+- `PLAYBACK_STATE_CHANGED` publishes on any state *change* (guard: `old != new`), so transitions from `SEEKING` to `PAUSED` are not swallowed.
+- On stop: publish `PLAYBACK_STATE_CHANGED("stopped")` and reset progress *before* clearing the index, so UI subscribers see a consistent stopped state before track/index cleared events arrive.
+- Playback enforces a strict single-backend invariant: local MOC and internal player are never allowed to run simultaneously.
+- If both backends are detected as active, conflict resolution follows **latest user action wins** and stops the non-owner backend immediately.
 
 #### MOC Integration Architecture
 
 MOC is integrated through a thin command wrapper (`mocp`) focused on reliability:
 - `play_file()` uses `mocp --playit <file>` as the primary track-selection path.
 - Status is read through `--info` with short caching to reduce command overhead.
-- Playlist sync writes M3U data from app state to MOC state.
+- Playlist sync writes a temporary M3U snapshot and loads it with a single `--clear` + `--append <m3u>` in a background thread (`sync_playlist_async`), avoiding per-track subprocess calls and avoiding races with MOC's own `playlist.m3u` lifecycle.
 - Autonext in MOC is disabled by default; track progression is controlled by `PlaybackController`.
 
 **MOC Commands Used (verified against `mocp --help`):**
@@ -1183,7 +1187,8 @@ The codebase follows these standards:
 - Input/path validation for filesystem and command execution
 - Explicit state models for playback and UI interaction
 - Metadata fallback from filename prefixes (e.g. `01 - Title`) when tags are missing, including cached metadata loaded from disk
-- Track ordering uses `track_number` when available (library view and folder-add/replace playlist operations)
+- Track ordering groups by parent directory first, then `track_number` within each directory (library view and folder-add/replace playlist operations)
+- Folder add/replace track discovery in UI uses canonical `AUDIO_EXTENSIONS` from `core.music_library`
 
 #### Testing
 

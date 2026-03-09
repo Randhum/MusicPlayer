@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -661,7 +663,10 @@ class MocController:
             return {}
 
     def write_m3u_playlist(
-        self, tracks: List[TrackMetadata], current_index: int = -1
+        self,
+        tracks: List[TrackMetadata],
+        current_index: int = -1,
+        output_path: Optional[Path] = None,
     ) -> bool:
         """
         Write M3U playlist file directly with all tracks.
@@ -679,8 +684,9 @@ class MocController:
             return False
 
         try:
+            target_path = output_path if output_path is not None else self._playlist_path
             # Ensure playlist directory exists
-            self._playlist_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Build list of valid tracks with absolute paths
             valid_tracks = []
@@ -695,7 +701,7 @@ class MocController:
                 valid_tracks.append((track, abs_path))
 
             # Write M3U file
-            with self._playlist_path.open("w", encoding="utf-8") as f:
+            with target_path.open("w", encoding="utf-8") as f:
                 # Write header
                 f.write("#EXTM3U\n")
 
@@ -710,7 +716,11 @@ class MocController:
                     f.write(extinf_line)
                     f.write(f"{abs_path}\n")
 
-            logger.debug("Wrote M3U playlist file with %d tracks", len(valid_tracks))
+            logger.debug(
+                "Wrote M3U playlist file with %d tracks to %s",
+                len(valid_tracks),
+                target_path,
+            )
             return True
 
         except Exception as e:
@@ -750,168 +760,54 @@ class MocController:
         result = self._run("--append", abs_path, capture_output=True)
         return result.returncode == 0
 
-    def append_track_file(self, file_path: str) -> bool:
-        """
-        Append a single track file to MOC's playlist.
-
-        Args:
-            file_path: Absolute path to the track file.
-
-        Returns:
-            True if successful, False otherwise.
-        """
-        if not self.is_available():
-            return False
-        if not file_path:
-            return False
-
-        self.ensure_server()
-        result = self._run("--append", file_path, capture_output=True)
-        return result.returncode == 0
-
-    def set_playlist(
+    def sync_playlist_async(
         self,
         tracks: List[TrackMetadata],
         current_index: int = -1,
-        start_playback: bool = False,
-    ):
-        """
-        Replace MOC's playlist with the given tracks using native MOC commands.
-
-        Note: For large playlists (100+ tracks), PlaybackController uses chunked sync
-        instead of calling this method directly. This method is used for small playlists.
-
-        Args:
-            tracks: List of tracks to become the new playlist.
-            current_index: Index of the track that should start playing (if start_playback is True).
-            start_playback: If True and current_index is valid, start playback of that track.
-        """
-        if not self.is_available():
-            return
-
-        self.ensure_server()
-
-        # Build list of valid tracks
-        valid_tracks = []
-        original_to_valid_index = {}
-
-        for orig_idx, track in enumerate(tracks):
-            if not track or not track.file_path:
-                continue
-            file_path = Path(track.file_path)
-            if not file_path.exists() or not file_path.is_file():
-                logger.warning("Track file does not exist: %s", track.file_path)
-                continue
-            abs_path = str(file_path.resolve())
-            original_to_valid_index[orig_idx] = len(valid_tracks)
-            valid_tracks.append((track, abs_path))
-
-        # Clear current playlist
-        self.clear_playlist()
-
-        # Append all tracks using native MOC command
-        # Note: For large playlists, chunked sync in PlaybackController handles this
-        # more efficiently. This method is used for small playlists (<100 tracks).
-        for track, abs_path in valid_tracks:
-            self._run("--append", abs_path)
-
-        # Start playback if requested
-        if start_playback:
-            valid_index = (
-                original_to_valid_index.get(current_index, -1)
-                if 0 <= current_index < len(tracks)
-                else -1
-            )
-            if 0 <= valid_index < len(valid_tracks):
-                track, abs_path = valid_tracks[valid_index]
-                if abs_path:
-                    self.play_file(abs_path)
-
-    def set_playlist_large(
-        self,
-        tracks: List[TrackMetadata],
-        current_index: int,
-        start_playback: bool,
         on_done: Optional[Callable[[], None]] = None,
     ) -> None:
-        """Chunked sync for large playlists (100+). Calls on_done when finished; starts playback if requested.
+        """Replace MOC's playlist in a background thread so the UI stays responsive.
 
-        Uses a sync_id to prevent race conditions: if a new sync starts while an old one
-        is in progress, the old callbacks are ignored.
+        Writes the track list to an M3U file, then tells MOC to clear and load
+        that file in two subprocess calls (instead of one per track).
+        ``on_done`` is dispatched back to the GTK main loop via
+        ``GLib.idle_add`` so callers can safely mutate UI/controller state.
         """
         if not self.is_available() or not tracks:
             if on_done:
-                on_done()
+                GLib.idle_add(on_done)
             return
-        self.ensure_server()
-        self.write_m3u_playlist(tracks, current_index)
-        self.clear_playlist()
 
-        # Generate new sync ID to invalidate any in-progress syncs
-        sync_id = getattr(self, "_chunk_sync_id", 0) + 1
-        self._chunk_sync_id = sync_id
+        tmp_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".m3u", prefix="musicplayer-sync-", delete=False
+        )
+        tmp_path = Path(tmp_file.name)
+        tmp_file.close()
 
-        self._chunk_tracks = [
-            (t, str(Path(t.file_path).resolve()))
-            for t in tracks
-            if t and t.file_path and Path(t.file_path).exists()
-        ]
-        self._chunk_index = 0
-        self._chunk_current_index = current_index
-        self._chunk_start_playback = start_playback
-        self._chunk_on_done = on_done
-        GLib.idle_add(self._chunked_append_next, sync_id)
+        def _worker():
+            try:
+                if not self.ensure_server():
+                    logger.error("MOC sync thread failed: could not connect to server")
+                    return
+                if not self.write_m3u_playlist(
+                    tracks, current_index, output_path=tmp_path
+                ):
+                    logger.error("MOC sync thread failed: could not write temp M3U")
+                    return
+                self._run("--clear")
+                self._run("--append", str(tmp_path))
+                logger.debug("MOC sync thread complete: %d tracks", len(tracks))
+            except Exception as e:
+                logger.error("MOC sync thread failed: %s", e)
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if on_done:
+                    GLib.idle_add(on_done)
 
-    def _chunked_append_next(self, sync_id: int) -> bool:
-        """Append next chunk of tracks. sync_id ensures stale callbacks are ignored."""
-        # Check if this callback is from an old sync (superseded by a new one)
-        if getattr(self, "_chunk_sync_id", 0) != sync_id:
-            logger.debug(
-                "Stale chunked sync callback ignored (sync_id %s != %s)",
-                sync_id,
-                self._chunk_sync_id,
-            )
-            return False  # Stale callback, ignore
-
-        try:
-            CHUNK = 50
-            if not getattr(self, "_chunk_tracks", None):
-                return False
-            end = min(self._chunk_index + CHUNK, len(self._chunk_tracks))
-            for i in range(self._chunk_index, end):
-                _, abs_path = self._chunk_tracks[i]
-                self.append_track_file(abs_path)
-            self._chunk_index = end
-            if end < len(self._chunk_tracks):
-                GLib.idle_add(self._chunked_append_next, sync_id)
-                return False
-            # All chunks done
-            tracks = [t for t, _ in self._chunk_tracks]
-            cur = self._chunk_current_index
-            start = self._chunk_start_playback
-            on_done = getattr(self, "_chunk_on_done", None)
-            self._chunk_tracks = []
-            logger.debug(
-                "Chunked sync complete: %d tracks, cur=%d, start=%s",
-                len(tracks),
-                cur,
-                start,
-            )
-            if start and 0 <= cur < len(tracks) and tracks[cur].file_path:
-                logger.debug(
-                    "Starting playback via play_file: %s", tracks[cur].file_path
-                )
-                self.play_file(str(Path(tracks[cur].file_path).resolve()))
-            if on_done:
-                on_done()
-        except Exception as e:
-            logger.error("Chunked sync error: %s", e)
-            # Always call on_done to avoid leaving sync state stuck
-            on_done = getattr(self, "_chunk_on_done", None)
-            self._chunk_tracks = []
-            if on_done:
-                on_done()
-        return False
+        threading.Thread(target=_worker, name="moc-sync", daemon=True).start()
 
     def play_file(self, file_path: str) -> bool:
         """
