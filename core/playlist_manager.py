@@ -96,6 +96,27 @@ class PlaylistManager:
         # In shuffle mode, check if queue has valid entries
         return bool(self._shuffle_queue) or len(self.current_playlist) > 1
 
+    def peek_next_index(self) -> int:
+        """Get next index without consuming shuffle state."""
+        if not self.current_playlist:
+            return -1
+        if not self._shuffle_enabled:
+            return (
+                self.current_index + 1
+                if self.current_index < len(self.current_playlist) - 1
+                else -1
+            )
+        for idx in self._shuffle_queue:
+            if 0 <= idx < len(self.current_playlist):
+                return idx
+        if len(self.current_playlist) <= 1:
+            return -1
+        self._regenerate_shuffle_queue()
+        for idx in self._shuffle_queue:
+            if 0 <= idx < len(self.current_playlist):
+                return idx
+        return -1
+
     def advance_to_next(self) -> int:
         """Get next index and consume from shuffle queue if shuffled.
 
@@ -203,6 +224,7 @@ class PlaylistManager:
             {
                 "playlist_length": len(self.current_playlist),
                 "content_changed": True,
+                "sync_mode": "replace",
             },
         )
         # 2) Index + track (only when valid — prevents None/track events on clear)
@@ -236,6 +258,7 @@ class PlaylistManager:
             position: Insert position (None appends to end)
         """
         old_index = self.current_index
+        append_only = position is None
         if position is None:
             self.current_playlist.append(track)
             position = len(self.current_playlist) - 1
@@ -250,6 +273,8 @@ class PlaylistManager:
                 {
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
+                    "sync_mode": "append" if append_only else "replace",
+                    "appended_tracks": [track] if append_only else [],
                 },
             )
             self._emit_current_track_changed(old_index)
@@ -268,6 +293,7 @@ class PlaylistManager:
             position: Insert position (None appends to end)
         """
         old_index = self.current_index
+        append_only = position is None
         if position is None:
             self.current_playlist.extend(tracks)
         else:
@@ -282,6 +308,8 @@ class PlaylistManager:
                 {
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
+                    "sync_mode": "append" if append_only else "replace",
+                    "appended_tracks": tracks if append_only else [],
                 },
             )
             self._emit_current_track_changed(old_index)
@@ -318,6 +346,7 @@ class PlaylistManager:
                 {
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
+                    "sync_mode": "replace",
                 },
             )
             self._emit_current_track_changed(old_index)
@@ -359,6 +388,7 @@ class PlaylistManager:
                 {
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
+                    "sync_mode": "replace",
                 },
             )
             self._emit_current_track_changed(old_index)
@@ -377,6 +407,7 @@ class PlaylistManager:
                 {
                     "playlist_length": 0,
                     "content_changed": True,
+                    "sync_mode": "replace",
                 },
             )
             self._emit_current_track_changed(old_index)

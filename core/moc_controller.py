@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -19,6 +18,8 @@ from core.logging import get_logger
 from core.metadata import TrackMetadata
 
 logger = get_logger(__name__)
+
+SYNC_APPEND_DELAY_SECONDS = 0.05
 
 
 class MocController:
@@ -96,30 +97,35 @@ class MocController:
         if not self.is_available():
             return False
 
-        if self._server_connected:
+        # Single validation path: probe --info, then start server if needed.
+        ping = self._run("--info", capture_output=True)
+        if ping.returncode == 0:
+            self._server_connected = True
             return True
 
-        # Attempt to start server
+        self._server_connected = False
+
         result = self._run("--server", capture_output=True)
         if result.returncode == 0:
-            # Wait for server to be fully ready by polling --info
-            # This ensures we don't send commands before server is accepting them
+            # Wait for server to be fully ready by polling --info.
             for _ in range(10):  # Try up to 10 times (1 second total)
                 time.sleep(0.1)
-                test_result = subprocess.run(
-                    [self._mocp_path, "--info"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2.0,
-                )
-                if test_result.returncode == 0:
+                if self._run("--info", capture_output=True).returncode == 0:
                     self._server_connected = True
                     return True
-            # Server started but not responding - consider it failed
             logger.warning("MOC server started but not responding to --info")
             return False
 
         return False
+
+    def restart_server(self) -> bool:
+        """Restart MOC server and verify connectivity."""
+        if not self.is_available():
+            return False
+        self.shutdown()
+        # Give MOC a short moment to tear down sockets cleanly.
+        time.sleep(0.2)
+        return self.ensure_server()
 
     def get_playlist(
         self, current_file: Optional[str] = None
@@ -764,50 +770,130 @@ class MocController:
         self,
         tracks: List[TrackMetadata],
         current_index: int = -1,
-        on_done: Optional[Callable[[], None]] = None,
+        on_done: Optional[Callable[[bool], None]] = None,
     ) -> None:
         """Replace MOC's playlist in a background thread so the UI stays responsive.
 
-        Writes the track list to an M3U file, then tells MOC to clear and load
-        that file in two subprocess calls (instead of one per track).
+        Clears MOC playlist and appends tracks one-by-one with a small delay.
         ``on_done`` is dispatched back to the GTK main loop via
         ``GLib.idle_add`` so callers can safely mutate UI/controller state.
         """
-        if not self.is_available() or not tracks:
+        if not self.is_available():
             if on_done:
-                GLib.idle_add(on_done)
+                GLib.idle_add(on_done, False)
             return
 
-        tmp_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".m3u", prefix="musicplayer-sync-", delete=False
-        )
-        tmp_path = Path(tmp_file.name)
-        tmp_file.close()
+        valid_paths: List[str] = []
+        for track in tracks:
+            if not track or not track.file_path:
+                continue
+            file_path = Path(track.file_path)
+            if not file_path.exists() or not file_path.is_file():
+                logger.warning("Track file does not exist: %s", track.file_path)
+                continue
+            valid_paths.append(str(file_path.resolve()))
 
         def _worker():
+            success = False
             try:
                 if not self.ensure_server():
-                    logger.error("MOC sync thread failed: could not connect to server")
-                    return
-                if not self.write_m3u_playlist(
-                    tracks, current_index, output_path=tmp_path
-                ):
-                    logger.error("MOC sync thread failed: could not write temp M3U")
-                    return
-                self._run("--clear")
-                self._run("--append", str(tmp_path))
-                logger.debug("MOC sync thread complete: %d tracks", len(tracks))
+                    logger.warning(
+                        "MOC sync thread: initial connect failed, trying restart"
+                    )
+                    if not self.restart_server():
+                        logger.error("MOC sync thread failed: could not connect to server")
+                        return
+
+                clear_result = self._run("--clear", capture_output=True)
+                if clear_result.returncode != 0:
+                    logger.error("MOC sync thread failed: clear playlist command failed")
+                    if clear_result.stderr:
+                        logger.debug("MOC clear error: %s", clear_result.stderr)
+                else:
+                    success = True
+                    for idx, abs_path in enumerate(valid_paths):
+                        append_result = self._run(
+                            "--append", abs_path, capture_output=True
+                        )
+                        if append_result.returncode != 0:
+                            success = False
+                            logger.error(
+                                "MOC sync thread failed: append command failed for %s",
+                                abs_path,
+                            )
+                            if append_result.stderr:
+                                logger.debug("MOC append error: %s", append_result.stderr)
+                            # Leave MOC in a deterministic state on partial failure.
+                            self._run("--clear", capture_output=True)
+                            break
+                        # Gentle pacing so we don't overwhelm MOC.
+                        if idx < len(valid_paths) - 1:
+                            time.sleep(SYNC_APPEND_DELAY_SECONDS)
+                    if success:
+                        logger.debug(
+                            "MOC sync thread complete: %d tracks", len(valid_paths)
+                        )
             except Exception as e:
                 logger.error("MOC sync thread failed: %s", e)
             finally:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
                 if on_done:
-                    GLib.idle_add(on_done)
+                    GLib.idle_add(on_done, success)
 
         threading.Thread(target=_worker, name="moc-sync", daemon=True).start()
+
+    def append_playlist_async(
+        self,
+        tracks: List[TrackMetadata],
+        on_done: Optional[Callable[[bool], None]] = None,
+    ) -> None:
+        """Append tracks in background without clearing MOC playlist."""
+        if not self.is_available():
+            if on_done:
+                GLib.idle_add(on_done, False)
+            return
+
+        valid_paths: List[str] = []
+        for track in tracks:
+            if not track or not track.file_path:
+                continue
+            file_path = Path(track.file_path)
+            if not file_path.exists() or not file_path.is_file():
+                logger.warning("Track file does not exist: %s", track.file_path)
+                continue
+            valid_paths.append(str(file_path.resolve()))
+
+        def _worker():
+            success = False
+            try:
+                if not self.ensure_server():
+                    logger.warning(
+                        "MOC append thread: initial connect failed, trying restart"
+                    )
+                    if not self.restart_server():
+                        logger.error("MOC append thread failed: could not connect to server")
+                        return
+
+                success = True
+                for idx, abs_path in enumerate(valid_paths):
+                    append_result = self._run("--append", abs_path, capture_output=True)
+                    if append_result.returncode != 0:
+                        success = False
+                        logger.error(
+                            "MOC append thread failed: append command failed for %s",
+                            abs_path,
+                        )
+                        if append_result.stderr:
+                            logger.debug("MOC append error: %s", append_result.stderr)
+                        break
+                    if idx < len(valid_paths) - 1:
+                        time.sleep(SYNC_APPEND_DELAY_SECONDS)
+            except Exception as e:
+                logger.error("MOC append thread failed: %s", e)
+            finally:
+                if on_done:
+                    GLib.idle_add(on_done, success)
+
+        threading.Thread(target=_worker, name="moc-append", daemon=True).start()
 
     def play_file(self, file_path: str) -> bool:
         """

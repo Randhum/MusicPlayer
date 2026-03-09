@@ -1123,6 +1123,7 @@ UI action -> ACTION_* event -> Controller/Manager -> state change -> *_CHANGED e
 #### Playlist Event Contract
 
 - `PLAYLIST_CHANGED`: content mutations only (add, remove, move, replace, clear). No playback intent.
+  - Includes `sync_mode` (`replace` or `append`) so MOC sync can avoid destructive clears on queue additions.
 - `CURRENT_INDEX_CHANGED`: active index changed.
 - `TRACK_CHANGED`: active track object changed.
 - Content mutation order: `PLAYLIST_CHANGED -> CURRENT_INDEX_CHANGED -> TRACK_CHANGED`.
@@ -1143,15 +1144,23 @@ Playback intent is separate from playlist content changes:
 - `PLAYBACK_STATE_CHANGED` publishes on any state *change* (guard: `old != new`), so transitions from `SEEKING` to `PAUSED` are not swallowed.
 - On stop: publish `PLAYBACK_STATE_CHANGED("stopped")` and reset progress *before* clearing the index, so UI subscribers see a consistent stopped state before track/index cleared events arrive.
 - Playback enforces a strict single-backend invariant: local MOC and internal player are never allowed to run simultaneously.
-- If both backends are detected as active, conflict resolution follows **latest user action wins** and stops the non-owner backend immediately.
+- If both backends are detected as active, conflict resolution compares the latest per-backend action timestamps and stops the older backend immediately.
+- Next/previous/auto-next index changes are committed only after playback start succeeds; failed starts roll back to the previous index.
 
 #### MOC Integration Architecture
 
 MOC is integrated through a thin command wrapper (`mocp`) focused on reliability:
 - `play_file()` uses `mocp --playit <file>` as the primary track-selection path.
 - Status is read through `--info` with short caching to reduce command overhead.
-- Playlist sync writes a temporary M3U snapshot and loads it with a single `--clear` + `--append <m3u>` in a background thread (`sync_playlist_async`), avoiding per-track subprocess calls and avoiding races with MOC's own `playlist.m3u` lifecycle.
+- `ensure_server()` uses a single validation path: probe `--info`, then start the server only when needed.
+- Replace sync runs in a background thread (`sync_playlist_async`) with paced per-track appends.
+- `sync_playlist_async` validates `mocp --clear` and every per-track `mocp --append`; on first failure it clears again and reports sync failure.
+- Append-only sync (`append_playlist_async`) appends new queue tracks without `--clear`, so current playback is preserved.
+- If MOC is unreachable at sync start, the sync worker performs one controlled server restart (`mocp --exit` then `--server`) and retries connectivity before failing.
 - Autonext in MOC is disabled by default; track progression is controlled by `PlaybackController`.
+- MOC backend ownership and playlist index are only updated after `play_file()` succeeds, so failed starts do not leave stale controller state behind.
+- `ACTION_PLAY` during MOC sync can start immediately, and the latest sync-time play intent is replayed after sync to reassert the intended track if sync clobbered runtime state (single reassert path in `PlaybackController`).
+- Track-finished detection for MOC auto-next uses a simple near-end position threshold (`position >= duration - 1.0`) with per-file de-duplication, keeping behavior deterministic while avoiding repeated next triggers.
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server
