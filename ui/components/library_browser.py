@@ -20,6 +20,15 @@ from core.metadata import TrackMetadata
 logger = get_logger(__name__)
 
 
+def _track_order_key(track: TrackMetadata) -> tuple[int, str, str]:
+    """Sort tracks by track number first, then title, then file path."""
+    return (
+        track.track_number if track.track_number is not None else 999,
+        (track.title or Path(track.file_path).stem).lower(),
+        str(track.file_path).lower(),
+    )
+
+
 class LibraryBrowser(Gtk.Box):
     """Sidebar component for browsing music library."""
 
@@ -176,7 +185,7 @@ class LibraryBrowser(Gtk.Box):
         # Tracks in this folder (root-level tracks use parent_iter None)
         if "tracks" in folder_tree:
             target = folder_iter if folder_iter is not None else parent_iter
-            for track in folder_tree["tracks"]:
+            for track in sorted(folder_tree["tracks"], key=_track_order_key):
                 track_name = track.title or Path(track.file_path).stem
                 self.store.append(target, [track_name, "track", track])
 
@@ -207,7 +216,7 @@ class LibraryBrowser(Gtk.Box):
         )
 
         # Add tracks under the header
-        for track in tracks:
+        for track in sorted(tracks, key=_track_order_key):
             track_name = track.title or Path(track.file_path).stem
             artist = track.artist or "Unknown Artist"
             display_name = f"{track_name} - {artist}"
@@ -355,7 +364,7 @@ class LibraryBrowser(Gtk.Box):
         tracks = []
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-        tracks.sort(key=lambda t: t.file_path)
+        tracks.sort(key=_track_order_key)
 
         if not tracks:
             # Fallback: try collecting from tree
@@ -389,7 +398,7 @@ class LibraryBrowser(Gtk.Box):
             tracks = []
             for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
                 tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-            tracks.sort(key=lambda t: t.file_path)
+            tracks.sort(key=_track_order_key)
             if tracks:
                 self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
 

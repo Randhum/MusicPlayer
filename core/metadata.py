@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import re
 import struct
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -190,10 +191,43 @@ class TrackMetadata:
             if not self._extract_metadata_gstreamer():
                 logger.warning("Could not extract metadata from %s", self.file_path)
         finally:
-            # Always ensure we at least have a sensible title, even if extraction
+            stem = Path(self.file_path).stem
+            parsed_track_num, parsed_title = self._parse_filename_track_prefix(stem)
+
+            # Fallback track number from filename pattern like "01 - Title"
+            if self.track_number is None and parsed_track_num is not None:
+                self.track_number = parsed_track_num
+
+            # Always ensure we have a sensible title, even if extraction
             # failed to parse tags for this file.
             if not self.title:
-                self.title = Path(self.file_path).stem
+                self.title = parsed_title or stem
+
+    @staticmethod
+    def _parse_filename_track_prefix(stem: str) -> tuple[Optional[int], Optional[str]]:
+        """Parse filename prefixes like '01 - Title' into (track_number, title)."""
+        if not stem:
+            return None, None
+
+        # Accept 1-3 digits, optional separator whitespace, and dash/en dash/em dash.
+        # Examples:
+        # - "01 - Song"
+        # - "7-Track"
+        # - "003 — Intro"
+        match = re.match(r"^\s*(\d{1,3})\s*[-–—]\s*(.+?)\s*$", stem)
+        if not match:
+            return None, None
+
+        try:
+            track_num = int(match.group(1))
+        except (TypeError, ValueError):
+            return None, None
+
+        if track_num <= 0:
+            return None, None
+
+        parsed_title = match.group(2).strip()
+        return track_num, (parsed_title or None)
 
     def _extract_metadata_gstreamer(self) -> bool:
         """
@@ -556,6 +590,17 @@ class TrackMetadata:
         metadata = cls.__new__(cls)
         for key, value in data.items():
             setattr(metadata, key, value)
+
+        # Backward-compatible fallback for cached entries created before filename
+        # prefix parsing existed (or with missing track tags).
+        file_path = getattr(metadata, "file_path", None)
+        if file_path:
+            stem = Path(file_path).stem
+            parsed_track_num, parsed_title = cls._parse_filename_track_prefix(stem)
+            if getattr(metadata, "track_number", None) is None and parsed_track_num is not None:
+                metadata.track_number = parsed_track_num
+            if not getattr(metadata, "title", None):
+                metadata.title = parsed_title or stem
         return metadata
 
 

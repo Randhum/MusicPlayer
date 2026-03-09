@@ -19,6 +19,15 @@ from core.playlist_manager import PlaylistManager
 logger = get_logger(__name__)
 
 
+def _track_order_key(track: TrackMetadata) -> tuple[int, str, str]:
+    """Sort tracks by track number first, then title, then file path."""
+    return (
+        track.track_number if track.track_number is not None else 999,
+        (track.title or Path(track.file_path).stem).lower(),
+        str(track.file_path).lower(),
+    )
+
+
 class PlaylistView(Gtk.Box):
     """Playlist tree; subscribes to PLAYLIST_CHANGED/CURRENT_INDEX_CHANGED; publishes ACTION_*."""
 
@@ -327,8 +336,7 @@ class PlaylistView(Gtk.Box):
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
 
-        # Sort tracks by file path to match library order (library sorts by file_path)
-        tracks.sort(key=lambda t: t.file_path)
+        tracks.sort(key=_track_order_key)
 
         if tracks:
             self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
@@ -355,7 +363,7 @@ class PlaylistView(Gtk.Box):
         tracks = []
         for ext in ["*.mp3", "*.ogg", "*.flac", "*.m4a", "*.wav", "*.opus"]:
             tracks.extend([TrackMetadata(str(p)) for p in folder.rglob(ext)])
-        tracks.sort(key=lambda t: t.file_path)
+        tracks.sort(key=_track_order_key)
         if not tracks:
             return False
         # Content change event - PlaylistManager handles

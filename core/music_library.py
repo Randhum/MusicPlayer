@@ -232,9 +232,15 @@ class MusicLibrary:
                 tracks = self.artists[artist][album]
                 tracks.sort(key=lambda t: (t.track_number or 999, t.title or ""))
 
-        # Sort tracks within folders by filename
+        # Sort tracks within folders by track number when available.
         for folder_path in self.folder_structure:
-            self.folder_structure[folder_path].sort(key=lambda t: t.file_path)
+            self.folder_structure[folder_path].sort(
+                key=lambda t: (
+                    t.track_number if t.track_number is not None else 999,
+                    (t.title or Path(t.file_path).stem).lower(),
+                    str(t.file_path).lower(),
+                )
+            )
 
     def get_artists(self) -> List[str]:
         """Get list of all artists, sorted."""

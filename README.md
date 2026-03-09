@@ -1182,6 +1182,8 @@ The codebase follows these standards:
 - XDG-compliant configuration and cache handling
 - Input/path validation for filesystem and command execution
 - Explicit state models for playback and UI interaction
+- Metadata fallback from filename prefixes (e.g. `01 - Title`) when tags are missing, including cached metadata loaded from disk
+- Track ordering uses `track_number` when available (library view and folder-add/replace playlist operations)
 
 #### Testing
 
