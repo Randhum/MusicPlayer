@@ -402,6 +402,8 @@ When you edit the playlist directly in MOC:
   - MOC saves its playlist (press `S` in MOC, or when MOC exits)
   - You click the **Refresh** button in the playlist panel
 
+> **Note:** For playlist edits you make **in MOC** to line up reliably with this app, you often need to **close MOC** (quit the MOC client or shut down the MOC server) so MOC flushes its playlist to `playlist.m3u`. Until then, the on-disk file may be stale and the GTK playlist can look out of sync. **That behavior is due to MOC**, not this project.
+
 ### Bluetooth Speaker Mode
 
 <details>

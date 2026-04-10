@@ -89,6 +89,9 @@ class PlaybackController:
         self._recent_shuffle_write: Optional[float] = None
         self._recent_repeat_write: Optional[float] = None
         self._loading_from_moc: bool = False
+        # After cancelling replace sync, mirror MOC→app in replace on_done (see _mirror_playlist_from_moc)
+        self._mirror_after_replace_cancel: bool = False
+        self._mirror_after_replace_cancel_file: Optional[str] = None
         # MOC sync state
         self._moc_replace_sync_active: bool = False
         self._moc_append_sync_active: bool = False
@@ -955,18 +958,33 @@ class PlaybackController:
                 bool(self._pending_play_intent),
             )
             self._moc_replace_sync_active = False
+            if success and self._mirror_after_replace_cancel:
+                # Replace finished before cancel was observed; MOC already matches app push.
+                self._mirror_after_replace_cancel = False
+                self._mirror_after_replace_cancel_file = None
             if success:
                 self._moc_sync_cancelled_by_user = False
                 self._recent_moc_write = time.time()
             else:
                 if cancelled or self._moc_sync_cancelled_by_user:
                     self._moc_sync_cancelled_by_user = False
+                    mirror_pending = self._mirror_after_replace_cancel
+                    mirror_file = self._mirror_after_replace_cancel_file
+                    self._mirror_after_replace_cancel = False
+                    self._mirror_after_replace_cancel_file = None
+                    if mirror_pending:
+                        self._playlist_changed_during_sync = False
+                        self._mirror_playlist_from_moc_impl(current_file=mirror_file)
+                        return
                     self._playlist_changed_during_sync = False
                     return
                 logger.error("MOC sync failed; will retry if playlist changed during sync")
                 if self._playlist_changed_during_sync:
                     self._playlist_changed_during_sync = False
                     GLib.idle_add(self._sync_moc_playlist)
+                    return
+                self._mirror_after_replace_cancel = False
+                self._mirror_after_replace_cancel_file = None
                 return
 
             # Update mtime
@@ -1051,6 +1069,10 @@ class PlaybackController:
 
         moc_state = status.get("state", "STOP")
 
+        # Always check for external MOC playlist file changes (regardless of active backend).
+        # The recent-write guard inside prevents our own syncs from triggering a mirror.
+        self._check_moc_playlist_changes()
+
         # If MOC is playing/paused but backend is "none", activate MOC as backend
         # This handles: MOC started externally, or sync completed
         if self._active_backend == "none" and moc_state in ("PLAY", "PAUSE"):
@@ -1060,7 +1082,8 @@ class PlaybackController:
             self._set_active_backend("moc")
             file_path = status.get("file_path")
             if file_path:
-                self._moc_last_file = str(Path(file_path).resolve())
+                # Sync internal playlist index to whichever track MOC is now on
+                self._handle_moc_track_change(file_path)
 
         # Only update state if MOC is the active backend
         if self._active_backend != "moc":
@@ -1121,10 +1144,6 @@ class PlaybackController:
                 self._set_playback_state(PlaybackState.STOPPED)
                 self._update_progress(0.0, 0.0)
 
-        # Detect external playlist file changes (skip during sync — file is in flux)
-        if not self._moc_replace_sync_active:
-            self._check_moc_playlist_changes()
-
         return True  # Continue polling
 
     def _handle_moc_track_change(self, file_path: str) -> None:
@@ -1142,8 +1161,26 @@ class PlaybackController:
         self._mirror_playlist_from_moc(current_file=file_path)
 
     def _mirror_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
-        """Mirror MOC authoritative playlist/index into PlaylistManager (UI projection)."""
-        if not self._use_moc or self._moc_replace_sync_active:
+        """Mirror MOC authoritative playlist/index into PlaylistManager (UI projection).
+
+        If a replace sync to MOC is in progress, cancels it and mirrors once the worker ends.
+        """
+        if not self._use_moc:
+            return
+        if self._moc_replace_sync_active:
+            self._mirror_after_replace_cancel = True
+            if current_file is not None:
+                self._mirror_after_replace_cancel_file = current_file
+            self._moc_controller.cancel_replace_sync_only()
+            logger.debug(
+                "Cancelled in-flight MOC replace sync; mirroring from MOC when worker stops"
+            )
+            return
+        self._mirror_playlist_from_moc_impl(current_file=current_file)
+
+    def _mirror_playlist_from_moc_impl(self, current_file: Optional[str] = None) -> None:
+        """Apply MOC playlist to PlaylistManager (caller ensures replace sync is not active)."""
+        if not self._use_moc:
             return
         tracks, current_index = self._moc_controller.get_playlist(current_file=current_file)
         if not tracks:
@@ -1153,6 +1190,10 @@ class PlaybackController:
             self._playlist.set_playlist(tracks, current_index)
         finally:
             self._loading_from_moc = False
+
+        if current_file:
+            self._moc_last_file = str(Path(current_file).resolve())
+            self._moc_finish_observed_for = None
 
     def _handle_track_finished(self) -> None:
         if not self._autonext_enabled:
@@ -1197,8 +1238,10 @@ class PlaybackController:
             mtime = moc_playlist_path.stat().st_mtime
             if abs(mtime - self._moc_playlist_mtime) > 0.1:
                 if not recent_write and self._startup_complete:
-                    # In MOC mode, mirror external playlist/index changes into app state.
-                    self._mirror_playlist_from_moc()
+                    # Force-refresh status so current_file is accurate, not stale cache.
+                    status = self._moc_controller.get_status(force_refresh=True)
+                    current_file = status.get("file_path") if status else None
+                    self._mirror_playlist_from_moc(current_file=current_file)
                 self._moc_playlist_mtime = mtime
         except OSError:
             pass

@@ -107,7 +107,8 @@ class MocController:
 
         self._server_connected = False
 
-        result = self._run("--server", capture_output=True)
+        # --sync: keep MOC's in-memory playlist in sync with playlist.m3u / other clients
+        result = self._run("--server", "--sync", capture_output=True)
         if result.returncode == 0:
             # Wait for server to be fully ready by polling --info.
             for _ in range(10):  # Try up to 10 times (1 second total)
@@ -932,6 +933,11 @@ class MocController:
             self._sync_cancel_event.set()
         if self._append_cancel_event:
             self._append_cancel_event.set()
+
+    def cancel_replace_sync_only(self) -> None:
+        """Request cooperative cancellation of an in-flight playlist replace only (not append)."""
+        if self._sync_cancel_event:
+            self._sync_cancel_event.set()
 
     # Compact orchestration API used by PlaybackController.
     def replace_playlist(
