@@ -592,6 +592,16 @@ class PlayerControls(Gtk.Box):
             GLib.source_remove(self._drag_timeout_id)
             self._drag_timeout_id = None
 
+        # Unsubscribe all event handlers to prevent stale callbacks
+        self._events.unsubscribe(EventBus.PLAYBACK_STATE_CHANGED, self._on_playback_state_changed)
+        self._events.unsubscribe(EventBus.PLAYBACK_PROGRESS, self._on_playback_progress)
+        self._events.unsubscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
+        self._events.unsubscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
+        self._events.unsubscribe(EventBus.LOOP_MODE_CHANGED, self._on_loop_mode_changed)
+        self._events.unsubscribe(EventBus.VOLUME_CHANGED, self._on_volume_changed)
+        self._events.unsubscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
+        self._events.unsubscribe(EventBus.CURRENT_INDEX_CHANGED, self._on_current_index_changed)
+
         if self.system_volume:
             self.system_volume.cleanup()
         if self.mpris2:

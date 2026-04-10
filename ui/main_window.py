@@ -402,11 +402,20 @@ class MainWindow(Gtk.ApplicationWindow):
         # Cleanup playlist view (includes timeout cleanup)
         if hasattr(self, "playlist_view"):
             self.playlist_view.cleanup()
+        # Cleanup metadata and bluetooth panels (unsubscribe events)
+        if hasattr(self, "metadata_panel"):
+            self.metadata_panel.cleanup()
+        if hasattr(self, "bt_panel"):
+            self.bt_panel.cleanup()
         # Cleanup Bluetooth resources
         if hasattr(self, "bt_sink"):
             self.bt_sink.cleanup()
         if hasattr(self, "bt_manager"):
             self.bt_manager.cleanup()
+
+        # Cleanup playlist manager (cancel debounced write timer, unsubscribe events)
+        if hasattr(self, "playlist_manager"):
+            self.playlist_manager.cleanup()
 
         # Cleanup library watcher
         if hasattr(self, "library") and hasattr(self.library, "stop_watching"):

@@ -527,7 +527,7 @@ class PlaylistManager:
                 for track_dict in playlist_data.get("tracks", [])
             ]
             current_index = playlist_data.get("current_index", -1)
-            if current_index >= len(tracks):
+            if not (0 <= current_index < len(tracks)):
                 current_index = -1
             self.set_playlist(tracks, current_index)
             return True
@@ -572,6 +572,20 @@ class PlaylistManager:
         except Exception as e:
             logger.error("Unexpected error deleting playlist: %s", e, exc_info=True)
             return False
+
+    def cleanup(self) -> None:
+        """Cancel pending debounced write and unsubscribe from events."""
+        if self._sync_timer is not None:
+            self._sync_timer.cancel()
+            self._sync_timer = None
+        if self._event_bus:
+            self._event_bus.unsubscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
+            self._event_bus.unsubscribe(EventBus.ADD_FOLDER, self._on_add_folder)
+            self._event_bus.unsubscribe(EventBus.ACTION_MOVE, self._on_action_move)
+            self._event_bus.unsubscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
+            self._event_bus.unsubscribe(EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist)
+            self._event_bus.unsubscribe(EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist)
+            self._event_bus.unsubscribe(EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks)
 
     def get_playlist(self) -> List[TrackMetadata]:
         """Get the current playlist."""
@@ -629,7 +643,7 @@ class PlaylistManager:
                 for track_dict in playlist_data.get("tracks", [])
             ]
             current_index = playlist_data.get("current_index", -1)
-            if current_index >= len(tracks):
+            if not (0 <= current_index < len(tracks)):
                 current_index = -1
             self.set_playlist(tracks, current_index)
             return True

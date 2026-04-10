@@ -1307,3 +1307,8 @@ class PlaylistView(Gtk.Box):
         if self._chunked_update_id is not None:
             GLib.source_remove(self._chunked_update_id)
             self._chunked_update_id = None
+
+        # Unsubscribe all event handlers to prevent stale callbacks
+        self._events.unsubscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
+        self._events.unsubscribe(EventBus.CURRENT_INDEX_CHANGED, self._on_current_index_changed)
+        self._events.unsubscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)

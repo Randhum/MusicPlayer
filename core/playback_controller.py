@@ -44,23 +44,6 @@ class OperationState(Enum):
 
 # MOC status update interval (milliseconds)
 MOC_STATUS_UPDATE_INTERVAL = 500
-# Audio formats routed to GStreamer instead of MOC.
-# MOC's strengths are MP3, OGG and FLAC; everything else is either unreliable or
-# completely unsupported by MOC (position/duration not reported, no decoder, etc.).
-# GStreamer covers all of these via gst-plugins-{good,bad,ugly}.
-_GSTREAMER_AUDIO_FORMATS = frozenset({
-    # PCM-based: MOC position/duration reporting broken in UI integration
-    ".wav", ".wave",
-    ".aiff", ".aif",
-    # No MOC decoder at all
-    ".ape",   # Monkey's Audio
-    ".wma",   # Windows Media Audio
-    ".alac",  # Apple Lossless (standalone container)
-    # MOC decoder exists but is hit-or-miss across installations
-    ".opus",  # Opus (requires libopus in MOC, not always present)
-    ".m4a",   # AAC or ALAC container (libfaad in MOC unreliable)
-    ".aac",   # Raw AAC
-})
 # Seconds to treat a MOC/shuffle write as "recent" (skip reload to avoid races)
 RECENT_WRITE_WINDOW = 2.0
 
@@ -164,13 +147,17 @@ class PlaybackController:
                 EventBus.BT_SINK_DEVICE_CONNECTED, self._on_bt_sink_device_connected
             )
 
+        # Poll timer source IDs (stored for cancellation on cleanup)
+        self._moc_poll_source_id: Optional[int] = None
+        self._internal_poll_source_id: Optional[int] = None
+
         # Start MOC polling if available
         if self._use_moc:
             GLib.timeout_add(1000, self._initialize_moc)  # Delay initialization
-            GLib.timeout_add(MOC_STATUS_UPDATE_INTERVAL, self._poll_moc_status)
+            self._moc_poll_source_id = GLib.timeout_add(MOC_STATUS_UPDATE_INTERVAL, self._poll_moc_status)
 
         # Start internal player polling
-        GLib.timeout_add(500, self._poll_internal_player_status)  # 500ms interval
+        self._internal_poll_source_id = GLib.timeout_add(500, self._poll_internal_player_status)  # 500ms interval
 
     def _set_playback_state(self, state: PlaybackState) -> None:
         old = self._playback_state
@@ -254,12 +241,9 @@ class PlaybackController:
         return False
 
     def _should_use_moc(self, track: Optional[TrackMetadata]) -> bool:
-        """Check if MOC should be used for this track."""
+        """Check if MOC should be attempted for this track. Video files are excluded; all audio tried via MOC first."""
         if not self._use_moc or not track or not track.file_path:
             return False
-        ext = Path(track.file_path).suffix.lower()
-        if ext in _GSTREAMER_AUDIO_FORMATS:
-            return False  # Use GStreamer: MOC lacks reliable WAV/AIFF support
         return not is_video_file(track.file_path)
 
     def _should_use_bt_sink(self) -> bool:
@@ -421,7 +405,9 @@ class PlaybackController:
             return False
         if self._should_use_moc(track):
             self._mark_backend_action("moc")
-            return self._play_with_moc(track)
+            if self._play_with_moc(track):
+                return True
+            logger.warning("MOC failed to play %s; falling back to internal player", track.file_path)
         self._mark_backend_action("internal")
         return self._play_with_internal(track)
 
@@ -977,8 +963,10 @@ class PlaybackController:
                     self._moc_sync_cancelled_by_user = False
                     self._playlist_changed_during_sync = False
                     return
-                logger.error("MOC sync failed; leaving playlist state unchanged")
-                self._playlist_changed_during_sync = False
+                logger.error("MOC sync failed; will retry if playlist changed during sync")
+                if self._playlist_changed_during_sync:
+                    self._playlist_changed_during_sync = False
+                    GLib.idle_add(self._sync_moc_playlist)
                 return
 
             # Update mtime
@@ -1319,5 +1307,42 @@ class PlaybackController:
             self._events.publish(EventBus.PLAYBACK_STATE_CHANGED, {"state": "stopped"})
 
     def cleanup(self) -> None:
+        # Stop poll timers
+        if self._moc_poll_source_id is not None:
+            try:
+                GLib.source_remove(self._moc_poll_source_id)
+            except Exception:
+                pass
+            self._moc_poll_source_id = None
+        if self._internal_poll_source_id is not None:
+            try:
+                GLib.source_remove(self._internal_poll_source_id)
+            except Exception:
+                pass
+            self._internal_poll_source_id = None
+
+        # Cancel any pending MOC sync
+        self._cancel_scheduled_moc_sync()
+
+        # Unsubscribe all event handlers
+        self._events.unsubscribe(EventBus.ACTION_PLAY, self._on_action_play)
+        self._events.unsubscribe(EventBus.ACTION_PAUSE, self._on_action_pause)
+        self._events.unsubscribe(EventBus.ACTION_STOP, self._on_action_stop)
+        self._events.unsubscribe(EventBus.ACTION_NEXT, self._on_action_next)
+        self._events.unsubscribe(EventBus.ACTION_PREV, self._on_action_previous)
+        self._events.unsubscribe(EventBus.ACTION_SEEK, self._on_action_seek)
+        self._events.unsubscribe(EventBus.ACTION_PLAY_TRACK, self._on_action_play_track)
+        self._events.unsubscribe(EventBus.ACTION_PLAY_TRACKS, self._on_action_play_tracks)
+        self._events.unsubscribe(EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks)
+        self._events.unsubscribe(EventBus.ACTION_SET_SHUFFLE, self._on_action_set_shuffle)
+        self._events.unsubscribe(EventBus.ACTION_SET_LOOP_MODE, self._on_action_set_loop_mode)
+        self._events.unsubscribe(EventBus.ACTION_SET_VOLUME, self._on_action_set_volume)
+        self._events.unsubscribe(EventBus.ACTION_REFRESH_MOC, self._on_action_refresh_moc)
+        self._events.unsubscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
+        if self._bt_sink:
+            self._events.unsubscribe(EventBus.BT_SINK_ENABLED, self._on_bt_sink_enabled)
+            self._events.unsubscribe(EventBus.BT_SINK_DISABLED, self._on_bt_sink_disabled)
+            self._events.unsubscribe(EventBus.BT_SINK_DEVICE_CONNECTED, self._on_bt_sink_device_connected)
+
         if self._use_moc:
             self._moc_controller.shutdown()

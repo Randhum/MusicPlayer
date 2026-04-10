@@ -211,6 +211,16 @@ class BluetoothPanel(Gtk.Box):
                 self.sink_status.set_text(f"Receiving audio from: {device.name}")
             self._update_status()
 
+    def cleanup(self) -> None:
+        """Unsubscribe from events to prevent stale callbacks."""
+        if self._event_bus:
+            self._event_bus.unsubscribe(EventBus.BT_DEVICE_CONNECTED, self._on_bt_device_connected)
+            self._event_bus.unsubscribe(EventBus.BT_DEVICE_DISCONNECTED, self._on_bt_device_disconnected)
+            self._event_bus.unsubscribe(EventBus.BT_DEVICE_ADDED, self._on_bt_device_added)
+            self._event_bus.unsubscribe(EventBus.BT_SINK_ENABLED, self._on_bt_sink_enabled)
+            self._event_bus.unsubscribe(EventBus.BT_SINK_DISABLED, self._on_bt_sink_disabled)
+            self._event_bus.unsubscribe(EventBus.BT_SINK_DEVICE_CONNECTED, self._on_bt_sink_device_connected)
+
     def _set_inactive_state(self):
         """Put the Bluetooth UI into an inactive state until speaker mode is enabled."""
         self.device_store.clear()

@@ -210,6 +210,11 @@ class MetadataPanel(Gtk.Box):
             self._load_album_art(self._pending_art_path)
             self._pending_art_path = None
 
+    def cleanup(self) -> None:
+        """Unsubscribe from events to prevent stale callbacks."""
+        if self._event_bus:
+            self._event_bus.unsubscribe(EventBus.TRACK_CHANGED, self._on_track_changed)
+
     def _clear(self) -> None:
         """Clear all displayed information and reset state."""
         self.art_image.set_filename(None)
