@@ -17,6 +17,7 @@ from core.events import EventBus
 from core.logging import get_logger
 from core.metadata import TrackMetadata
 from core.music_library import AUDIO_EXTENSIONS
+from ui.context_menu_touch import pick_widget_under_pointer, popover_should_dismiss
 
 logger = get_logger(__name__)
 
@@ -56,7 +57,7 @@ class LibraryBrowser(Gtk.Box):
         self.set_vexpand(True)  # Expand to fill available vertical space
         self._events = event_bus
         self._window = window
-        self._menu_outside_gesture: Optional[Gtk.GestureClick] = None
+        self._menu_outside_legacy: Optional[Gtk.EventControllerLegacy] = None
         if window is not None:
             self._install_context_menu_outside_close(window)
 
@@ -422,25 +423,25 @@ class LibraryBrowser(Gtk.Box):
         return (parent_path / name) if parent_path else None
 
     def _install_context_menu_outside_close(self, window: Gtk.Window) -> None:
-        """Close context menu on primary touch/mouse press outside the popover (CAPTURE + pick)."""
-        g = Gtk.GestureClick()
-        g.set_button(0)
-        g.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        g.connect("pressed", self._on_toplevel_press_while_context_menu)
-        window.add_controller(g)
-        self._menu_outside_gesture = g
+        """Close context menu on press/touch outside the popover (CAPTURE + GdkEvent + pick)."""
+        leg = Gtk.EventControllerLegacy()
+        leg.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        leg.connect("event", self._on_toplevel_event_while_context_menu)
+        window.add_controller(leg)
+        self._menu_outside_legacy = leg
 
-    def _on_toplevel_press_while_context_menu(self, gesture, n_press, x, y) -> None:
+    def _on_toplevel_event_while_context_menu(
+        self, controller: Gtk.EventControllerLegacy, event: Gdk.Event
+    ) -> bool:
         if not self._menu_showing or self.context_menu is None:
-            return
-        win = gesture.get_widget()
-        picked = win.pick(x, y, Gtk.PickFlags.DEFAULT)
-        if picked is None:
+            return False
+        win = self._window
+        if win is None:
+            return False
+        picked, ok = pick_widget_under_pointer(win, event, 0.0, 0.0)
+        if ok and popover_should_dismiss(picked, self.context_menu):
             self._close_menu()
-            return
-        if picked == self.context_menu or picked.is_ancestor(self.context_menu):
-            return
-        self._close_menu()
+        return False
 
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
