@@ -312,7 +312,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _create_library_browser(self):
         """Create and configure the library browser."""
-        self.library_browser = LibraryBrowser(event_bus=self.event_bus)
+        self.library_browser = LibraryBrowser(event_bus=self.event_bus, window=self)
 
     def _create_playlist_view(self):
         """Create and configure the playlist view."""

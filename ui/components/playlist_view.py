@@ -43,6 +43,9 @@ class PlaylistView(Gtk.Box):
         self._events = event_bus
         self.playlist_manager = playlist_manager
         self.window = window
+        self._menu_outside_gesture: Optional[Gtk.GestureClick] = None
+        if window is not None:
+            self._install_context_menu_outside_close(window)
         self._shuffle_enabled: bool = False
         self._use_moc: bool = False
         self._bulk_update_in_progress: bool = (
@@ -701,6 +704,27 @@ class PlaylistView(Gtk.Box):
             if not self._playback_lock:
                 self.play_track_at_index(index)
 
+    def _install_context_menu_outside_close(self, window: Gtk.Window) -> None:
+        """Close context menu on primary touch/mouse press outside the popover (CAPTURE + pick)."""
+        g = Gtk.GestureClick()
+        g.set_button(0)
+        g.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        g.connect("pressed", self._on_toplevel_press_while_context_menu)
+        window.add_controller(g)
+        self._menu_outside_gesture = g
+
+    def _on_toplevel_press_while_context_menu(self, gesture, n_press, x, y) -> None:
+        if not self._menu_showing or self.context_menu is None:
+            return
+        win = gesture.get_widget()
+        picked = win.pick(x, y, Gtk.PickFlags.DEFAULT)
+        if picked is None:
+            self._close_menu()
+            return
+        if picked == self.context_menu or picked.is_ancestor(self.context_menu):
+            return
+        self._close_menu()
+
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
         # Only show menu if not already showing
@@ -1022,6 +1046,7 @@ class PlaylistView(Gtk.Box):
         x = getattr(self, "_context_menu_x", 0)
         y = getattr(self, "_context_menu_y", 0)
         self.context_menu = Gtk.Popover()
+        self.context_menu.set_autohide(True)
         self.context_menu.set_has_arrow(True)
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         menu_box.set_margin_start(10)
@@ -1298,6 +1323,13 @@ class PlaylistView(Gtk.Box):
 
     def cleanup(self) -> None:
         """Clean up resources when component is destroyed."""
+        if self._menu_outside_gesture is not None and self.window is not None:
+            try:
+                self.window.remove_controller(self._menu_outside_gesture)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+            self._menu_outside_gesture = None
+
         # Stop blinking highlight if active
         if self._blink_timeout_id is not None:
             GLib.source_remove(self._blink_timeout_id)

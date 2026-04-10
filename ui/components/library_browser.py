@@ -42,17 +42,23 @@ class LibraryBrowser(Gtk.Box):
     def __init__(
         self,
         event_bus: Optional[EventBus] = None,
+        window: Optional[Gtk.Window] = None,
     ):
         """
         Initialize library browser.
 
         Args:
             event_bus: EventBus instance for publishing playback/playlist actions
+            window: Main window; used to dismiss the context popover on outside taps (touch)
         """
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         self.set_size_request(300, -1)
         self.set_vexpand(True)  # Expand to fill available vertical space
         self._events = event_bus
+        self._window = window
+        self._menu_outside_gesture: Optional[Gtk.GestureClick] = None
+        if window is not None:
+            self._install_context_menu_outside_close(window)
 
         # Header
         header = Gtk.Label(label="Library")
@@ -415,6 +421,27 @@ class LibraryBrowser(Gtk.Box):
         parent_path = self._get_folder_path_from_iter(parent)
         return (parent_path / name) if parent_path else None
 
+    def _install_context_menu_outside_close(self, window: Gtk.Window) -> None:
+        """Close context menu on primary touch/mouse press outside the popover (CAPTURE + pick)."""
+        g = Gtk.GestureClick()
+        g.set_button(0)
+        g.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        g.connect("pressed", self._on_toplevel_press_while_context_menu)
+        window.add_controller(g)
+        self._menu_outside_gesture = g
+
+    def _on_toplevel_press_while_context_menu(self, gesture, n_press, x, y) -> None:
+        if not self._menu_showing or self.context_menu is None:
+            return
+        win = gesture.get_widget()
+        picked = win.pick(x, y, Gtk.PickFlags.DEFAULT)
+        if picked is None:
+            self._close_menu()
+            return
+        if picked == self.context_menu or picked.is_ancestor(self.context_menu):
+            return
+        self._close_menu()
+
     def _on_right_click(self, gesture, n_press, x, y):
         """Handle right-click to show context menu."""
         # Only show menu if not already showing
@@ -486,6 +513,7 @@ class LibraryBrowser(Gtk.Box):
 
         # Create popover
         self.context_menu = Gtk.Popover()
+        self.context_menu.set_autohide(True)
         # Set child first, then parent
         self.context_menu.set_has_arrow(True)
 
