@@ -1123,7 +1123,8 @@ UI action -> ACTION_* event -> Controller/Manager -> state change -> *_CHANGED e
 #### Playlist Event Contract
 
 - `PLAYLIST_CHANGED`: content mutations only (add, remove, move, replace, clear). No playback intent.
-  - Includes `sync_mode` (`replace` or `append`) so MOC sync can avoid destructive clears on queue additions.
+  - Includes `sync_mode` (`replace` or `append`) so MOC sync can select the right backend operation.
+- If MOC is available, MOC playlist/order/index is authoritative; `PlaylistManager` mirrors that state for UI rendering.
 - `CURRENT_INDEX_CHANGED`: active index changed.
 - `TRACK_CHANGED`: active track object changed.
 - Content mutation order: `PLAYLIST_CHANGED -> CURRENT_INDEX_CHANGED -> TRACK_CHANGED`.
@@ -1132,8 +1133,10 @@ UI action -> ACTION_* event -> Controller/Manager -> state change -> *_CHANGED e
 #### Playback Intent
 
 Playback intent is separate from playlist content changes:
-- UI publishes `ACTION_REPLACE_PLAYLIST` (content) then `ACTION_PLAY` (intent) as two events.
-- `PlaybackController` queues `ACTION_PLAY` if MOC sync is in progress and executes it after sync completes.
+- UI publishes explicit high-level intents:
+  - `ACTION_PLAY_TRACKS`: replace playlist and play selected index.
+  - `ACTION_QUEUE_TRACKS`: append tracks to queue.
+- `PlaybackController` is the single orchestration point for these intents and backend routing.
 
 #### Engineering Guidelines
 
@@ -1153,14 +1156,18 @@ MOC is integrated through a thin command wrapper (`mocp`) focused on reliability
 - `play_file()` uses `mocp --playit <file>` as the primary track-selection path.
 - Status is read through `--info` with short caching to reduce command overhead.
 - `ensure_server()` uses a single validation path: probe `--info`, then start the server only when needed.
-- Replace sync runs in a background thread (`sync_playlist_async`) with paced per-track appends.
-- `sync_playlist_async` validates `mocp --clear` and every per-track `mocp --append`; on first failure it clears again and reports sync failure.
-- Append-only sync (`append_playlist_async`) appends new queue tracks without `--clear`, so current playback is preserved.
+- Replace sync runs in a background thread (`replace_playlist` -> `sync_playlist_async`) with paced per-track appends.
+- Append-only sync (`append_tracks` -> `append_playlist_async`) appends new queue tracks without `--clear`, so current playback is preserved.
+- Append events received during an active sync are queued and appended afterwards; they are not upgraded to destructive full resyncs.
+- Track-switching user actions (`play`, `play-track`, `next`, `previous`, `stop`) cooperatively cancel queued or running MOC sync workers before applying the new intent; transient controls (`pause`, `seek`) do not cancel sync.
+- External MOC playlist file changes are mirrored back into app state in MOC mode.
 - If MOC is unreachable at sync start, the sync worker performs one controlled server restart (`mocp --exit` then `--server`) and retries connectivity before failing.
 - Autonext in MOC is disabled by default; track progression is controlled by `PlaybackController`.
 - MOC backend ownership and playlist index are only updated after `play_file()` succeeds, so failed starts do not leave stale controller state behind.
-- `ACTION_PLAY` during MOC sync can start immediately, and the latest sync-time play intent is replayed after sync to reassert the intended track if sync clobbered runtime state (single reassert path in `PlaybackController`).
+- `ACTION_PLAY` is treated as transport intent for the current selection/session; replace-and-play workflows use `ACTION_PLAY_TRACKS`.
 - Track-finished detection for MOC auto-next uses a simple near-end position threshold (`position >= duration - 1.0`) with per-file de-duplication, keeping behavior deterministic while avoiding repeated next triggers.
+- Duration labels are refreshed immediately after MOC play-start via a short retry loop, so UI duration stays responsive even while normal MOC polling is paused during sync.
+- Missing `playlist.m3u` no longer clears the app playlist view automatically; transient file absence is treated as non-destructive.
 
 **MOC Commands Used (verified against `mocp --help`):**
 - `--server` - Start server

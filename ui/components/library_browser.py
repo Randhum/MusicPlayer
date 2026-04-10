@@ -277,7 +277,7 @@ class LibraryBrowser(Gtk.Box):
     def _on_row_activated(self, tree_view, path, column):
         """Handle row activation (double-click).
 
-        Uses EventBus to publish ACTION_REPLACE_PLAYLIST events.
+        Uses EventBus to publish explicit play/queue intents.
         Falls back to GTK signals if no EventBus (e.g., standalone tests).
         """
         # Cancel any pending single-click expand/collapse
@@ -330,10 +330,9 @@ class LibraryBrowser(Gtk.Box):
         """Replace playlist with single track and play it using events."""
         if self._events:
             self._events.publish(
-                EventBus.ACTION_REPLACE_PLAYLIST,
+                EventBus.ACTION_PLAY_TRACKS,
                 {"tracks": [track], "current_index": 0},
             )
-            self._events.publish(EventBus.ACTION_PLAY, None)
         else:
             # Fallback to signal if no EventBus
             self.emit("track-selected", track)
@@ -344,10 +343,9 @@ class LibraryBrowser(Gtk.Box):
             return
         if self._events:
             self._events.publish(
-                EventBus.ACTION_REPLACE_PLAYLIST,
+                EventBus.ACTION_PLAY_TRACKS,
                 {"tracks": tracks, "current_index": 0},
             )
-            self._events.publish(EventBus.ACTION_PLAY, None)
         else:
             # Fallback to signal if no EventBus
             self.emit("album-selected", tracks)
@@ -380,14 +378,14 @@ class LibraryBrowser(Gtk.Box):
     def _add_track(self, track: TrackMetadata) -> None:
         """Add a single track to playlist using events."""
         if self._events:
-            self._events.publish(EventBus.ADD_FOLDER, {"tracks": [track]})
+            self._events.publish(EventBus.ACTION_QUEUE_TRACKS, {"tracks": [track]})
 
     def _add_tracks(self, tracks: List[TrackMetadata]) -> None:
         """Add multiple tracks to playlist using events."""
         if not tracks:
             return
         if self._events:
-            self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
+            self._events.publish(EventBus.ACTION_QUEUE_TRACKS, {"tracks": tracks})
 
     def _add_folder(self, folder_path: str) -> None:
         """Add folder contents to playlist using events."""
@@ -395,7 +393,7 @@ class LibraryBrowser(Gtk.Box):
         if not folder.exists() or not folder.is_dir():
             return
 
-        # Collect tracks and use ADD_FOLDER (PlaybackController handles MOC sync)
+        # Collect tracks and publish explicit queue intent.
         if self._events:
             # Collect tracks from disk
             tracks = []
@@ -404,7 +402,7 @@ class LibraryBrowser(Gtk.Box):
                     tracks.append(TrackMetadata(str(path)))
             tracks.sort(key=_track_order_key)
             if tracks:
-                self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
+                self._events.publish(EventBus.ACTION_QUEUE_TRACKS, {"tracks": tracks})
 
     def _get_folder_path_from_iter(self, folder_iter) -> Optional[Path]:
         """Build full folder path from tree row by walking up to root. Returns None if no music root."""

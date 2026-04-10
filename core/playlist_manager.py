@@ -62,6 +62,9 @@ class PlaylistManager:
             self._event_bus.subscribe(
                 EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist
             )
+            self._event_bus.subscribe(
+                EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks
+            )
 
     def set_moc_playlist_provider(
         self,
@@ -198,6 +201,22 @@ class PlaylistManager:
                 track_list.append(TrackMetadata.from_dict(t))
         current_index = data.get("current_index", 0) if track_list else -1
         self.set_playlist(track_list, current_index)
+
+    def _on_action_queue_tracks(self, data: Optional[dict]) -> None:
+        """Subscriber: ACTION_QUEUE_TRACKS with data['tracks'] -> add_tracks."""
+        if not data or "tracks" not in data:
+            return
+        tracks = data.get("tracks", [])
+        if not isinstance(tracks, list) or not tracks:
+            return
+        track_list: List[TrackMetadata] = []
+        for t in tracks:
+            if isinstance(t, TrackMetadata):
+                track_list.append(t)
+            elif isinstance(t, dict):
+                track_list.append(TrackMetadata.from_dict(t))
+        if track_list:
+            self.add_tracks(track_list)
 
     def set_playlist(
         self,

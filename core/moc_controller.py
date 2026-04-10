@@ -41,6 +41,8 @@ class MocController:
         # Debug counters
         self._cache_hits: int = 0
         self._cache_misses: int = 0
+        self._sync_cancel_event: Optional[threading.Event] = None
+        self._append_cancel_event: Optional[threading.Event] = None
 
     def is_available(self) -> bool:
         return self._mocp_path is not None
@@ -770,7 +772,7 @@ class MocController:
         self,
         tracks: List[TrackMetadata],
         current_index: int = -1,
-        on_done: Optional[Callable[[bool], None]] = None,
+        on_done: Optional[Callable[[bool, bool], None]] = None,
     ) -> None:
         """Replace MOC's playlist in a background thread so the UI stays responsive.
 
@@ -780,7 +782,7 @@ class MocController:
         """
         if not self.is_available():
             if on_done:
-                GLib.idle_add(on_done, False)
+                GLib.idle_add(on_done, False, False)
             return
 
         valid_paths: List[str] = []
@@ -793,9 +795,16 @@ class MocController:
                 continue
             valid_paths.append(str(file_path.resolve()))
 
+        cancel_event = threading.Event()
+        self._sync_cancel_event = cancel_event
+
         def _worker():
             success = False
+            cancelled = False
             try:
+                if cancel_event.is_set():
+                    cancelled = True
+                    return
                 if not self.ensure_server():
                     logger.warning(
                         "MOC sync thread: initial connect failed, trying restart"
@@ -804,6 +813,9 @@ class MocController:
                         logger.error("MOC sync thread failed: could not connect to server")
                         return
 
+                if cancel_event.is_set():
+                    cancelled = True
+                    return
                 clear_result = self._run("--clear", capture_output=True)
                 if clear_result.returncode != 0:
                     logger.error("MOC sync thread failed: clear playlist command failed")
@@ -812,6 +824,10 @@ class MocController:
                 else:
                     success = True
                     for idx, abs_path in enumerate(valid_paths):
+                        if cancel_event.is_set():
+                            cancelled = True
+                            success = False
+                            break
                         append_result = self._run(
                             "--append", abs_path, capture_output=True
                         )
@@ -836,20 +852,22 @@ class MocController:
             except Exception as e:
                 logger.error("MOC sync thread failed: %s", e)
             finally:
+                if self._sync_cancel_event is cancel_event:
+                    self._sync_cancel_event = None
                 if on_done:
-                    GLib.idle_add(on_done, success)
+                    GLib.idle_add(on_done, success, cancelled)
 
         threading.Thread(target=_worker, name="moc-sync", daemon=True).start()
 
     def append_playlist_async(
         self,
         tracks: List[TrackMetadata],
-        on_done: Optional[Callable[[bool], None]] = None,
+        on_done: Optional[Callable[[bool, bool], None]] = None,
     ) -> None:
         """Append tracks in background without clearing MOC playlist."""
         if not self.is_available():
             if on_done:
-                GLib.idle_add(on_done, False)
+                GLib.idle_add(on_done, False, False)
             return
 
         valid_paths: List[str] = []
@@ -862,9 +880,16 @@ class MocController:
                 continue
             valid_paths.append(str(file_path.resolve()))
 
+        cancel_event = threading.Event()
+        self._append_cancel_event = cancel_event
+
         def _worker():
             success = False
+            cancelled = False
             try:
+                if cancel_event.is_set():
+                    cancelled = True
+                    return
                 if not self.ensure_server():
                     logger.warning(
                         "MOC append thread: initial connect failed, trying restart"
@@ -875,6 +900,10 @@ class MocController:
 
                 success = True
                 for idx, abs_path in enumerate(valid_paths):
+                    if cancel_event.is_set():
+                        cancelled = True
+                        success = False
+                        break
                     append_result = self._run("--append", abs_path, capture_output=True)
                     if append_result.returncode != 0:
                         success = False
@@ -890,10 +919,38 @@ class MocController:
             except Exception as e:
                 logger.error("MOC append thread failed: %s", e)
             finally:
+                if self._append_cancel_event is cancel_event:
+                    self._append_cancel_event = None
                 if on_done:
-                    GLib.idle_add(on_done, success)
+                    GLib.idle_add(on_done, success, cancelled)
 
         threading.Thread(target=_worker, name="moc-append", daemon=True).start()
+
+    def cancel_background_sync(self) -> None:
+        """Request cooperative cancellation of active sync/append workers."""
+        if self._sync_cancel_event:
+            self._sync_cancel_event.set()
+        if self._append_cancel_event:
+            self._append_cancel_event.set()
+
+    # Compact orchestration API used by PlaybackController.
+    def replace_playlist(
+        self,
+        tracks: List[TrackMetadata],
+        current_index: int = -1,
+        on_done: Optional[Callable[[bool, bool], None]] = None,
+    ) -> None:
+        self.sync_playlist_async(tracks, current_index=current_index, on_done=on_done)
+
+    def append_tracks(
+        self,
+        tracks: List[TrackMetadata],
+        on_done: Optional[Callable[[bool, bool], None]] = None,
+    ) -> None:
+        self.append_playlist_async(tracks, on_done=on_done)
+
+    def cancel_sync(self) -> None:
+        self.cancel_background_sync()
 
     def play_file(self, file_path: str) -> bool:
         """

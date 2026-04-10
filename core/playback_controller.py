@@ -107,9 +107,13 @@ class PlaybackController:
         self._recent_repeat_write: Optional[float] = None
         self._loading_from_moc: bool = False
         # MOC sync state
-        self._syncing_to_moc: bool = False
+        self._moc_replace_sync_active: bool = False
+        self._moc_append_sync_active: bool = False
         self._moc_sync_scheduled: bool = False  # Prevents queueing multiple syncs
+        self._moc_sync_source_id: Optional[int] = None
+        self._moc_sync_cancelled_by_user: bool = False
         self._playlist_changed_during_sync: bool = False  # Re-sync needed after current sync
+        self._pending_append_tracks: list[TrackMetadata] = []
         self._pending_play_intent: Optional[Dict[str, Any]] = None
         self._moc_finish_observed_for: Optional[str] = None
         self._user_action_time: float = 0.0
@@ -137,6 +141,8 @@ class PlaybackController:
         self._events.subscribe(EventBus.ACTION_PREV, self._on_action_previous)
         self._events.subscribe(EventBus.ACTION_SEEK, self._on_action_seek)
         self._events.subscribe(EventBus.ACTION_PLAY_TRACK, self._on_action_play_track)
+        self._events.subscribe(EventBus.ACTION_PLAY_TRACKS, self._on_action_play_tracks)
+        self._events.subscribe(EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks)
         self._events.subscribe(EventBus.ACTION_SET_SHUFFLE, self._on_action_set_shuffle)
         self._events.subscribe(
             EventBus.ACTION_SET_LOOP_MODE, self._on_action_set_loop_mode
@@ -298,6 +304,9 @@ class PlaybackController:
             "timestamp": time.time(),
         }
 
+    def _is_moc_sync_active(self) -> bool:
+        return self._moc_replace_sync_active or self._moc_append_sync_active
+
     def _resolve_track_for_play(self) -> Optional[TrackMetadata]:
         """Get current track; fallback to index 0 when playlist is non-empty."""
         track = self._playlist.get_current_track()
@@ -418,28 +427,10 @@ class PlaybackController:
 
     def _on_action_play(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle play action: resume if same track paused, else load and play current track."""
+        self._cancel_moc_sync_for_user_action()
         if self._should_use_bt_sink():
             if self._bt_sink:
                 self._bt_sink.control_playback("play")
-            return
-
-        # During MOC sync: start playback immediately using shared backend paths.
-        if self._use_moc and (self._syncing_to_moc or self._moc_sync_scheduled):
-            track = self._resolve_track_for_play()
-            if track and track.file_path:
-                if self._should_use_moc(track):
-                    self._mark_backend_action("moc")
-                    self._set_pending_play_intent(
-                        self._playlist.get_current_index(), "moc"
-                    )
-                    if self._play_with_moc(track):
-                        return
-                else:
-                    self._mark_backend_action("internal")
-                    self._set_pending_play_intent(
-                        self._playlist.get_current_index(), "internal"
-                    )
-                    self._play_with_internal(track)
             return
 
         track = self._playlist.get_current_track()
@@ -506,6 +497,7 @@ class PlaybackController:
 
     def _on_action_stop(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle stop action."""
+        self._cancel_moc_sync_for_user_action()
         if self._should_use_bt_sink():
             if self._bt_sink:
                 self._bt_sink.control_playback("stop")
@@ -531,6 +523,7 @@ class PlaybackController:
         self._playlist.set_current_index(-1)
 
     def _on_action_next(self, data: Optional[Dict[str, Any]]) -> None:
+        self._cancel_moc_sync_for_user_action()
         if self._bt_sink and self._should_use_bt_sink():
             self._bt_sink.control_playback("next")
             return
@@ -539,6 +532,7 @@ class PlaybackController:
             self._play_track_at_index(next_index)
 
     def _on_action_previous(self, data: Optional[Dict[str, Any]]) -> None:
+        self._cancel_moc_sync_for_user_action()
         if self._bt_sink and self._should_use_bt_sink():
             self._bt_sink.control_playback("prev")
             return
@@ -584,10 +578,57 @@ class PlaybackController:
         """
         if not data or "index" not in data:
             return
+        self._cancel_moc_sync_for_user_action()
         index = data.get("index", -1)
         if index < 0:
             return
         self._play_track_at_index(index)
+
+    def _on_action_play_tracks(self, data: Optional[Dict[str, Any]]) -> None:
+        """Canonical intent: replace playlist with tracks and play selected index."""
+        if not data:
+            return
+        tracks_raw = data.get("tracks", [])
+        if not isinstance(tracks_raw, list) or not tracks_raw:
+            return
+        tracks: list[TrackMetadata] = []
+        for t in tracks_raw:
+            if isinstance(t, TrackMetadata):
+                tracks.append(t)
+            elif isinstance(t, dict):
+                tracks.append(TrackMetadata.from_dict(t))
+        if not tracks:
+            return
+
+        current_index = data.get("current_index", 0)
+        if not isinstance(current_index, int):
+            current_index = 0
+        current_index = max(0, min(current_index, len(tracks) - 1))
+
+        self._cancel_moc_sync_for_user_action()
+        self._playlist.set_playlist(tracks, current_index)
+        if self._use_moc:
+            selected = tracks[current_index]
+            backend = "moc" if self._should_use_moc(selected) else "internal"
+            self._set_pending_play_intent(current_index, backend)
+        # Explicit play intent handled by one canonical path.
+        self._play_track_at_index(current_index)
+
+    def _on_action_queue_tracks(self, data: Optional[Dict[str, Any]]) -> None:
+        """Canonical intent: append tracks to playlist queue."""
+        if not data:
+            return
+        tracks_raw = data.get("tracks", [])
+        if not isinstance(tracks_raw, list) or not tracks_raw:
+            return
+        tracks: list[TrackMetadata] = []
+        for t in tracks_raw:
+            if isinstance(t, TrackMetadata):
+                tracks.append(t)
+            elif isinstance(t, dict):
+                tracks.append(TrackMetadata.from_dict(t))
+        if tracks:
+            self._playlist.add_tracks(tracks)
 
     # Note: _on_playback_stop_requested() removed - ACTION_STOP now handles all stop requests
     # (with optional reason field for system-initiated stops)
@@ -609,18 +650,14 @@ class PlaybackController:
             return
 
         logger.debug(
-            "PLAYLIST_CHANGED: use_moc=%s, syncing=%s, scheduled=%s",
+            "PLAYLIST_CHANGED: use_moc=%s, replace_sync=%s, append_sync=%s, scheduled=%s",
             self._use_moc,
-            self._syncing_to_moc,
+            self._moc_replace_sync_active,
+            self._moc_append_sync_active,
             self._moc_sync_scheduled,
         )
 
         if self._use_moc:
-            if self._syncing_to_moc or self._moc_sync_scheduled:
-                # Sync in progress or already scheduled - mark for re-sync
-                self._playlist_changed_during_sync = True
-                return
-
             if sync_mode == "append":
                 appended_raw = data.get("appended_tracks", [])
                 appended_tracks = []
@@ -630,25 +667,63 @@ class PlaybackController:
                     elif isinstance(track, dict):
                         appended_tracks.append(TrackMetadata.from_dict(track))
 
-                if appended_tracks:
-                    self._append_moc_tracks(appended_tracks)
+                if not appended_tracks:
                     return
+
+                # Never convert append operations into destructive full resyncs.
+                if self._is_moc_sync_active() or self._moc_sync_scheduled:
+                    self._pending_append_tracks.extend(appended_tracks)
+                    return
+
+                self._append_moc_tracks(appended_tracks)
+                return
+
+            if self._is_moc_sync_active() or self._moc_sync_scheduled:
+                # Sync in progress or already scheduled - mark for re-sync
+                self._playlist_changed_during_sync = True
+                return
 
             # Default: full replace sync (single-flight: only one pending at a time)
             self._moc_sync_scheduled = True
-            GLib.idle_add(self._sync_moc_playlist)
+            self._moc_sync_source_id = GLib.idle_add(self._sync_moc_playlist)
+
+    def _cancel_scheduled_moc_sync(self) -> None:
+        """Cancel queued full replace sync if it has not started yet."""
+        if self._moc_sync_source_id:
+            try:
+                GLib.source_remove(self._moc_sync_source_id)
+            except Exception:
+                pass
+        self._moc_sync_source_id = None
+        self._moc_sync_scheduled = False
+
+    def _cancel_moc_sync_for_user_action(self) -> None:
+        """Cancel queued/running MOC syncs when user explicitly acts."""
+        if not self._use_moc:
+            return
+        cancelled = False
+        if self._moc_sync_scheduled and self._moc_sync_source_id:
+            self._cancel_scheduled_moc_sync()
+            cancelled = True
+        if self._is_moc_sync_active():
+            self._moc_controller.cancel_sync()
+            cancelled = True
+        if cancelled:
+            self._moc_sync_cancelled_by_user = True
+            self._playlist_changed_during_sync = False
 
     def _append_moc_tracks(self, tracks: list[TrackMetadata]) -> None:
         """Append-only sync for queue additions; keeps current playback running."""
         if not self._use_moc or not tracks:
             return
 
-        self._syncing_to_moc = True
+        self._moc_append_sync_active = True
         self._recent_moc_write = time.time()
 
-        def on_done(success: bool):
-            self._syncing_to_moc = False
+        def on_done(success: bool, cancelled: bool):
+            self._moc_append_sync_active = False
             if success:
+                self._moc_sync_cancelled_by_user = False
                 self._recent_moc_write = time.time()
                 try:
                     config = get_config()
@@ -656,14 +731,22 @@ class PlaybackController:
                         self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
                 except OSError:
                     pass
+                if self._pending_append_tracks:
+                    queued_tracks = self._pending_append_tracks
+                    self._pending_append_tracks = []
+                    self._append_moc_tracks(queued_tracks)
                 return
 
-            logger.error("MOC append-only sync failed; scheduling full playlist re-sync")
-            if not self._moc_sync_scheduled:
-                self._moc_sync_scheduled = True
-                GLib.idle_add(self._sync_moc_playlist)
+            if cancelled or self._moc_sync_cancelled_by_user:
+                self._moc_sync_cancelled_by_user = False
+                if self._pending_append_tracks and not self._is_moc_sync_active():
+                    queued_tracks = self._pending_append_tracks
+                    self._pending_append_tracks = []
+                    self._append_moc_tracks(queued_tracks)
+                return
+            logger.error("MOC append-only sync failed; keeping playback untouched")
 
-        self._moc_controller.append_playlist_async(tracks, on_done=on_done)
+        self._moc_controller.append_tracks(tracks, on_done=on_done)
 
     def _on_action_set_shuffle(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle set shuffle action."""
@@ -706,18 +789,15 @@ class PlaybackController:
             self._system_volume.set_volume(volume)
 
     def _on_action_refresh_moc(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle refresh from MOC: sync MOC to disk, then reload playlist into app state (events drive UI)."""
+        """Handle refresh action: force sync internal playlist state to MOC."""
         if not self._use_moc:
             return
-        self._moc_controller.sync_playlist()
-        GLib.timeout_add(100, self._refresh_moc_callback)
-
-    def _refresh_moc_callback(self) -> bool:
-        """Reload playlist from MOC after sync_playlist (used by refresh button)."""
-        status = self._moc_controller.get_status(force_refresh=True)
-        current_file = status.get("file_path") if status else None
-        self._reload_playlist_from_moc(current_file=current_file)
-        return False
+        if self._moc_replace_sync_active:
+            self._playlist_changed_during_sync = True
+            return
+        if not self._moc_sync_scheduled:
+            self._moc_sync_scheduled = True
+            self._moc_sync_source_id = GLib.idle_add(self._sync_moc_playlist)
 
     # Note: _on_action_append_folder() removed - MOC sync handled via PLAYLIST_CHANGED
 
@@ -757,6 +837,8 @@ class PlaybackController:
         # Reset progress immediately so UI doesn't show stale values
         self._update_progress(0.0, track.duration if track.duration else 0.0)
         self._set_playback_state(PlaybackState.PLAYING)
+        # While MOC sync is active, regular polling is paused; refresh duration label explicitly.
+        GLib.timeout_add(120, self._refresh_moc_progress_after_start, 6)
         return True
 
     def _play_with_internal(self, track: TrackMetadata) -> bool:
@@ -838,20 +920,35 @@ class PlaybackController:
         self._set_position(desired)
         return False
 
+    def _refresh_moc_progress_after_start(self, attempts_left: int) -> bool:
+        """Refresh progress/duration shortly after MOC playback start."""
+        if self._active_backend != "moc":
+            return False
+        status = self._moc_controller.get_status(force_refresh=True)
+        if status:
+            position = float(status.get("position", 0.0))
+            duration = float(status.get("duration", 0.0))
+            logger.debug("MOC duration refresh after start: pos=%.2f dur=%.2f", position, duration)
+            self._update_progress(position, duration if duration > 0 else self._duration)
+            if duration > 0:
+                return False
+        return attempts_left > 1
+
     def _sync_moc_playlist(self) -> bool:
         """Sync current playlist to MOC.
 
-        Playback intent is handled separately via ACTION_PLAY and replayed from
-        _pending_play_intent after sync if needed.
+        Playback intent is handled via explicit high-level intents and replayed
+        from _pending_play_intent after sync if needed.
         If called while already syncing, marks for re-sync after current sync completes.
         """
         # Clear scheduled flag immediately (single-flight pattern)
         self._moc_sync_scheduled = False
+        self._moc_sync_source_id = None
 
         if not self._use_moc:
             return False
 
-        if self._syncing_to_moc:
+        if self._moc_replace_sync_active:
             # Already syncing - mark for re-sync
             logger.debug("_sync_moc_playlist: already syncing, marking for re-sync")
             self._playlist_changed_during_sync = True
@@ -860,20 +957,26 @@ class PlaybackController:
         playlist = self._playlist.get_playlist()
         current_index = self._playlist.get_current_index()
 
-        self._syncing_to_moc = True
+        self._moc_replace_sync_active = True
         self._recent_moc_write = time.time()
 
-        def on_done(success: bool):
+        def on_done(success: bool, cancelled: bool):
             logger.debug(
-                "MOC sync on_done: success=%s, playlist_changed=%s, pending_intent=%s",
+                "MOC sync on_done: success=%s, cancelled=%s, playlist_changed=%s, pending_intent=%s",
                 success,
+                cancelled,
                 self._playlist_changed_during_sync,
                 bool(self._pending_play_intent),
             )
-            self._syncing_to_moc = False
+            self._moc_replace_sync_active = False
             if success:
+                self._moc_sync_cancelled_by_user = False
                 self._recent_moc_write = time.time()
             else:
+                if cancelled or self._moc_sync_cancelled_by_user:
+                    self._moc_sync_cancelled_by_user = False
+                    self._playlist_changed_during_sync = False
+                    return
                 logger.error("MOC sync failed; leaving playlist state unchanged")
                 self._playlist_changed_during_sync = False
                 return
@@ -893,33 +996,17 @@ class PlaybackController:
                 GLib.idle_add(self._sync_moc_playlist)
                 return
 
+            if self._pending_append_tracks:
+                queued_tracks = self._pending_append_tracks
+                self._pending_append_tracks = []
+                self._append_moc_tracks(queued_tracks)
+
             self._replay_pending_play_intent()
 
-        self._moc_controller.sync_playlist_async(
+        self._moc_controller.replace_playlist(
             playlist, current_index, on_done=on_done
         )
         return False
-
-    def _reload_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
-        """Load playlist from MOC into app state. Skipped while syncing to avoid overwriting with partial data."""
-        if not self._use_moc or self._syncing_to_moc:
-            return
-        tracks, current_index = self._moc_controller.get_playlist(
-            current_file=current_file
-        )
-        if not tracks:
-            return
-        try:
-            self._loading_from_moc = True
-            self._playlist.set_playlist(tracks, current_index)
-        finally:
-            self._loading_from_moc = False
-        try:
-            config = get_config()
-            if config.moc_playlist_path.exists():
-                self._moc_playlist_mtime = config.moc_playlist_path.stat().st_mtime
-        except OSError:
-            pass
 
     def _poll_internal_player_status(self) -> bool:
         """Poll internal player status and update state."""
@@ -965,7 +1052,7 @@ class PlaybackController:
 
         # Skip all state updates during MOC sync - MOC state is unstable while
         # playlist is being rebuilt. Sync's on_done will set correct state.
-        if self._syncing_to_moc:
+        if self._moc_replace_sync_active:
             return True  # Continue polling, but don't update anything
 
         status = self._moc_controller.get_status()
@@ -1047,7 +1134,7 @@ class PlaybackController:
                 self._update_progress(0.0, 0.0)
 
         # Detect external playlist file changes (skip during sync — file is in flux)
-        if not self._syncing_to_moc:
+        if not self._moc_replace_sync_active:
             self._check_moc_playlist_changes()
 
         return True  # Continue polling
@@ -1063,7 +1150,21 @@ class PlaybackController:
             if track.file_path and str(Path(track.file_path).resolve()) == resolved:
                 self._playlist.set_current_index(idx)
                 return
-        self._reload_playlist_from_moc(current_file=file_path)
+        logger.warning("MOC switched to track outside mirrored app playlist; mirroring from MOC")
+        self._mirror_playlist_from_moc(current_file=file_path)
+
+    def _mirror_playlist_from_moc(self, current_file: Optional[str] = None) -> None:
+        """Mirror MOC authoritative playlist/index into PlaylistManager (UI projection)."""
+        if not self._use_moc or self._moc_replace_sync_active:
+            return
+        tracks, current_index = self._moc_controller.get_playlist(current_file=current_file)
+        if not tracks:
+            return
+        try:
+            self._loading_from_moc = True
+            self._playlist.set_playlist(tracks, current_index)
+        finally:
+            self._loading_from_moc = False
 
     def _handle_track_finished(self) -> None:
         if not self._autonext_enabled:
@@ -1099,19 +1200,17 @@ class PlaybackController:
             moc_playlist_path = config.moc_playlist_path
 
             if not moc_playlist_path.exists():
+                # Don't clear app playlist when MOC playlist file is temporarily missing.
+                # MOC can keep an in-memory playlist while playlist.m3u is absent/in flux.
                 if self._moc_playlist_mtime > 0 and not recent_write:
-                    try:
-                        self._loading_from_moc = True
-                        self._playlist.clear()
-                    finally:
-                        self._loading_from_moc = False
                     self._moc_playlist_mtime = 0.0
                 return
 
             mtime = moc_playlist_path.stat().st_mtime
             if abs(mtime - self._moc_playlist_mtime) > 0.1:
                 if not recent_write and self._startup_complete:
-                    self._reload_playlist_from_moc()
+                    # In MOC mode, mirror external playlist/index changes into app state.
+                    self._mirror_playlist_from_moc()
                 self._moc_playlist_mtime = mtime
         except OSError:
             pass

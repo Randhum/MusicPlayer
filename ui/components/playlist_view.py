@@ -229,9 +229,9 @@ class PlaylistView(Gtk.Box):
         return self._shuffle_enabled
 
     def add_track(self, track: TrackMetadata, position: Optional[int] = None):
-        """Add a track - publish ADD_FOLDER; PlaylistManager subscribes; MOC sync via PLAYLIST_CHANGED."""
+        """Queue one track (publish explicit queue intent)."""
         self._events.publish(
-            EventBus.ADD_FOLDER,
+            EventBus.ACTION_QUEUE_TRACKS,
             {
                 "tracks": [track],
                 **({"position": position} if position is not None else {}),
@@ -239,10 +239,10 @@ class PlaylistView(Gtk.Box):
         )
 
     def add_tracks(self, tracks: List[TrackMetadata]):
-        """Add tracks - publish ADD_FOLDER; PlaylistManager subscribes; view updates via PLAYLIST_CHANGED."""
+        """Queue tracks (publish explicit queue intent)."""
         if not tracks:
             return
-        self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
+        self._events.publish(EventBus.ACTION_QUEUE_TRACKS, {"tracks": tracks})
 
     def remove_track(self, index: int):
         """Remove a track - publish action; PlaylistManager subscribes; view updates via PLAYLIST_CHANGED."""
@@ -295,28 +295,18 @@ class PlaylistView(Gtk.Box):
         GLib.timeout_add(500, self._release_playback_lock)
 
     def replace_and_play_track(self, track: TrackMetadata) -> None:
-        """Replace playlist with single track and play it.
-
-        Publishes ACTION_REPLACE_PLAYLIST (content change) then ACTION_PLAY (intent).
-        PlaylistManager handles the playlist update, PlaybackController handles playback.
-        """
+        """Replace playlist with single track and play it."""
         self._events.publish(
-            EventBus.ACTION_REPLACE_PLAYLIST,
+            EventBus.ACTION_PLAY_TRACKS,
             {"tracks": [track], "current_index": 0},
         )
-        self._events.publish(EventBus.ACTION_PLAY, None)
 
     def replace_and_play_album(self, tracks: List[TrackMetadata]) -> None:
-        """Replace playlist with album tracks and play first track.
-
-        Publishes ACTION_REPLACE_PLAYLIST (content change) then ACTION_PLAY (intent).
-        PlaylistManager handles the playlist update, PlaybackController handles playback.
-        """
+        """Replace playlist with album tracks and play first track."""
         self._events.publish(
-            EventBus.ACTION_REPLACE_PLAYLIST,
+            EventBus.ACTION_PLAY_TRACKS,
             {"tracks": tracks, "current_index": 0},
         )
-        self._events.publish(EventBus.ACTION_PLAY, None)
 
     def add_folder(self, folder_path: str) -> None:
         """
@@ -333,7 +323,7 @@ class PlaylistView(Gtk.Box):
         if not folder.exists() or not folder.is_dir():
             return
 
-        # Collect tracks and use ADD_FOLDER - PlaybackController handles MOC sync via PLAYLIST_CHANGED
+        # Collect tracks and publish explicit queue intent.
         tracks = []
         for path in folder.rglob("*"):
             if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
@@ -342,14 +332,13 @@ class PlaylistView(Gtk.Box):
         tracks.sort(key=_track_order_key)
 
         if tracks:
-            self._events.publish(EventBus.ADD_FOLDER, {"tracks": tracks})
+            self._events.publish(EventBus.ACTION_QUEUE_TRACKS, {"tracks": tracks})
 
     def replace_and_play_folder(self, folder_path: str) -> None:
         """Replace playlist with folder contents and play first track.
 
         Defers track collection to idle to keep UI responsive.
-        Uses ACTION_REPLACE_PLAYLIST event - PlaylistManager handles playlist,
-        PlaybackController handles MOC sync and playback.
+        Uses ACTION_PLAY_TRACKS intent; PlaybackController orchestrates sync/playback.
         """
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
@@ -359,7 +348,7 @@ class PlaylistView(Gtk.Box):
         GLib.idle_add(self._do_replace_and_play_folder, str(folder.resolve()))
 
     def _do_replace_and_play_folder(self, folder_path: str) -> bool:
-        """Idle callback: collect tracks and publish ACTION_REPLACE_PLAYLIST + ACTION_PLAY."""
+        """Idle callback: collect tracks and publish ACTION_PLAY_TRACKS."""
         folder = Path(folder_path)
         if not folder.exists() or not folder.is_dir():
             return False
@@ -370,13 +359,10 @@ class PlaylistView(Gtk.Box):
         tracks.sort(key=_track_order_key)
         if not tracks:
             return False
-        # Content change event - PlaylistManager handles
         self._events.publish(
-            EventBus.ACTION_REPLACE_PLAYLIST,
+            EventBus.ACTION_PLAY_TRACKS,
             {"tracks": tracks, "current_index": 0},
         )
-        # Playback intent event - PlaybackController handles (queues if sync in progress)
-        self._events.publish(EventBus.ACTION_PLAY, None)
         return False  # one-shot idle
 
     def set_moc_mode(self, enabled: bool):

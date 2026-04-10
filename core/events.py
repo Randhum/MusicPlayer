@@ -69,15 +69,17 @@ class EventBus:
     ACTION_PREV = "action.previous"
     ACTION_SEEK = "action.seek"
     ACTION_PLAY_TRACK = "action.play_track"
+    ACTION_PLAY_TRACKS = "action.play_tracks"  # Replace playlist and play
+    ACTION_QUEUE_TRACKS = "action.queue_tracks"  # Append tracks to queue
     ACTION_SET_SHUFFLE = "action.set_shuffle"
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
     ACTION_REFRESH_MOC = "action.refresh_moc"
-    # Note: ACTION_APPEND_FOLDER removed - use ADD_FOLDER for all folder additions
+    # Note: ACTION_APPEND_FOLDER removed. Prefer ACTION_QUEUE_TRACKS.
 
     # Playlist modification actions (handled by PlaylistManager)
     ACTION_REPLACE_PLAYLIST = "action.replace_playlist"  # Replace entire playlist
-    ADD_FOLDER = "playlist.add_folder"
+    ADD_FOLDER = "playlist.add_folder"  # Backward-compat alias for queue intent
     ACTION_MOVE = "action.move"
     ACTION_REMOVE = "action.remove"
     ACTION_CLEAR_PLAYLIST = "action.clear_playlist"
