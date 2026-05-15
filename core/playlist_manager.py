@@ -142,7 +142,7 @@ class PlaylistManager:
         self.clear()
 
     def _on_action_queue_tracks(self, data: Optional[dict]) -> None:
-        """Subscriber: ACTION_QUEUE_TRACKS with data['tracks'] -> add_tracks."""
+        """Subscriber: ACTION_QUEUE_TRACKS with data['tracks'] (optional 'position') -> add_tracks."""
         if not data or "tracks" not in data:
             return
         tracks = data.get("tracks", [])
@@ -155,7 +155,8 @@ class PlaylistManager:
             elif isinstance(t, dict):
                 track_list.append(TrackMetadata.from_dict(t))
         if track_list:
-            self.add_tracks(track_list)
+            position = data.get("position") if isinstance(data.get("position"), int) else None
+            self.add_tracks(track_list, position)
 
     def set_playlist(
         self,
