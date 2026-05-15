@@ -134,9 +134,6 @@ class PlaybackController:
         )
         self._events.subscribe(EventBus.ACTION_SET_VOLUME, self._on_action_set_volume)
         self._events.subscribe(EventBus.ACTION_REFRESH_MOC, self._on_action_refresh_moc)
-        # Note: ACTION_APPEND_FOLDER removed - MOC sync handled via PLAYLIST_CHANGED
-
-        # Note: PLAYBACK_STOP_REQUESTED merged into ACTION_STOP with reason field
 
         # Subscribe to playlist changes - single handler for all playlist modifications
         self._events.subscribe(EventBus.PLAYLIST_CHANGED, self._on_playlist_changed)
@@ -515,7 +512,7 @@ class PlaybackController:
         if self._bt_sink and self._should_use_bt_sink():
             self._bt_sink.control_playback("next")
             return
-        next_index = self._playlist.peek_next_index()
+        next_index = self._playlist.advance_to_next()
         if next_index >= 0:
             self._play_track_at_index(next_index)
 
@@ -602,11 +599,8 @@ class PlaybackController:
         # Explicit play intent handled by one canonical path.
         self._play_track_at_index(current_index)
 
-    # Note: ACTION_QUEUE_TRACKS handled exclusively by PlaylistManager (single source of truth).
-    # Controller reacts to resulting PLAYLIST_CHANGED for MOC sync.
-
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
-        """Handle playlist changes - sync to MOC.
+        """Handle playlist changes - sync to MOC and stop if current track was removed.
 
         This is the single handler for all playlist content modifications.
         Playback intent is handled separately via ACTION_PLAY.
@@ -616,6 +610,10 @@ class PlaybackController:
         content_changed = data.get("content_changed", True)
         if not content_changed:
             return
+
+        if data.get("removed_current"):
+            self._on_action_stop({"reason": "track_removed"})
+
         sync_mode = data.get("sync_mode", "replace")
         # Skip if we're loading from MOC (avoid sync loop)
         if self._loading_from_moc:
@@ -770,8 +768,6 @@ class PlaybackController:
         if not self._moc_sync_scheduled:
             self._moc_sync_scheduled = True
             self._moc_sync_source_id = GLib.idle_add(self._sync_moc_playlist)
-
-    # Note: _on_action_append_folder() removed - MOC sync handled via PLAYLIST_CHANGED
 
     def _play_with_moc(self, track: TrackMetadata) -> bool:
         if not self._use_moc:
@@ -1186,13 +1182,13 @@ class PlaybackController:
         if loop_mode == 1:
             self._on_action_play(None)
         elif loop_mode == 2:
-            next_idx = self._playlist.peek_next_index()
+            next_idx = self._playlist.advance_to_next()
             if next_idx >= 0:
                 self._play_track_at_index(next_idx)
             elif playlist:
                 self._play_track_at_index(0)
         else:
-            next_idx = self._playlist.peek_next_index()
+            next_idx = self._playlist.advance_to_next()
             if next_idx >= 0:
                 self._play_track_at_index(next_idx)
             else:

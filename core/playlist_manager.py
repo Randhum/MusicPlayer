@@ -52,15 +52,10 @@ class PlaylistManager:
             self._event_bus.subscribe(
                 EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed
             )
-            # Note: RELOAD_PLAYLIST_FROM_MOC subscription removed (event was never published)
-            self._event_bus.subscribe(EventBus.ADD_FOLDER, self._on_add_folder)
             self._event_bus.subscribe(EventBus.ACTION_MOVE, self._on_action_move)
             self._event_bus.subscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
             self._event_bus.subscribe(
                 EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist
-            )
-            self._event_bus.subscribe(
-                EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist
             )
             self._event_bus.subscribe(
                 EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks
@@ -99,27 +94,6 @@ class PlaylistManager:
         # In shuffle mode, check if queue has valid entries
         return bool(self._shuffle_queue) or len(self.current_playlist) > 1
 
-    def peek_next_index(self) -> int:
-        """Get next index without consuming shuffle state."""
-        if not self.current_playlist:
-            return -1
-        if not self._shuffle_enabled:
-            return (
-                self.current_index + 1
-                if self.current_index < len(self.current_playlist) - 1
-                else -1
-            )
-        for idx in self._shuffle_queue:
-            if 0 <= idx < len(self.current_playlist):
-                return idx
-        if len(self.current_playlist) <= 1:
-            return -1
-        self._regenerate_shuffle_queue()
-        for idx in self._shuffle_queue:
-            if 0 <= idx < len(self.current_playlist):
-                return idx
-        return -1
-
     def advance_to_next(self) -> int:
         """Get next index and consume from shuffle queue if shuffled.
 
@@ -141,8 +115,6 @@ class PlaylistManager:
         self._regenerate_shuffle_queue()
         return self._shuffle_queue.pop(0) if self._shuffle_queue else -1
 
-    # Note: _on_reload_from_moc_requested() removed (RELOAD_PLAYLIST_FROM_MOC was never published)
-
     def reload_from_moc(self, current_file: Optional[str] = None) -> bool:
         """Load playlist from MOC via the injected provider and apply with set_playlist. Returns True if reloaded."""
         if self._moc_playlist_provider is None:
@@ -152,17 +124,6 @@ class PlaylistManager:
             return False
         self.set_playlist(tracks, current_index)
         return True
-
-    def _on_add_folder(self, data: Optional[dict]) -> None:
-        """Subscriber: ADD_FOLDER with data['tracks'] (optional 'position') → add_tracks."""
-        if not data or "tracks" not in data:
-            return
-        tracks = data["tracks"]
-        position = (
-            data.get("position") if isinstance(data.get("position"), int) else None
-        )
-        if isinstance(tracks, list) and tracks:
-            self.add_tracks(tracks, position)
 
     def _on_action_move(self, data: Optional[dict]) -> None:
         """Subscriber: ACTION_MOVE with from_index, to_index → move_track."""
@@ -179,28 +140,6 @@ class PlaylistManager:
     def _on_action_clear_playlist(self, data: Optional[dict]) -> None:
         """Subscriber: ACTION_CLEAR_PLAYLIST → clear."""
         self.clear()
-
-    def _on_action_replace_playlist(self, data: Optional[dict]) -> None:
-        """Subscriber: ACTION_REPLACE_PLAYLIST → replace entire playlist.
-
-        Data fields:
-            tracks: List of TrackMetadata (or dicts) to set as new playlist
-            current_index: Index to set as current (default 0)
-        """
-        if not data:
-            return
-        tracks = data.get("tracks", [])
-        if not isinstance(tracks, list):
-            return
-        # Convert dicts to TrackMetadata if needed
-        track_list = []
-        for t in tracks:
-            if isinstance(t, TrackMetadata):
-                track_list.append(t)
-            elif isinstance(t, dict):
-                track_list.append(TrackMetadata.from_dict(t))
-        current_index = data.get("current_index", 0) if track_list else -1
-        self.set_playlist(track_list, current_index)
 
     def _on_action_queue_tracks(self, data: Optional[dict]) -> None:
         """Subscriber: ACTION_QUEUE_TRACKS with data['tracks'] -> add_tracks."""
@@ -354,18 +293,13 @@ class PlaylistManager:
             # When removing the current track, reset index and stop playback
             self.current_index = -1
         if self._event_bus:
-            # If we removed the currently playing track, request playback stop
-            # ACTION_STOP with reason="track_removed" indicates system-initiated stop
-            if removed_current:
-                self._event_bus.publish(
-                    EventBus.ACTION_STOP, {"reason": "track_removed"}
-                )
             self._event_bus.publish(
                 EventBus.PLAYLIST_CHANGED,
                 {
                     "playlist_length": len(self.current_playlist),
                     "content_changed": True,
                     "sync_mode": "replace",
+                    "removed_current": removed_current,
                 },
             )
             self._emit_current_track_changed(old_index)
@@ -462,8 +396,6 @@ class PlaylistManager:
                 EventBus.TRACK_CHANGED, {"track": self.get_current_track()}
             )
         self._sync_to_file()
-
-    # Note: get_next_track() removed - use advance_to_next() then get_current_track()
 
     def save_playlist(self, name: str) -> bool:
         """Save the current playlist to a file.
@@ -580,11 +512,9 @@ class PlaylistManager:
             self._sync_timer = None
         if self._event_bus:
             self._event_bus.unsubscribe(EventBus.SHUFFLE_CHANGED, self._on_shuffle_changed)
-            self._event_bus.unsubscribe(EventBus.ADD_FOLDER, self._on_add_folder)
             self._event_bus.unsubscribe(EventBus.ACTION_MOVE, self._on_action_move)
             self._event_bus.unsubscribe(EventBus.ACTION_REMOVE, self._on_action_remove)
             self._event_bus.unsubscribe(EventBus.ACTION_CLEAR_PLAYLIST, self._on_action_clear_playlist)
-            self._event_bus.unsubscribe(EventBus.ACTION_REPLACE_PLAYLIST, self._on_action_replace_playlist)
             self._event_bus.unsubscribe(EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks)
 
     def get_playlist(self) -> List[TrackMetadata]:

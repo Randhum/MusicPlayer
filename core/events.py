@@ -21,22 +21,17 @@ class EventBus:
     # =========================================================================
 
     # Playback state (published by PlaybackController)
-    # Unified playback state event: {"state": "playing"|"paused"|"stopped", "track": TrackMetadata?}
     PLAYBACK_STATE_CHANGED = "playback.state_changed"
-    # Note: PLAYBACK_STARTED, PLAYBACK_PAUSED, PLAYBACK_STOPPED merged into PLAYBACK_STATE_CHANGED
-    # Note: PLAYBACK_STOP_REQUESTED merged into ACTION_STOP with reason field
-    # Unified progress event: {"position": float, "duration": float}
     PLAYBACK_PROGRESS = "playback.progress"
-    # Note: POSITION_CHANGED, DURATION_CHANGED merged into PLAYBACK_PROGRESS
     SHUFFLE_CHANGED = "playback.shuffle_changed"
     LOOP_MODE_CHANGED = "playback.loop_mode_changed"
     VOLUME_CHANGED = "volume.changed"
-    # Note: AUTONEXT_CHANGED, ACTIVE_BACKEND_CHANGED removed (no subscribers)
 
     # Playlist state (published by PlaylistManager)
     # Contract:
     #   PLAYLIST_CHANGED   — content mutations only (add/remove/move/replace/clear)
-    #                        Data: {"playlist_length": int, "content_changed": bool, ...}
+    #                        Data: {"playlist_length": int, "content_changed": bool,
+    #                               "removed_current"?: bool, ...}
     #   CURRENT_INDEX_CHANGED — index cursor moved (next/prev/play-track/content shift)
     #                        Data: {"index": int, "old_index": int}
     #   TRACK_CHANGED      — current-track object changed (new metadata to display)
@@ -54,7 +49,6 @@ class EventBus:
     BT_SINK_ENABLED = "bluetooth.sink_enabled"
     BT_SINK_DISABLED = "bluetooth.sink_disabled"
     BT_SINK_DEVICE_CONNECTED = "bluetooth.sink_device_connected"
-    # Note: BT_DEVICE_REMOVED removed (no subscribers)
 
     # =========================================================================
     # UI -> Core: Action Requests
@@ -75,16 +69,11 @@ class EventBus:
     ACTION_SET_LOOP_MODE = "action.set_loop_mode"
     ACTION_SET_VOLUME = "action.set_volume"
     ACTION_REFRESH_MOC = "action.refresh_moc"
-    # Note: ACTION_APPEND_FOLDER removed. Prefer ACTION_QUEUE_TRACKS.
 
     # Playlist modification actions (handled by PlaylistManager)
-    ACTION_REPLACE_PLAYLIST = "action.replace_playlist"  # Replace entire playlist
-    ADD_FOLDER = "playlist.add_folder"  # Backward-compat alias for queue intent
     ACTION_MOVE = "action.move"
     ACTION_REMOVE = "action.remove"
     ACTION_CLEAR_PLAYLIST = "action.clear_playlist"
-
-    # Note: RELOAD_PLAYLIST_FROM_MOC removed (never published, dead code)
 
     def __init__(self):
         self._subscribers: Dict[str, List[Callable[[Any], None]]] = {}
