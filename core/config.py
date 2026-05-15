@@ -97,7 +97,6 @@ class Config:
 
         # Bluetooth settings
         self.config["bluetooth"] = {
-            "device_name": "Music Player",
             "auto_connect": "true",
         }
 

@@ -47,7 +47,6 @@ class BluetoothSink:
         self.is_sink_enabled = False
         self.is_discoverable = False
         self.connected_device: Optional[BluetoothDevice] = None
-        self.device_name = "Music Player Speaker"
 
         # GStreamer BlueZ plugin support
         self.gst_bluez_available = False
@@ -206,9 +205,6 @@ class BluetoothSink:
                 logger.warning("A2DP sink profile may not be fully supported")
                 logger.warning("Audio streaming may not work properly")
 
-            # Set device name
-            self._set_adapter_name(self.device_name)
-
             # Make adapter discoverable and pairable (with timeout for security)
             self._set_discoverable(True, self._discoverable_timeout)
             self._set_pairable(True)
@@ -362,23 +358,6 @@ class BluetoothSink:
         except (OSError, subprocess.SubprocessError, FileNotFoundError):
             # Audio system detection failed
             return "none"
-
-    def _set_adapter_name(self, name: str):
-        """Set the Bluetooth adapter's visible name."""
-        try:
-            if not self.bt_manager.adapter_path:
-                return
-
-            props = dbus.Interface(
-                self.bt_manager.bus.get_object(
-                    self.bt_manager.BLUEZ_SERVICE, self.bt_manager.adapter_path
-                ),
-                self.bt_manager.PROPERTIES_INTERFACE,
-            )
-            props.Set(self.bt_manager.ADAPTER_INTERFACE, "Alias", dbus.String(name))
-            logger.info("Set Bluetooth name to: %s", name)
-        except Exception as e:
-            logger.error("Error setting adapter name: %s", e, exc_info=True)
 
     def _set_discoverable(
         self, discoverable: bool, timeout: int = DEFAULT_DISCOVERABLE_TIMEOUT
@@ -1217,12 +1196,6 @@ class BluetoothSink:
             "reconnection_attempts": self._reconnection_attempts,
             "last_connected_address": self._last_connected_address,
         }
-
-    def set_device_name(self, name: str):
-        """Set the Bluetooth speaker name."""
-        self.device_name = name
-        if self.is_sink_enabled:
-            self._set_adapter_name(name)
 
     def cleanup(self) -> None:
         """Stop timers, disable sink if enabled, unsubscribe from events."""
