@@ -100,9 +100,9 @@ class LibraryBrowser(Gtk.Box):
         right_click_gesture.connect("pressed", self._on_right_click)
         self.tree_view.add_controller(right_click_gesture)
 
-        # Add long-press gesture for context menu (touch-friendly)
+        # Add long-press gesture for context menu (touch and mouse)
         long_press_gesture = Gtk.GestureLongPress()
-        long_press_gesture.set_touch_only(True)  # Only for touch, not mouse
+        long_press_gesture.set_delay_factor(1.0)
         long_press_gesture.connect("pressed", self._on_long_press)
         self.tree_view.add_controller(long_press_gesture)
 

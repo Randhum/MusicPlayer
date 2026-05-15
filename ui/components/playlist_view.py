@@ -528,7 +528,7 @@ class PlaylistView(Gtk.Box):
         self._update_button_states()
         return False
 
-    def _update_selection(self, skip_scroll: bool = False):
+    def _update_selection(self):
         """Update selection and blinking for current track. Event-driven (CURRENT_INDEX_CHANGED).
         Current playing track always blinks; selection shows current track. All tree ops wrapped to avoid GTK assertion.
         """
@@ -543,19 +543,6 @@ class PlaylistView(Gtk.Box):
         # Get actual store row count - may differ from playlist during chunked updates
         store_row_count = len(self.store)
 
-        def safe_select_path(path: Gtk.TreePath) -> None:
-            try:
-                selection.select_path(path)
-                self.tree_view.set_cursor(path, None, False)
-            except (ValueError, AttributeError, RuntimeError, AssertionError):
-                pass
-
-        def safe_scroll_to_cell(path: Gtk.TreePath) -> None:
-            try:
-                self.tree_view.scroll_to_cell(path, None, False, 0.0, 0.0)
-            except (ValueError, AttributeError, RuntimeError, AssertionError):
-                pass
-
         # Check both playlist length AND store row count to avoid GTK assertion
         # (store may have fewer rows during chunked updates)
         if (
@@ -565,9 +552,11 @@ class PlaylistView(Gtk.Box):
         ):
             path = Gtk.TreePath.new_from_indices([current_index])
             self._start_blinking_highlight(path)
-            safe_select_path(path)
-            if not skip_scroll:
-                safe_scroll_to_cell(path)
+            try:
+                selection.select_path(path)
+                self.tree_view.set_cursor(path, None, False)
+            except (ValueError, AttributeError, RuntimeError, AssertionError):
+                pass
         else:
             self._stop_blinking_highlight()
             try:

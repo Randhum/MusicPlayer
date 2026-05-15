@@ -19,9 +19,6 @@ from core.metadata import TrackMetadata
 
 logger = get_logger(__name__)
 
-SYNC_APPEND_DELAY_SECONDS = 0.05
-
-
 class MocController:
     """Wrapper around mocp for playlist and playback control."""
 
@@ -470,6 +467,35 @@ class MocController:
         # Assume success even if we can't detect change (file might already be up to date)
         return True
 
+    def flush_to_disk(self) -> bool:
+        """Nudge MOC to flush its in-memory playlist to the M3U file.
+
+        Connects briefly with --sync and disconnects immediately. MOC writes
+        the file asynchronously afterward. Unlike sync_playlist(), this does
+        NOT block waiting for the write to complete — the caller relies on
+        mtime polling to detect the change on the next cycle.
+
+        Cost: one subprocess spawn + immediate stdin close (~5-15ms typical).
+        """
+        if not self._mocp_path or not self._server_connected:
+            return False
+        try:
+            proc = subprocess.Popen(
+                [self._mocp_path, "--sync"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            proc.communicate(input="q\n", timeout=2.0)
+            return proc.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+
     def jump_to_index(self, index: int, start_playback: bool = False):
         """
         Jump to a specific track index in MOC's playlist.
@@ -775,26 +801,16 @@ class MocController:
         current_index: int = -1,
         on_done: Optional[Callable[[bool, bool], None]] = None,
     ) -> None:
-        """Replace MOC's playlist in a background thread so the UI stays responsive.
+        """Replace MOC's playlist by writing the M3U file directly.
 
-        Clears MOC playlist and appends tracks one-by-one with a small delay.
-        ``on_done`` is dispatched back to the GTK main loop via
-        ``GLib.idle_add`` so callers can safely mutate UI/controller state.
+        MOC's --sync mode detects the file change and reloads automatically.
+        This is atomic (single file write) and fast regardless of playlist size.
+        ``on_done`` is dispatched back to the GTK main loop.
         """
         if not self.is_available():
             if on_done:
                 GLib.idle_add(on_done, False, False)
             return
-
-        valid_paths: List[str] = []
-        for track in tracks:
-            if not track or not track.file_path:
-                continue
-            file_path = Path(track.file_path)
-            if not file_path.exists() or not file_path.is_file():
-                logger.warning("Track file does not exist: %s", track.file_path)
-                continue
-            valid_paths.append(str(file_path.resolve()))
 
         cancel_event = threading.Event()
         self._sync_cancel_event = cancel_event
@@ -806,52 +822,11 @@ class MocController:
                 if cancel_event.is_set():
                     cancelled = True
                     return
-                if not self.ensure_server():
-                    logger.warning(
-                        "MOC sync thread: initial connect failed, trying restart"
-                    )
-                    if not self.restart_server():
-                        logger.error("MOC sync thread failed: could not connect to server")
-                        return
-
-                if cancel_event.is_set():
-                    cancelled = True
-                    return
-                clear_result = self._run("--clear", capture_output=True)
-                if clear_result.returncode != 0:
-                    logger.error("MOC sync thread failed: clear playlist command failed")
-                    if clear_result.stderr:
-                        logger.debug("MOC clear error: %s", clear_result.stderr)
-                else:
-                    success = True
-                    for idx, abs_path in enumerate(valid_paths):
-                        if cancel_event.is_set():
-                            cancelled = True
-                            success = False
-                            break
-                        append_result = self._run(
-                            "--append", abs_path, capture_output=True
-                        )
-                        if append_result.returncode != 0:
-                            success = False
-                            logger.error(
-                                "MOC sync thread failed: append command failed for %s",
-                                abs_path,
-                            )
-                            if append_result.stderr:
-                                logger.debug("MOC append error: %s", append_result.stderr)
-                            # Leave MOC in a deterministic state on partial failure.
-                            self._run("--clear", capture_output=True)
-                            break
-                        # Gentle pacing so we don't overwhelm MOC.
-                        if idx < len(valid_paths) - 1:
-                            time.sleep(SYNC_APPEND_DELAY_SECONDS)
-                    if success:
-                        logger.debug(
-                            "MOC sync thread complete: %d tracks", len(valid_paths)
-                        )
+                success = self.write_m3u_playlist(tracks, current_index)
+                if success:
+                    logger.debug("MOC sync: wrote M3U with %d tracks", len(tracks))
             except Exception as e:
-                logger.error("MOC sync thread failed: %s", e)
+                logger.error("MOC sync failed: %s", e)
             finally:
                 if self._sync_cancel_event is cancel_event:
                     self._sync_cancel_event = None
@@ -865,21 +840,15 @@ class MocController:
         tracks: List[TrackMetadata],
         on_done: Optional[Callable[[bool, bool], None]] = None,
     ) -> None:
-        """Append tracks in background without clearing MOC playlist."""
+        """Append tracks by reading existing M3U, extending, and rewriting atomically.
+
+        MOC's --sync mode detects the file change and reloads automatically.
+        ``on_done`` is dispatched back to the GTK main loop.
+        """
         if not self.is_available():
             if on_done:
                 GLib.idle_add(on_done, False, False)
             return
-
-        valid_paths: List[str] = []
-        for track in tracks:
-            if not track or not track.file_path:
-                continue
-            file_path = Path(track.file_path)
-            if not file_path.exists() or not file_path.is_file():
-                logger.warning("Track file does not exist: %s", track.file_path)
-                continue
-            valid_paths.append(str(file_path.resolve()))
 
         cancel_event = threading.Event()
         self._append_cancel_event = cancel_event
@@ -891,34 +860,48 @@ class MocController:
                 if cancel_event.is_set():
                     cancelled = True
                     return
-                if not self.ensure_server():
-                    logger.warning(
-                        "MOC append thread: initial connect failed, trying restart"
-                    )
-                    if not self.restart_server():
-                        logger.error("MOC append thread failed: could not connect to server")
-                        return
+                # Read existing tracks from disk
+                existing = self._parse_m3u_playlist()
+                existing_paths = set()
+                for _, _, fp in existing:
+                    try:
+                        existing_paths.add(str(Path(fp).resolve()))
+                    except (OSError, RuntimeError):
+                        existing_paths.add(fp)
 
-                success = True
-                for idx, abs_path in enumerate(valid_paths):
+                # Build combined track list: existing (as TrackMetadata) + new
+                combined: List[TrackMetadata] = []
+                for _, _, fp in existing:
+                    p = Path(fp)
+                    if p.is_absolute() and p.exists():
+                        combined.append(TrackMetadata(str(p.resolve())))
+
+                for track in tracks:
                     if cancel_event.is_set():
                         cancelled = True
-                        success = False
-                        break
-                    append_result = self._run("--append", abs_path, capture_output=True)
-                    if append_result.returncode != 0:
-                        success = False
-                        logger.error(
-                            "MOC append thread failed: append command failed for %s",
-                            abs_path,
-                        )
-                        if append_result.stderr:
-                            logger.debug("MOC append error: %s", append_result.stderr)
-                        break
-                    if idx < len(valid_paths) - 1:
-                        time.sleep(SYNC_APPEND_DELAY_SECONDS)
+                        return
+                    if not track or not track.file_path:
+                        continue
+                    p = Path(track.file_path)
+                    if not p.exists() or not p.is_file():
+                        continue
+                    resolved = str(p.resolve())
+                    if resolved not in existing_paths:
+                        combined.append(TrackMetadata(resolved))
+
+                if cancel_event.is_set():
+                    cancelled = True
+                    return
+
+                success = self.write_m3u_playlist(combined)
+                if success:
+                    logger.debug(
+                        "MOC append: rewrote M3U (%d existing + %d new)",
+                        len(existing),
+                        len(combined) - len(existing),
+                    )
             except Exception as e:
-                logger.error("MOC append thread failed: %s", e)
+                logger.error("MOC append failed: %s", e)
             finally:
                 if self._append_cancel_event is cancel_event:
                     self._append_cancel_event = None

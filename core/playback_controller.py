@@ -149,6 +149,7 @@ class PlaybackController:
         # Poll timer source IDs (stored for cancellation on cleanup)
         self._moc_poll_source_id: Optional[int] = None
         self._internal_poll_source_id: Optional[int] = None
+        self._moc_flush_counter: int = 0
 
         # Start MOC polling if available
         if self._use_moc:
@@ -903,13 +904,11 @@ class PlaybackController:
         return attempts_left > 1
 
     def _sync_moc_playlist(self) -> bool:
-        """Sync current playlist to MOC.
+        """Sync current playlist to MOC via atomic M3U file write.
 
-        Playback intent is handled via explicit high-level intents and replayed
-        from _pending_play_intent after sync if needed.
-        If called while already syncing, marks for re-sync after current sync completes.
+        With direct file writes, sync is fast and atomic — no partial states.
+        If called while already syncing, marks for re-sync after completion.
         """
-        # Clear scheduled flag immediately (single-flight pattern)
         self._moc_sync_scheduled = False
         self._moc_sync_source_id = None
 
@@ -917,8 +916,6 @@ class PlaybackController:
             return False
 
         if self._moc_replace_sync_active:
-            # Already syncing - mark for re-sync
-            logger.debug("_sync_moc_playlist: already syncing, marking for re-sync")
             self._playlist_changed_during_sync = True
             return False
 
@@ -929,44 +926,29 @@ class PlaybackController:
         self._recent_moc_write = time.time()
 
         def on_done(success: bool, cancelled: bool):
-            logger.debug(
-                "MOC sync on_done: success=%s, cancelled=%s, playlist_changed=%s, pending_intent=%s",
-                success,
-                cancelled,
-                self._playlist_changed_during_sync,
-                bool(self._pending_play_intent),
-            )
             self._moc_replace_sync_active = False
-            if success and self._mirror_after_replace_cancel:
-                # Replace finished before cancel was observed; MOC already matches app push.
+
+            if cancelled or self._moc_sync_cancelled_by_user:
+                self._moc_sync_cancelled_by_user = False
+                mirror_pending = self._mirror_after_replace_cancel
+                mirror_file = self._mirror_after_replace_cancel_file
                 self._mirror_after_replace_cancel = False
                 self._mirror_after_replace_cancel_file = None
-            if success:
-                self._moc_sync_cancelled_by_user = False
-                self._recent_moc_write = time.time()
-            else:
-                if cancelled or self._moc_sync_cancelled_by_user:
-                    self._moc_sync_cancelled_by_user = False
-                    mirror_pending = self._mirror_after_replace_cancel
-                    mirror_file = self._mirror_after_replace_cancel_file
-                    self._mirror_after_replace_cancel = False
-                    self._mirror_after_replace_cancel_file = None
-                    if mirror_pending:
-                        self._playlist_changed_during_sync = False
-                        self._mirror_playlist_from_moc_impl(current_file=mirror_file)
-                        return
+                if mirror_pending:
                     self._playlist_changed_during_sync = False
-                    return
-                logger.error("MOC sync failed; will retry if playlist changed during sync")
-                if self._playlist_changed_during_sync:
-                    self._playlist_changed_during_sync = False
-                    GLib.idle_add(self._sync_moc_playlist)
-                    return
+                    self._mirror_playlist_from_moc_impl(current_file=mirror_file)
+                return
+
+            if not success:
+                logger.error("MOC sync failed")
                 self._mirror_after_replace_cancel = False
                 self._mirror_after_replace_cancel_file = None
                 return
 
-            # Update mtime
+            self._recent_moc_write = time.time()
+            self._mirror_after_replace_cancel = False
+            self._mirror_after_replace_cancel_file = None
+
             try:
                 config = get_config()
                 if config.moc_playlist_path.exists():
@@ -974,10 +956,8 @@ class PlaybackController:
             except OSError:
                 pass
 
-            # Check if re-sync needed (playlist changed during sync)
             if self._playlist_changed_during_sync:
                 self._playlist_changed_during_sync = False
-                logger.debug("Re-syncing after playlist changed during sync")
                 GLib.idle_add(self._sync_moc_playlist)
                 return
 
@@ -1048,8 +1028,13 @@ class PlaybackController:
 
         moc_state = status.get("state", "STOP")
 
-        # Always check for external MOC playlist file changes (regardless of active backend).
-        # The recent-write guard inside prevents our own syncs from triggering a mirror.
+        # Periodically nudge MOC to flush in-memory playlist to disk so we can
+        # detect external changes (e.g. tracks added via mocp CLI/TUI).
+        self._moc_flush_counter += 1
+        if self._moc_flush_counter >= 10:  # Every ~5s (10 x 500ms)
+            self._moc_flush_counter = 0
+            self._moc_controller.flush_to_disk()
+
         self._check_moc_playlist_changes()
 
         # If MOC is playing/paused but backend is "none", activate MOC as backend
