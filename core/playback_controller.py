@@ -128,7 +128,6 @@ class PlaybackController:
         self._events.subscribe(EventBus.ACTION_SEEK, self._on_action_seek)
         self._events.subscribe(EventBus.ACTION_PLAY_TRACK, self._on_action_play_track)
         self._events.subscribe(EventBus.ACTION_PLAY_TRACKS, self._on_action_play_tracks)
-        self._events.subscribe(EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks)
         self._events.subscribe(EventBus.ACTION_SET_SHUFFLE, self._on_action_set_shuffle)
         self._events.subscribe(
             EventBus.ACTION_SET_LOOP_MODE, self._on_action_set_loop_mode
@@ -603,24 +602,8 @@ class PlaybackController:
         # Explicit play intent handled by one canonical path.
         self._play_track_at_index(current_index)
 
-    def _on_action_queue_tracks(self, data: Optional[Dict[str, Any]]) -> None:
-        """Canonical intent: append tracks to playlist queue."""
-        if not data:
-            return
-        tracks_raw = data.get("tracks", [])
-        if not isinstance(tracks_raw, list) or not tracks_raw:
-            return
-        tracks: list[TrackMetadata] = []
-        for t in tracks_raw:
-            if isinstance(t, TrackMetadata):
-                tracks.append(t)
-            elif isinstance(t, dict):
-                tracks.append(TrackMetadata.from_dict(t))
-        if tracks:
-            self._playlist.add_tracks(tracks)
-
-    # Note: _on_playback_stop_requested() removed - ACTION_STOP now handles all stop requests
-    # (with optional reason field for system-initiated stops)
+    # Note: ACTION_QUEUE_TRACKS handled exclusively by PlaylistManager (single source of truth).
+    # Controller reacts to resulting PLAYLIST_CHANGED for MOC sync.
 
     def _on_playlist_changed(self, data: Optional[Dict[str, Any]]) -> None:
         """Handle playlist changes - sync to MOC.
@@ -1376,7 +1359,6 @@ class PlaybackController:
         self._events.unsubscribe(EventBus.ACTION_SEEK, self._on_action_seek)
         self._events.unsubscribe(EventBus.ACTION_PLAY_TRACK, self._on_action_play_track)
         self._events.unsubscribe(EventBus.ACTION_PLAY_TRACKS, self._on_action_play_tracks)
-        self._events.unsubscribe(EventBus.ACTION_QUEUE_TRACKS, self._on_action_queue_tracks)
         self._events.unsubscribe(EventBus.ACTION_SET_SHUFFLE, self._on_action_set_shuffle)
         self._events.unsubscribe(EventBus.ACTION_SET_LOOP_MODE, self._on_action_set_loop_mode)
         self._events.unsubscribe(EventBus.ACTION_SET_VOLUME, self._on_action_set_volume)
