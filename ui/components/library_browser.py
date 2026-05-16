@@ -117,6 +117,7 @@ class LibraryBrowser(Gtk.Box):
         # Single-click expand/collapse state
         self._click_timeout_id = None
         self._click_in_progress = False
+        self._long_press_triggered = False
 
         # Column
         column = Gtk.TreeViewColumn("Library")
@@ -245,6 +246,7 @@ class LibraryBrowser(Gtk.Box):
         # Note: We'll get the actual path from selection in the timeout handler
         # GTK handles selection correctly (accounting for scroll offset),
         # while get_path_at_pos with gesture coordinates may have offset issues
+        self._long_press_triggered = False
         self._click_in_progress = True
 
     def _on_click_released(self, gesture, n_press, x, y):
@@ -253,6 +255,12 @@ class LibraryBrowser(Gtk.Box):
         if self._click_timeout_id:
             GLib.source_remove(self._click_timeout_id)
             self._click_timeout_id = None
+
+        # Do not treat long-press release as a regular click.
+        if self._long_press_triggered:
+            self._click_in_progress = False
+            self._long_press_triggered = False
+            return
 
         # Only handle single clicks (n_press == 1)
         if n_press == 1 and getattr(self, "_click_in_progress", False):
@@ -453,6 +461,12 @@ class LibraryBrowser(Gtk.Box):
         """Handle long-press to show context menu (touch-friendly)."""
         # Only show menu if not already showing
         if not self._menu_showing:
+            # Prevent release handler from scheduling single-click folder toggle.
+            self._long_press_triggered = True
+            self._click_in_progress = False
+            if self._click_timeout_id:
+                GLib.source_remove(self._click_timeout_id)
+                self._click_timeout_id = None
             self._show_context_menu_at_position(x, y)
 
     def _show_context_menu_at_position(self, x, y):

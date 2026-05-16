@@ -130,6 +130,11 @@ class PlaylistView(Gtk.Box):
         left_click_gesture.connect("pressed", self._on_left_click_pressed)
         self.tree_view.add_controller(left_click_gesture)
 
+        # Explicit long-press gesture for context menu (works without pointer movement).
+        long_press_gesture = Gtk.GestureLongPress()
+        long_press_gesture.connect("pressed", self._on_long_press)
+        self.tree_view.add_controller(long_press_gesture)
+
         # Add drag gesture for long-press-to-reorder
         drag_gesture = Gtk.GestureDrag()
         drag_gesture.set_button(1)  # Left mouse button
@@ -720,6 +725,12 @@ class PlaylistView(Gtk.Box):
         # Only show menu if not already showing
         if not self._menu_showing:
             self._show_context_menu_at_position(x, y)
+
+    def _on_long_press(self, gesture, x, y):
+        """Handle long-press to show context menu."""
+        if self._menu_showing:
+            return
+        self._show_context_menu_at_position(x, y)
 
     def _on_left_click_pressed(self, gesture, n_press, x, y):
         """Handle left-click press - select the row at the click position."""

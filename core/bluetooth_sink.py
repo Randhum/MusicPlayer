@@ -1,6 +1,7 @@
 """Bluetooth A2DP sink management for receiving audio from mobile devices."""
 
 import subprocess
+import socket
 import threading
 import time
 from typing import Callable, List, Optional, Set
@@ -37,6 +38,7 @@ class BluetoothSink:
     MEDIA_TRANSPORT_INTERFACE = "org.bluez.MediaTransport1"
     PROFILE_INTERFACE = "org.bluez.Profile1"
     PROFILE_MANAGER_INTERFACE = "org.bluez.ProfileManager1"
+    LEGACY_ADAPTER_ALIASES = {"Music Player", "Music Player Speaker"}
 
     def __init__(
         self, bt_manager: BluetoothManager, event_bus: Optional[EventBus] = None
@@ -199,6 +201,9 @@ class BluetoothSink:
                 if not self.bt_manager.set_powered(True):
                     logger.error("Failed to power on Bluetooth adapter")
                     return False
+
+            # Migration: reset old hardcoded aliases from previous versions.
+            self._restore_host_alias_if_legacy()
 
             # Verify A2DP sink profile support
             if not self._verify_a2dp_sink_support():
@@ -407,6 +412,46 @@ class BluetoothSink:
             )
         except Exception as e:
             logger.error("Error setting discoverable: %s", e, exc_info=True)
+
+    def _restore_host_alias_if_legacy(self) -> None:
+        """Restore host adapter alias if a legacy app alias is still persisted."""
+        try:
+            if not self.bt_manager.adapter_path:
+                return
+
+            if not SecurityValidator.validate_dbus_path(self.bt_manager.adapter_path):
+                logger.error("Security: Invalid adapter path")
+                return
+
+            props = dbus.Interface(
+                self.bt_manager.bus.get_object(
+                    self.bt_manager.BLUEZ_SERVICE, self.bt_manager.adapter_path
+                ),
+                self.bt_manager.PROPERTIES_INTERFACE,
+            )
+
+            current_alias = str(
+                props.Get(self.bt_manager.ADAPTER_INTERFACE, "Alias") or ""
+            ).strip()
+            if current_alias not in self.LEGACY_ADAPTER_ALIASES:
+                return
+
+            host_alias = socket.gethostname().strip()
+            if not host_alias:
+                return
+            if current_alias == host_alias:
+                return
+
+            props.Set(
+                self.bt_manager.ADAPTER_INTERFACE, "Alias", dbus.String(host_alias)
+            )
+            logger.info(
+                "Reset Bluetooth adapter alias from legacy '%s' to host '%s'",
+                current_alias,
+                host_alias,
+            )
+        except Exception as e:
+            logger.debug("Could not restore host Bluetooth alias: %s", e, exc_info=True)
 
     def _set_pairable(self, pairable: bool, timeout: int = 0):
         """Set the Bluetooth adapter's pairability."""
