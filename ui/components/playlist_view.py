@@ -54,6 +54,8 @@ class PlaylistView(Gtk.Box):
         )
         self._chunked_update_id: Optional[int] = None  # Track chunked update timeout ID
         self._selection_deferred: bool = False  # True if index changed during bulk update
+        self._blink_highlight_index: int = -1  # Row with active blink timer
+        self._pending_scroll_restore: Optional[float] = None
 
         # Header with action buttons
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -104,8 +106,10 @@ class PlaylistView(Gtk.Box):
 
         self.append(header_box)
 
-        # Scrolled window
-        scrolled = Gtk.ScrolledWindow()
+        # Scrolled window (stored as instance var so the popover can be
+        # parented here instead of the tree_view, avoiding CSS node errors)
+        self.scrolled = Gtk.ScrolledWindow()
+        scrolled = self.scrolled
         scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
 
         # List store: (index, title, artist, duration)
@@ -130,8 +134,10 @@ class PlaylistView(Gtk.Box):
         left_click_gesture.connect("pressed", self._on_left_click_pressed)
         self.tree_view.add_controller(left_click_gesture)
 
-        # Explicit long-press gesture for context menu (works without pointer movement).
+        # Long-press for touch context menu. Group with click/drag so gestures
+        # do not cancel each other; avoid CAPTURE (breaks TreeView hit-testing).
         long_press_gesture = Gtk.GestureLongPress()
+        long_press_gesture.set_touch_only(True)
         long_press_gesture.connect("pressed", self._on_long_press)
         self.tree_view.add_controller(long_press_gesture)
 
@@ -142,6 +148,8 @@ class PlaylistView(Gtk.Box):
         drag_gesture.connect("drag-update", self._on_drag_update)
         drag_gesture.connect("drag-end", self._on_drag_end)
         self.tree_view.add_controller(drag_gesture)
+        long_press_gesture.group(left_click_gesture)
+        long_press_gesture.group(drag_gesture)
 
         # Store selected row from left-click for use in drag-begin
         self._click_selected_index = -1
@@ -165,6 +173,7 @@ class PlaylistView(Gtk.Box):
         self.context_menu = None
         self.selected_index = -1
         self._menu_showing = False  # Flag to prevent multiple menus
+        self._menu_outside_ignore_until: int = 0
         self.set_vexpand(True)  # Expand to fill available vertical space
 
         # Blinking highlight for current playing track when another row is selected
@@ -397,8 +406,52 @@ class PlaylistView(Gtk.Box):
         GLib.idle_add(self._update_view)
 
     def _on_current_index_changed(self, data: Optional[dict]) -> None:
-        """Subscriber: current index changed → update selection and blinking (deferred to avoid GTK assertion)."""
-        GLib.idle_add(self._update_selection)
+        """Subscriber: current index changed → blink update; scroll once on track change."""
+        GLib.idle_add(self._on_current_index_changed_idle, data)
+
+    def _on_current_index_changed_idle(self, data: Optional[dict]) -> bool:
+        old_index = (data or {}).get("old_index", -1)
+        new_index = self.playlist_manager.get_current_index()
+        # Playlist rebuilds emit old_index=-1; only scroll on real track changes.
+        if old_index >= 0 and old_index != new_index:
+            self._scroll_to_playing_track_once()
+        else:
+            self._update_selection()
+        return False
+
+    def _save_scroll_position(self) -> float:
+        adj = self.scrolled.get_vadjustment()
+        return adj.get_value() if adj is not None else 0.0
+
+    def _restore_scroll_position(self, value: float) -> None:
+        adj = self.scrolled.get_vadjustment()
+        if adj is None:
+            return
+        page = adj.get_page_size()
+        upper = adj.get_upper()
+        adj.set_value(min(value, max(0.0, upper - page)))
+
+    def _scroll_to_playing_track_once(self) -> None:
+        """Scroll the playing row into view once; do not leave a cursor that GTK follows."""
+        tracks = self.playlist_manager.get_playlist()
+        current_index = self.playlist_manager.get_current_index()
+        if (
+            current_index < 0
+            or current_index >= len(tracks)
+            or current_index >= len(self.store)
+        ):
+            self._update_selection()
+            return
+        path = Gtk.TreePath.new_from_indices([current_index])
+        try:
+            self.tree_view.scroll_to_cell(path, None, True, 0.5, 0.0)
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
+        try:
+            self.tree_view.get_selection().unselect_all()
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
+        self._update_selection()
 
     def _on_shuffle_changed(self, data: Optional[dict]) -> None:
         """Handle shuffle changed event - cache for get_shuffle_enabled()."""
@@ -420,6 +473,8 @@ class PlaylistView(Gtk.Box):
         clear+append cycles never conflict with its layout engine.
         """
         tracks = self.playlist_manager.get_playlist()
+
+        self._pending_scroll_restore = self._save_scroll_position()
 
         # Always reset bulk update state before starting a new update
         if self._chunked_update_id is not None:
@@ -477,10 +532,17 @@ class PlaylistView(Gtk.Box):
             self.tree_view.set_model(self.store)
             GLib.idle_add(self._apply_selection_after_view_update)
 
-    def _apply_selection_after_view_update(self) -> bool:
-        """Idle callback: update selection and blink after store repopulate."""
+    def _finish_view_update(self) -> None:
+        """Restore scroll position after rebuild and refresh blink state."""
+        if self._pending_scroll_restore is not None:
+            self._restore_scroll_position(self._pending_scroll_restore)
+            self._pending_scroll_restore = None
         self._update_selection()
         self._update_button_states()
+
+    def _apply_selection_after_view_update(self) -> bool:
+        """Idle callback: restore scroll, update blink after store repopulate."""
+        self._finish_view_update()
         return False
 
     def _update_view_chunked(self, start_index: int, chunk_size: int = 100) -> bool:
@@ -504,11 +566,8 @@ class PlaylistView(Gtk.Box):
             self._bulk_update_in_progress = False
             self._chunked_update_id = None
             self._playback_lock = False
-            self._update_selection()
-            self._update_button_states()
+            self._finish_view_update()
             return False
-
-        # Process one chunk
         end_index = min(start_index + chunk_size, total_tracks)
         for i in range(start_index, end_index):
             track = tracks[i]
@@ -529,45 +588,48 @@ class PlaylistView(Gtk.Box):
         self._bulk_update_in_progress = False
         self._chunked_update_id = None
         self._playback_lock = False
-        self._update_selection()
-        self._update_button_states()
+        self._finish_view_update()
         return False
 
     def _update_selection(self):
-        """Update selection and blinking for current track. Event-driven (CURRENT_INDEX_CHANGED).
-        Current playing track always blinks; selection shows current track. All tree ops wrapped to avoid GTK assertion.
-        """
+        """Update blinking for the current track without scrolling or moving the cursor."""
         if self._bulk_update_in_progress:
             self._selection_deferred = True  # Apply once bulk update finishes
             return
         self._selection_deferred = False
         tracks = self.playlist_manager.get_playlist()
         current_index = self.playlist_manager.get_current_index()
-        selection = self.tree_view.get_selection()
 
-        # Get actual store row count - may differ from playlist during chunked updates
         store_row_count = len(self.store)
 
-        # Check both playlist length AND store row count to avoid GTK assertion
-        # (store may have fewer rows during chunked updates)
         if (
             current_index >= 0
             and current_index < len(tracks)
             and current_index < store_row_count
         ):
-            path = Gtk.TreePath.new_from_indices([current_index])
-            self._start_blinking_highlight(path)
-            try:
-                selection.select_path(path)
-                self.tree_view.set_cursor(path, None, False)
-            except (ValueError, AttributeError, RuntimeError, AssertionError):
-                pass
+            if current_index != self._blink_highlight_index:
+                self._blink_highlight_index = current_index
+                path = Gtk.TreePath.new_from_indices([current_index])
+                self._start_blinking_highlight(path)
         else:
+            self._blink_highlight_index = -1
             self._stop_blinking_highlight()
             try:
-                selection.unselect_all()
+                self.tree_view.get_selection().unselect_all()
             except (ValueError, AttributeError, RuntimeError, AssertionError):
                 pass
+
+    def _redraw_row(self, index: int) -> None:
+        """Redraw one playlist row without scrolling the whole tree view."""
+        if index < 0 or index >= len(self.store):
+            return
+        try:
+            path = Gtk.TreePath.new_from_indices([index])
+            tree_iter = self.store.get_iter(path)
+            if tree_iter:
+                self.store.row_changed(path, tree_iter)
+        except (ValueError, AttributeError, RuntimeError, AssertionError):
+            pass
 
     def _setup_blinking_highlight(self):
         """Setup blinking highlight for current playing track (event-driven via CURRENT_INDEX_CHANGED)."""
@@ -615,33 +677,32 @@ class PlaylistView(Gtk.Box):
 
     def _start_blinking_highlight(self, path: Gtk.TreePath):
         """Start blinking highlight on the given path."""
-        # Stop any existing blinking
         self._stop_blinking_highlight()
 
-        # Store the path (will be updated in _blink_toggle if index changes)
         self._blink_path = path
         self._blink_state = True
 
-        try:
-            self.tree_view.queue_draw()
-        except (ValueError, AttributeError, RuntimeError, AssertionError):
-            pass
+        indices = path.get_indices()
+        if indices:
+            self._redraw_row(indices[0])
         self._blink_timeout_id = GLib.timeout_add(1000, self._blink_toggle)
 
     def _stop_blinking_highlight(self):
         """Stop blinking highlight."""
+        old_index = -1
+        if self._blink_path is not None:
+            indices = self._blink_path.get_indices()
+            if indices:
+                old_index = indices[0]
+
         if self._blink_timeout_id:
             GLib.source_remove(self._blink_timeout_id)
             self._blink_timeout_id = None
 
-        if self._blink_path:
-            self._blink_path = None
-
+        self._blink_path = None
         self._blink_state = False
-        try:
-            self.tree_view.queue_draw()
-        except (ValueError, AttributeError, RuntimeError, AssertionError):
-            pass
+        if old_index >= 0:
+            self._redraw_row(old_index)
 
     def _blink_toggle(self):
         """Toggle blink state for current playing track (called by timeout)."""
@@ -650,10 +711,7 @@ class PlaylistView(Gtk.Box):
         if current_index >= 0 and 0 <= current_index < len(playlist):
             self._blink_path = Gtk.TreePath.new_from_indices([current_index])
             self._blink_state = not self._blink_state
-            try:
-                self.tree_view.queue_draw()
-            except (ValueError, AttributeError, RuntimeError, AssertionError):
-                pass
+            self._redraw_row(current_index)
             return True
         self._stop_blinking_highlight()
         return False
@@ -707,10 +765,28 @@ class PlaylistView(Gtk.Box):
         window.add_controller(leg)
         self._menu_outside_legacy = leg
 
+    def _path_at_coords(self, x: float, y: float) -> Optional[Gtk.TreePath]:
+        """Resolve tree row at gesture coordinates (widget or bin-window space)."""
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        if path_info:
+            return path_info[0]
+        try:
+            bin_x, bin_y = self.tree_view.convert_widget_to_bin_window_coords(
+                int(x), int(y)
+            )
+            path_info = self.tree_view.get_path_at_pos(bin_x, bin_y)
+            if path_info:
+                return path_info[0]
+        except (ValueError, AttributeError, TypeError):
+            pass
+        return None
+
     def _on_toplevel_event_while_context_menu(
         self, controller: Gtk.EventControllerLegacy, event: Gdk.Event
     ) -> bool:
         if not self._menu_showing or self.context_menu is None:
+            return False
+        if GLib.get_monotonic_time() < self._menu_outside_ignore_until:
             return False
         win = self.window
         if win is None:
@@ -1002,10 +1078,9 @@ class PlaylistView(Gtk.Box):
 
     def _get_playlist_index_at_position(self, x: float, y: float) -> int:
         """Return playlist row index at widget coordinates, or -1 if none."""
-        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-        if not path_info:
+        path = self._path_at_coords(x, y)
+        if not path:
             return -1
-        path = path_info[0]
         indices = path.get_indices()
         if not indices:
             return -1
@@ -1014,9 +1089,9 @@ class PlaylistView(Gtk.Box):
     def _show_context_menu_at_position(self, x, y):
         """Show context menu at the given position (right-click or long-press)."""
         self.selected_index = self._get_playlist_index_at_position(x, y)
-        if self.selected_index >= 0:
-            path = Gtk.TreePath.new_from_indices([self.selected_index])
-            self.tree_view.set_cursor(path, None, False)
+        # Do NOT call set_cursor here: modifying TreeView selection state
+        # inside a gesture callback triggers gtk_css_node_insert_after errors.
+        # The cursor is updated in _do_show_context_menu after the event loop.
         self._show_context_menu(x, y)
 
     def _show_context_menu(self, x: float, y: float):
@@ -1038,16 +1113,32 @@ class PlaylistView(Gtk.Box):
         self._menu_showing = True
         self._context_menu_x = x
         self._context_menu_y = y
-        GLib.idle_add(self._do_show_context_menu)
+        # timeout_add(0) forces a new main-loop iteration before the callback
+        # runs, ensuring all CSS :active state changes from the gesture event
+        # have been fully committed before we parent and show the popover.
+        GLib.timeout_add(0, self._do_show_context_menu)
 
     def _do_show_context_menu(self):
-        """Idle callback: create and show context menu (avoids gtk_css_node_insert_after assertion)."""
+        """Timeout callback: create and show context menu (deferred to avoid gtk_css_node_insert_after)."""
         if not self._menu_showing or self.context_menu is not None:
             return False
         x = getattr(self, "_context_menu_x", 0)
         y = getattr(self, "_context_menu_y", 0)
+
+        # Update row cursor now that we're outside the gesture callback.
+        if self.selected_index >= 0:
+            try:
+                path = Gtk.TreePath.new_from_indices([self.selected_index])
+                self.tree_view.set_cursor(path, None, False)
+            except (ValueError, AttributeError, RuntimeError):
+                pass
+
         self.context_menu = Gtk.Popover()
-        self.context_menu.set_autohide(True)
+        # autohide=False: outside-close is handled by the CAPTURE
+        # EventControllerLegacy in _install_context_menu_outside_close.
+        # GTK4 autohide can dismiss the popover while a touch sequence that
+        # triggered the long-press is still active.
+        self.context_menu.set_autohide(False)
         self.context_menu.set_has_arrow(True)
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         menu_box.set_margin_start(10)
@@ -1107,8 +1198,10 @@ class PlaylistView(Gtk.Box):
         # Set child before parent
         self.context_menu.set_child(menu_box)
 
-        # Set parent after child is set
-        self.context_menu.set_parent(self.tree_view)
+        # Parent to the scrolled window, not the tree_view directly.
+        # Parenting to a widget inside a TreeView while it has active CSS
+        # pseudo-states triggers gtk_css_node_insert_after assertion failures.
+        self.context_menu.set_parent(self.scrolled)
 
         # Connect to closed signal for cleanup
         self.context_menu.connect("closed", self._on_popover_closed)
@@ -1122,6 +1215,7 @@ class PlaylistView(Gtk.Box):
         self.context_menu.set_pointing_to(rect)
         self.context_menu.popup()
         self.context_menu.set_can_focus(True)
+        self._menu_outside_ignore_until = GLib.get_monotonic_time() + 300_000
         return False  # one-shot idle
 
     def _on_popover_closed(self, popover):

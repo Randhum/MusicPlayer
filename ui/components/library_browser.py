@@ -100,16 +100,23 @@ class LibraryBrowser(Gtk.Box):
         right_click_gesture.connect("pressed", self._on_right_click)
         self.tree_view.add_controller(right_click_gesture)
 
-        # Add long-press gesture for context menu (touch and mouse)
+        # Long-press for touch context menu. Group with click so neither cancels
+        # the other; do not use CAPTURE phase (blocks TreeView row hit-testing).
         long_press_gesture = Gtk.GestureLongPress()
-        long_press_gesture.set_delay_factor(1.0)
+        long_press_gesture.set_touch_only(True)
         long_press_gesture.connect("pressed", self._on_long_press)
         self.tree_view.add_controller(long_press_gesture)
+        long_press_gesture.group(click_gesture)
 
         # Context menu
         self.context_menu = None
         self.selected_path = None
-        self._menu_showing = False  # Flag to prevent multiple menus
+        self._menu_showing = False
+        self._pending_menu_type: Optional[str] = None
+        self._pending_menu_data = None
+        self._pending_menu_x: float = 0.0
+        self._pending_menu_y: float = 0.0
+        self._menu_outside_ignore_until: int = 0
 
         # Music root path (set when populating) for fallback folder path from tree
         self._music_root: Optional[Path] = None
@@ -438,10 +445,28 @@ class LibraryBrowser(Gtk.Box):
         window.add_controller(leg)
         self._menu_outside_legacy = leg
 
+    def _path_at_coords(self, x: float, y: float) -> Optional[Gtk.TreePath]:
+        """Resolve tree row at gesture coordinates (widget or bin-window space)."""
+        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
+        if path_info:
+            return path_info[0]
+        try:
+            bin_x, bin_y = self.tree_view.convert_widget_to_bin_window_coords(
+                int(x), int(y)
+            )
+            path_info = self.tree_view.get_path_at_pos(bin_x, bin_y)
+            if path_info:
+                return path_info[0]
+        except (ValueError, AttributeError, TypeError):
+            pass
+        return None
+
     def _on_toplevel_event_while_context_menu(
         self, controller: Gtk.EventControllerLegacy, event: Gdk.Event
     ) -> bool:
         if not self._menu_showing or self.context_menu is None:
+            return False
+        if GLib.get_monotonic_time() < self._menu_outside_ignore_until:
             return False
         win = self._window
         if win is None:
@@ -472,67 +497,76 @@ class LibraryBrowser(Gtk.Box):
     def _show_context_menu_at_position(self, x, y):
         """Show context menu for the row at the given position.
 
-        Uses the tree view's model (self.store): row at (x,y) via get_path_at_pos,
+        Uses the tree view's model (self.store): row at (x,y) via hit testing,
         else current selection. Stores selected_path and row data for the menu.
         """
-        path_info = self.tree_view.get_path_at_pos(int(x), int(y))
-        if path_info:
-            path = path_info[0]
-            tree_iter = self.store.get_iter(path)
+        path = self._path_at_coords(x, y)
+        tree_iter = self.store.get_iter(path) if path else None
+        if tree_iter:
+            self.selected_path = path
+            try:
+                self.tree_view.get_selection().select_path(path)
+            except (ValueError, AttributeError, RuntimeError, AssertionError):
+                pass
         else:
-            tree_iter = None
-        if not tree_iter:
             selection = self.tree_view.get_selection()
             _, tree_iter = selection.get_selected()
-        if not tree_iter:
-            return
-
-        self.selected_path = self.store.get_path(tree_iter)
+            if not tree_iter:
+                return
+            self.selected_path = self.store.get_path(tree_iter)
         name, item_type, data = self.store.get(tree_iter, 0, 1, 2)
 
         self._show_context_menu(item_type, data, x, y)
 
     def _show_context_menu(self, item_type: str, data, x: float, y: float):
-        """Show context menu for the selected item."""
-        # Prevent multiple menus
+        """Schedule deferred context menu display (avoids CSS node assertion)."""
         if self._menu_showing:
             return
-
-        # Properly close and remove old menu if exists
         if self.context_menu:
             try:
-                # Disconnect signal first to prevent recursive cleanup
-                try:
-                    self.context_menu.disconnect_by_func(self._on_popover_closed)
-                except (TypeError, AttributeError):
-                    # Signal not connected or widget destroyed
-                    pass
-                # Close the popover
+                self.context_menu.disconnect_by_func(self._on_popover_closed)
+            except (TypeError, AttributeError):
+                pass
+            try:
                 self.context_menu.popdown()
             except (AttributeError, RuntimeError):
-                # Widget may have been destroyed
                 pass
-            # Unparent and destroy the old popover completely
             try:
-                parent = self.context_menu.get_parent()
-                if parent is not None:
+                if self.context_menu.get_parent() is not None:
                     self.context_menu.unparent()
             except (AttributeError, RuntimeError):
-                # Widget may have been destroyed or already unparented
                 pass
-            # Clear reference - this ensures we create a fresh popover
             self.context_menu = None
 
-        # Set flag to prevent multiple menus
         self._menu_showing = True
+        self._pending_menu_type = item_type
+        self._pending_menu_data = data
+        self._pending_menu_x = x
+        self._pending_menu_y = y
+        # timeout_add(0) defers to the next main-loop iteration, ensuring GTK
+        # has fully processed the gesture event and cleared CSS :active states
+        # before we parent and show the popover.
+        GLib.timeout_add(0, self._do_show_context_menu)
 
-        # Create popover
+    def _do_show_context_menu(self) -> bool:
+        """Idle callback: build and show the context menu popover."""
+        if not self._menu_showing or self.context_menu is not None:
+            return False
+
+        item_type = self._pending_menu_type
+        data = self._pending_menu_data
+        x = self._pending_menu_x
+        y = self._pending_menu_y
+
         self.context_menu = Gtk.Popover()
-        self.context_menu.set_autohide(True)
-        # Set child first, then parent
+        # autohide=False: outside-close is handled by the CAPTURE
+        # EventControllerLegacy in _install_context_menu_outside_close, which
+        # is touch-safe.  GTK4 autohide can dismiss the popover while an
+        # active touch sequence (the one that triggered the long-press) is
+        # still in progress.
+        self.context_menu.set_autohide(False)
         self.context_menu.set_has_arrow(True)
 
-        # Create menu box
         menu_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         menu_box.set_margin_start(10)
         menu_box.set_margin_end(10)
@@ -540,28 +574,25 @@ class LibraryBrowser(Gtk.Box):
         menu_box.set_margin_bottom(10)
 
         if item_type == "track" and isinstance(data, TrackMetadata):
-            # Track menu
             play_item = Gtk.Button(label="Play Now")
             play_item.add_css_class("flat")
-            play_item.set_size_request(150, 40)  # Larger for touch
+            play_item.set_size_request(150, 40)
             play_item.connect("clicked", lambda w: self._on_menu_play_track(data))
             menu_box.append(play_item)
 
             add_item = Gtk.Button(label="Add Track to Playlist")
             add_item.add_css_class("flat")
-            add_item.set_size_request(150, 40)  # Larger for touch
+            add_item.set_size_request(150, 40)
             add_item.connect("clicked", lambda w: self._on_menu_add_track(data))
             menu_box.append(add_item)
 
         elif item_type == "folder":
-            # Folder menu - use folder path for MOC native append
             folder_path = data if isinstance(data, str) else None
 
             if folder_path:
-                # Use folder path directly (MOC will handle recursively)
                 play_item = Gtk.Button(label="Play Folder")
                 play_item.add_css_class("flat")
-                play_item.set_size_request(150, 40)  # Larger for touch
+                play_item.set_size_request(150, 40)
                 play_item.connect(
                     "clicked",
                     lambda w, path=folder_path: self._on_menu_play_folder(path),
@@ -570,14 +601,13 @@ class LibraryBrowser(Gtk.Box):
 
                 add_item = Gtk.Button(label="Add Folder to Playlist")
                 add_item.add_css_class("flat")
-                add_item.set_size_request(150, 40)  # Larger for touch
+                add_item.set_size_request(150, 40)
                 add_item.connect(
                     "clicked",
                     lambda w, path=folder_path: self._on_menu_add_folder(path),
                 )
                 menu_box.append(add_item)
             else:
-                # Fallback: folder path not in data; get path from tree so MOC can append by path
                 folder_iter = (
                     self.store.get_iter(self.selected_path)
                     if self.selected_path
@@ -595,7 +625,7 @@ class LibraryBrowser(Gtk.Box):
                 if tracks:
                     play_item = Gtk.Button(label="Play Folder")
                     play_item.add_css_class("flat")
-                    play_item.set_size_request(150, 40)  # Larger for touch
+                    play_item.set_size_request(150, 40)
                     play_item.connect(
                         "clicked", lambda w: self._on_menu_play_album(tracks)
                     )
@@ -603,7 +633,7 @@ class LibraryBrowser(Gtk.Box):
 
                     add_item = Gtk.Button(label="Add Folder to Playlist")
                     add_item.add_css_class("flat")
-                    add_item.set_size_request(150, 40)  # Larger for touch
+                    add_item.set_size_request(150, 40)
                     if folder_path_from_tree:
                         add_item.connect(
                             "clicked",
@@ -617,25 +647,18 @@ class LibraryBrowser(Gtk.Box):
                         )
                     menu_box.append(add_item)
 
-        # Set child first (must be done before setting parent)
         self.context_menu.set_child(menu_box)
 
-        # Set parent - must be done after child is set
-        # In GTK4, Popover should be parented to the scrolled window containing the tree view
-        # This avoids CSS node conflicts when the tree view is inside a scrolled window
         try:
             self.context_menu.set_parent(self.scrolled)
         except (AttributeError, RuntimeError) as e:
-            # If setting parent fails, we can't show the menu
             logger.warning("Failed to set popover parent: %s", e)
             self._menu_showing = False
             self.context_menu = None
-            return
+            return False
 
-        # Connect to closed signal for cleanup (after parent is set)
         self.context_menu.connect("closed", self._on_popover_closed)
 
-        # Position and show menu
         rect = Gdk.Rectangle()
         rect.x = int(x)
         rect.y = int(y)
@@ -643,6 +666,9 @@ class LibraryBrowser(Gtk.Box):
         rect.height = 1
         self.context_menu.set_pointing_to(rect)
         self.context_menu.popup()
+        # Ignore outside-close briefly so the opening touch sequence cannot dismiss.
+        self._menu_outside_ignore_until = GLib.get_monotonic_time() + 300_000
+        return False
 
     def _on_popover_closed(self, popover):
         """Handle popover closed signal for cleanup."""
